@@ -1,1 +1,1 @@
-project flock
+project flock by bird labs
