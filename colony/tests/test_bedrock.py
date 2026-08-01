@@ -136,6 +136,44 @@ def test_a_throttled_bedrock_call_falls_back_instead_of_stalling_a_robot(monkeyp
     assert len(adapter.embed("victim under rubble")) == EMBED_DIMS
 
 
+@pytest.mark.parametrize(
+    "code", ["AccessDeniedException", "ValidationException", "ResourceNotFoundException"]
+)
+def test_a_misconfiguration_surfaces_instead_of_falling_back(monkeypatch, code):
+    """Bedrock raises ClientError for a broken IAM policy, a revoked model-access
+    grant and a typo'd modelId too. Swallowing those would leave the fleet
+    running rule-based planning forever while looking healthy — and we would
+    demo an AWS integration that never once called AWS."""
+    pytest.importorskip("boto3", reason="AWS extra not installed")
+    from botocore.exceptions import ClientError
+
+    class Broken:
+        def invoke_model(self, **kwargs):
+            raise ClientError({"Error": {"Code": code, "Message": "nope"}}, "InvokeModel")
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: Broken())
+    adapter = BedrockAdapter(mode=LIVE)
+
+    with pytest.raises(ClientError):
+        adapter.plan("lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}])
+    with pytest.raises(ClientError):
+        adapter.embed("victim under rubble")
+
+
+def test_a_transport_failure_still_falls_back(monkeypatch):
+    """Connection timeouts are weather, not misconfiguration."""
+    pytest.importorskip("boto3", reason="AWS extra not installed")
+    from botocore.exceptions import ConnectTimeoutError
+
+    class Timeout:
+        def invoke_model(self, **kwargs):
+            raise ConnectTimeoutError(endpoint_url="https://bedrock-runtime.amazonaws.com")
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: Timeout())
+    adapter = BedrockAdapter(mode=LIVE)
+    assert adapter.plan("scout", "nothing", []).action == "explore"
+
+
 def test_plan_always_carries_a_rationale():
     """Rationales are surfaced as thought bubbles (§3.6) — an empty one is a
     blank bubble in the demo video."""

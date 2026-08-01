@@ -35,13 +35,9 @@ EMBED_DIMS = 512  # matches observations.embedding VECTOR(512) in schema/v0.sql
 LIVE, RECORD, REPLAY = "live", "record", "replay"
 
 
-def _transient_errors() -> tuple[type[BaseException], ...]:
-    """Bedrock failures a robot should ride out by falling back, not by dying.
-
-    Throttling, transient service errors and transport timeouts all arrive as
-    botocore exceptions; without boto3 installed there is nothing to catch,
-    since the live path is unreachable anyway.
-    """
+def _boto_errors() -> tuple[type[BaseException], ...]:
+    """Exception types the live path can raise; empty without boto3, in which
+    case the live path is unreachable anyway."""
     try:
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -50,7 +46,36 @@ def _transient_errors() -> tuple[type[BaseException], ...]:
         return ()
 
 
-_TRANSIENT_ERRORS = _transient_errors()
+_BOTO_ERRORS = _boto_errors()
+
+# Service-side failures a robot should ride out. Everything else is a bug in our
+# configuration, not weather.
+_TRANSIENT_CODES = frozenset({
+    "ThrottlingException",
+    "ServiceQuotaExceededException",
+    "InternalServerException",
+    "ServiceUnavailableException",
+    "ModelTimeoutException",
+    "ModelNotReadyException",
+})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Whether to fall back rather than raise.
+
+    `ClientError` is also what Bedrock raises for AccessDeniedException,
+    ValidationException and ResourceNotFoundException — a broken IAM policy, a
+    revoked model-access grant, a typo'd modelId. Treating those as transient
+    would mean the fleet quietly runs rule-based planning forever while looking
+    perfectly healthy, and we would demo an AWS integration that never once
+    called AWS. Those must surface. Transport-level BotoCoreError (timeouts,
+    connection failures) is genuinely transient.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") in _TRANSIENT_CODES
+    return isinstance(exc, BotoCoreError)
 
 
 @dataclass
@@ -119,7 +144,9 @@ class BedrockAdapter:
         })
         try:
             response = self._client.invoke_model(modelId=EMBED_MODEL, body=body)
-        except _TRANSIENT_ERRORS:
+        except _BOTO_ERRORS as exc:
+            if not _is_transient(exc):
+                raise
             # A throttled embedding must not drop the observation entirely; the
             # reconcile gate degrades rather than the scout losing the sighting.
             return _offline_embedding(text)
@@ -156,7 +183,9 @@ class BedrockAdapter:
         })
         try:
             response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
-        except _TRANSIENT_ERRORS:
+        except _BOTO_ERRORS as exc:
+            if not _is_transient(exc):
+                raise
             # Throttling or a Bedrock hiccup must not stall a robot mid-mission;
             # §5.1 lane 2 requires a rule-based fallback path, and this is it.
             return _offline_plan(tasks)

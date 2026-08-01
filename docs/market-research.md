@@ -16,12 +16,14 @@ Two figures worth adding to the pitch, both from the same MarketsandMarkets rele
 
 - **AMRs are the fastest-growing segment at 20.5% CAGR**, outpacing the 18.7% overall —
   the robot population Colony coordinates is growing faster than the software category.
-- **Multi-vendor fleet platforms grow fastest of all, at 20.9% CAGR.** This is the single
-  most useful number we found: the fastest-growing slice of the market is the
-  heterogeneous-fleet case, which is exactly what Colony is built for. Say that we are
-  aligned with the fastest-growing segment — not that single-vendor fleet managers
-  "structurally cannot" serve it, which is a claim about competitor architecture the
-  market data does not support.
+- **Multi-vendor fleet platforms are the fastest-growing *platform type*, at 20.9% CAGR.**
+  This is the single most useful number we found — the heterogeneous-fleet case is exactly
+  what Colony is built for. Two precision notes, because the source slices the market two
+  different ways: 20.9% is the highest CAGR **among platform types**, while the 20.5% AMR
+  figure is the highest **among fleet types**; don't merge them into "fastest-growing of
+  all." And say we are aligned with the fastest-growing platform type — not that
+  single-vendor fleet managers "structurally cannot" serve it, which is a claim about
+  competitor architecture the market data does not support.
 
 Caveat to keep us honest: SAR robotics estimates vary widely between analysts *and* use
 different base years — Mordor puts 2025 at $35.29B, while other firms report figures in the
@@ -72,9 +74,11 @@ DARPA's designated **Human Supervisor** — to interface with the robots on the 
 only that person could use wireless communications with the systems during a run. The
 published lessons-learned work is explicitly about reducing operator workload:
 sliding-mode autonomy, adaptive interfaces, context-aware action suggestions. The
-constraint was structural, not incidental. (Sourced from the Final Event rules as reported
-by IEEE Spectrum and the DARPA challenge page — cite those rather than the CERBERUS paper,
-which describes the consequences rather than the rule.)
+constraint was structural, not incidental. (Attribute the rule itself to **IEEE Spectrum's
+reporting on the Final Event** — that is the source below that actually states it. DARPA's
+challenge page describes the competition but does not spell out the supervisor rule, and
+the CERBERUS paper describes the consequences rather than the rule. If we want a primary
+citation, someone should pull the Final Event rules PDF before submission.)
 
 **Robot attrition: softer than we state it.** The literature emphasizes resilience,
 modularity and degraded-condition autonomy (comms-denied, GNSS-denied, perceptually
@@ -109,8 +113,8 @@ toward multi-agent task management. Worth re-checking before submission on Aug 1
 - [Search and Rescue Robots Market Size — Mordor Intelligence](https://www.mordorintelligence.com/industry-reports/search-and-rescue-robots-market)
 - [SOTA for Multi Robot Cooperation in RMF — Open Robotics Discourse](https://discourse.openrobotics.org/t/sota-for-multi-robot-cooperation-in-rmf/45075)
 - [Tasks in RMF — Programming Multiple Robots with ROS 2](https://osrf.github.io/ros2multirobotbook/task.html)
-- [DARPA Subterranean Challenge — official challenge page](https://www.darpa.mil/research/challenges/subterranean)
-- [The DARPA SubT Finals human supervisor role — IEEE Spectrum](https://spectrum.ieee.org/darpa-subterranean-challenge-operator)
+- [The DARPA SubT Finals human supervisor role — IEEE Spectrum](https://spectrum.ieee.org/darpa-subterranean-challenge-operator) *(states the one-supervisor and wireless-comms rule)*
+- [DARPA Subterranean Challenge — official challenge page](https://www.darpa.mil/research/challenges/subterranean) *(challenge background only; does not state the supervisor rule)*
 - [Modular, Resilient, and Scalable System Design Approaches — Lessons learned after DARPA SubT (arXiv:2404.17759)](https://arxiv.org/abs/2404.17759)
 - [Into the Robotic Depths: Analysis and Insights from the DARPA Subterranean Challenge — Annual Reviews](https://www.annualreviews.org/content/journals/10.1146/annurev-control-062722-100728)
 - [Team CERBERUS Wins the DARPA Subterranean Challenge: Technical Overview and Lessons Learned](https://intelligent-earth.ox.ac.uk/publication/2039031/ora-hyrax)

@@ -213,6 +213,46 @@ def test_victim_deadline_outside_the_spec_range_is_rejected():
         parse_map(data)
 
 
+@pytest.mark.parametrize("bad", [None, "1200", 12.5, True])
+def test_non_integer_mission_length_gives_a_map_error_not_a_crash(bad):
+    """The validator exists so a bad map fails with a readable message. A JSON
+    string or null here used to raise TypeError out of a comparison instead."""
+    data = _minimal()
+    data["mission_length_ticks"] = bad
+    with pytest.raises(MapError, match="mission_length_ticks"):
+        parse_map(data)
+
+
+@pytest.mark.parametrize("bad", [None, "aftershock", 12.5])
+def test_non_integer_escalation_tick_is_rejected(bad):
+    data = _minimal()
+    data["escalations"] = [{"tick": bad, "kind": "aftershock"}]
+    with pytest.raises(MapError, match="tick"):
+        parse_map(data)
+
+
+@pytest.mark.parametrize("field,bad", [("seed", "abc"), ("name", 7), ("description", [])])
+def test_bad_metadata_types_are_rejected(field, bad):
+    data = _minimal()
+    data[field] = bad
+    with pytest.raises(MapError, match=field):
+        parse_map(data)
+
+
+def test_loaded_map_does_not_alias_the_source_data():
+    """The parsed map used to hold references into the caller's dict, so
+    mutating either silently changed the other."""
+    data = _minimal()
+    data["victims"] = [{"x": 0, "y": 0, "vitals_deadline": 500}]
+    world = parse_map(data)
+
+    data["victims"][0]["x"] = 99
+    assert world.victims[0]["x"] == 0
+
+    world.zones.append({"name": "injected"})
+    assert data["zones"] == []
+
+
 def test_unknown_spawn_role_is_rejected():
     data = _minimal()
     data["spawn_points"] = {"tank": [{"x": 0, "y": 0}]}

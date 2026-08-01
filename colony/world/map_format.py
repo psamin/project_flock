@@ -8,6 +8,7 @@ readable message instead of halfway through a demo.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -125,13 +126,24 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
         if state not in VICTIM_STATES:
             raise MapError(f"victim state {state!r} is not one of {sorted(VICTIM_STATES)}")
 
-    mission_ticks = data.get("mission_length_ticks", DEFAULT_MISSION_TICKS)
-    if mission_ticks <= 0:
-        raise MapError(f"mission_length_ticks must be positive, got {mission_ticks}")
+    # Type-check before comparing: a JSON string or null here would raise
+    # TypeError out of the validator, which defeats the point of having one —
+    # the caller gets a stack trace instead of a message naming the bad field.
+    mission_ticks = _positive_int(
+        data.get("mission_length_ticks", DEFAULT_MISSION_TICKS), "mission_length_ticks"
+    )
+    seed = data.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise MapError(f"seed must be an integer or absent, got {seed!r}")
+    for key in ("name", "description"):
+        if not isinstance(data.get(key, ""), str):
+            raise MapError(f"{key} must be a string, got {data[key]!r}")
 
     for esc in data["escalations"]:
         if "tick" not in esc or "kind" not in esc:
             raise MapError("every escalation needs a 'tick' and a 'kind'")
+        if isinstance(esc["tick"], bool) or not isinstance(esc["tick"], int):
+            raise MapError(f"escalation tick must be an integer, got {esc['tick']!r}")
         if esc["tick"] < 0:
             raise MapError(f"escalation tick must be non-negative, got {esc['tick']}")
         # An escalation past the end of the mission never fires. Scheduling the
@@ -143,14 +155,29 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
                 f" at or past the mission end ({mission_ticks}) — it would never fire"
             )
 
+    # Deep-copied rather than aliased: _grid already copies the two layers, and
+    # leaving the rest pointing into the caller's dict means a mutation on
+    # either side silently changes the other. Not made deeply immutable — the
+    # tick server will want plain dicts to work with, and frozen records
+    # everywhere would be ceremony for a hazard this copy already removes.
     return WorldMap(
         width=width, height=height, tile_size=data["tile_size"],
-        ground=ground, objects=objects, zones=data["zones"],
-        spawn_points=data["spawn_points"], victims=data["victims"],
-        escalations=data["escalations"],
+        ground=ground, objects=objects,
+        zones=deepcopy(data["zones"]),
+        spawn_points=deepcopy(data["spawn_points"]),
+        victims=deepcopy(data["victims"]),
+        escalations=deepcopy(data["escalations"]),
         name=data.get("name", ""), description=data.get("description", ""),
-        seed=data.get("seed"), mission_length_ticks=mission_ticks,
+        seed=seed, mission_length_ticks=mission_ticks,
     )
+
+
+def _positive_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MapError(f"{field} must be an integer, got {value!r}")
+    if value <= 0:
+        raise MapError(f"{field} must be positive, got {value}")
+    return value
 
 
 def _grid(rows: Any, width: int, height: int, name: str, allowed: set[str]) -> list[list[str]]:
