@@ -158,6 +158,19 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 - **Demo reliability:** seeded RNG for deterministic recording runs; the public demo auto-restarts missions; every video beat has a pre-recorded backup take.
 - **Security posture (judge-visible):** per-robot service credentials; commander MCP access read-only; least-privilege by construction.
 
+### 3.6 Visual direction — the Simile/Smallville look
+
+North star: the aesthetic of Stanford's "Smallville" generative-agents town — the research lineage behind Simile — applied to a disaster block. Cozy top-down pixel world, characters you instantly root for, readable at a glance in a 3-minute video.
+
+- **World:** 32px pixel-art tiles, top-down. Warm, slightly desaturated base palette with a small set of accent hues reserved for meaning: hazard orange-red, victim amber, role colors. Soft and cohesive over high-saturation — the map should feel like one place, not a rainbow.
+- **Robots:** chunky, readable silhouettes per role — hovering scout drone with a soft shadow, tracked lifter, wheeled medic cart. Name tag + small role icon above each.
+- **Thought bubbles (the Smallville signature):** every robot shows a live status bubble — 🔍 "scanning sector C", 🧱 "clearing debris", 📦 "kit en route" — and clicking a robot expands its latest Bedrock plan rationale. This is §4.3's "rationale surfacing" given its visual form; it's also how judges *see* agents thinking.
+- **Coordination made visible:** an event ticker ("S1 found victim → task created → L1 claimed") plus brief path-ghost lines when a task is claimed. The shared map filling in through fog of war stays the hero visual.
+- **Life details, cheap:** 2–4 frame walk/hover cycles, 3-frame fire loop, gentle pulse on located victims, screen shake on the aftershock. No lighting engine, no particles beyond fire.
+- **Assets:** CC0 packs only (Kenney.nl and CC0 pixel tilesets on itch.io), or hand-drawn. Do not lift art from the Smallville repo, The Sims, or any licensed pack — the submission video must contain no third-party copyrighted material (§6.1). Lane 5 keeps an `ASSETS.md` crediting every source.
+
+Style test for every screen: would it look at home in a generative-agents demo video? If it reads as "engineering debug view," it fails.
+
 ---
 
 ## 4. Architecture
@@ -301,6 +314,20 @@ CREATE TABLE mission_memories ( -- P1 cross-mission learning
 - **Coverage@500** = explored reachable tiles / all reachable tiles at tick 500.
 - **Coordination gain** = (baseline median time − coordinated median time) / baseline. One number the video ends on.
 
+### 4.8 Sim engine build spec (lane 3's blueprint)
+
+How to actually build the Smallville-style engine described in §3.6 — server-authoritative, client-pretty:
+
+- **Split:** the server simulates at 4 Hz and owns truth; the client renders at 60 fps. The client **interpolates** — tween each entity from its previous tick position to its new one over the 250ms window (simple lerp is fine). This one technique is what makes a 4 Hz sim look like The Sims instead of a chess clock. Never render raw tick jumps.
+- **World format:** `map.json` — `{width: 40, height: 30, tile_size: 32, layers: {ground[], objects[]}, zones[], spawn_points{}, victims[], escalations[]}`. Lane 5 authors it; lane 3 loads it; the server treats it as the initial world state.
+- **Tick pipeline (server, in order):** ingest queued robot actions → validate against world rules → apply movement/work → run dynamics (fire spread, vitals countdown, scheduled aftershock) → derive per-robot percepts (vision radius) → append state frame to the websocket broadcast. Deterministic given a seed: same seed + same action log = same mission, which is what makes the golden demo run reproducible.
+- **State frame (websocket, per tick):** `{tick, robots:[{id, x, y, facing, status, bubble}], victims:[…], tiles_changed:[…], events:[…], metrics:{…}}` — send diffs (`tiles_changed`), not the whole grid, after the initial full snapshot.
+- **Render layers (PixiJS, bottom → top):** 1 ground tilemap · 2 debris/hazards (animated fire) · 3 entities (victims, then robots) · 4 fog-of-war mask (alpha overlay; explored-but-stale tiles dimmed, unexplored dark) · 5 floaters (name tags, role icons, thought bubbles, path ghosts) · 6 HUD (scoreboard, ON/OFF toggle, event ticker). Bubbles and tags live in a separate container so they never sort-fight with sprites.
+- **Sprites:** one atlas per category (tiles, robots, effects), plain grid spritesheets — no packer tooling needed at this scale. 2–4 frame cycles driven by elapsed time, not tick count, so animation stays smooth between ticks.
+- **Camera:** none. 40×30 at 32px = 1280×960; render the whole map, letterbox to fit. Optional ×2 zoom-on-click as polish, not plumbing.
+- **Fog of war:** client keeps an `explored` bitset per mode — in coordinated mode it's the *shared* explored set (any robot's vision reveals for all, straight from shared memory); in baseline mode each robot's private set, with the viewer seeing the union dimmed. The visual difference between the two modes is itself the demo.
+- **Build order for lane 3:** static map render → one moving sprite with lerp → websocket live feed → fog of war → bubbles/ticker → scoreboard → juice (shake, pulses). Ship each step; don't gold-plate step 1.
+
 ---
 
 ## 5. Delivery plan
@@ -323,10 +350,11 @@ CREATE TABLE mission_memories ( -- P1 cross-mission learning
 - [ ] Rationale surfacing to UI · rule-based fallback path
 
 **Lane 3 — Sim world & rendering · TBD**
-- [ ] Tick server: world state, action validation, dynamics (fire, vitals, aftershock)
-- [ ] Tile map loader (map defined in JSON by lane 5)
-- [ ] PixiJS renderer: sprites, animation, fog-of-war + shared-map overlay
-- [ ] Websocket state protocol + reconnect · scoreboard & ON/OFF toggle UI
+- [ ] Tick server: world state, action validation, dynamics (fire, vitals, aftershock) — pipeline per §4.8
+- [ ] Tile map loader (map.json authored by lane 5)
+- [ ] PixiJS renderer: layered per §4.8, CC0 sprite atlases, client-side lerp between ticks
+- [ ] Fog of war (shared vs baseline modes) + thought bubbles, name tags, event ticker (§3.6)
+- [ ] Websocket state protocol (diff frames) + reconnect · scoreboard & ON/OFF toggle UI
 
 **Lane 4 — Orchestration & missions · TBD**
 - [ ] Task-graph definitions + `depends_on` unblocking
