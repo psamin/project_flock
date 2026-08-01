@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The job only needs to read the tree. Later steps run PR-authored code, so a
+# writable token in the environment would be reachable by it.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: colony
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # actions/checkout leaves GITHUB_TOKEN in .git/config by default.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # CockroachDB is started with `docker run` rather than as a `services:`
+      # container because it needs `start-single-node --insecure` as its command,
+      # and GitHub Actions service containers cannot override the image command.
+      - name: Start CockroachDB
+        run: |
+          docker run -d --name crdb \
+            -p 26257:26257 -p 8080:8080 \
+            cockroachdb/cockroach:v26.2.5 start-single-node --insecure
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:8080/health?ready=1" >/dev/null 2>&1; then
+              echo "cockroach ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "cockroach failed to become ready"; docker logs crdb; exit 1
+
+      - name: Apply schema
+        run: |
+          docker exec -i crdb ./cockroach sql --insecure \
+            -e "CREATE DATABASE IF NOT EXISTS colony"
+          docker exec -i crdb ./cockroach sql --insecure -d colony \
+            --set errexit=true < schema/v0.sql
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # The suite skips database tests when no cluster is reachable, which would
+      # turn a broken cluster into a green build. Fail loudly instead.
+      - name: Verify the database tests are not silently skipping
+        run: |
+          # pipefail, or a failing pytest hands back tee's exit status and the
+          # step passes as long as nothing said "skipped" — a false green.
+          set -o pipefail
+          uv run pytest tests/test_schema.py -q --no-header \
+            | tee /tmp/schema.txt
+          grep -q "skipped" /tmp/schema.txt && {
+            echo "::error::database tests skipped — the cluster was unreachable"; exit 1; }
+          exit 0
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Check the committed map matches its generator
+        run: |
+          uv run python -m world.build_aftershock
+          git diff --exit-code world/maps/aftershock.json \
+            || { echo "::error::aftershock.json is stale — run 'make map'"; exit 1; }
