@@ -1,0 +1,181 @@
+"""Generate the Aftershock reference map (PRD §3.3).
+
+A reference instance of the map.json contract, not final level design — lane 5
+owns the authored art-directed version and the stat tuning. What this pins down
+is the *shape* of the file and a playable layout matching the spec: 40x30, four
+zones plus a courtyard, 8 victims in the 3/4/1 access mix, fire, and the tick-300
+aftershock.
+
+Deterministic: same seed, same map. Run `make map` to regenerate.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+from pathlib import Path
+
+from world.map_format import (
+    DEBRIS, DOOR, EMPTY, FIRE, OPEN, RUBBLE_HEAVY, UNSTABLE, WALL, parse_map,
+)
+
+WIDTH, HEIGHT, TILE = 40, 30, 32
+SEED = 20260801
+OUT = Path(__file__).resolve().parents[1] / "world" / "maps" / "aftershock.json"
+
+# Four zones plus the courtyard that connects them (§3.3).
+ZONES = [
+    {"name": "staging",     "x": 0,  "y": 0,  "width": 10, "height": 8},
+    {"name": "street",      "x": 0,  "y": 8,  "width": 40, "height": 6},
+    {"name": "residential", "x": 0,  "y": 14, "width": 22, "height": 16},
+    {"name": "office",      "x": 24, "y": 14, "width": 16, "height": 16},
+    {"name": "courtyard",   "x": 22, "y": 14, "width": 2,  "height": 16},
+]
+
+
+def build() -> dict:
+    rng = random.Random(SEED)
+    ground = [[OPEN] * WIDTH for _ in range(HEIGHT)]
+    objects = [[EMPTY] * WIDTH for _ in range(HEIGHT)]
+
+    # Map border.
+    for x in range(WIDTH):
+        ground[0][x] = ground[HEIGHT - 1][x] = WALL
+    for y in range(HEIGHT):
+        ground[y][0] = ground[y][WIDTH - 1] = WALL
+
+    # Staging: walled off from the street with a single door, so leaving base is
+    # a deliberate choke point the fleet has to route through.
+    for x in range(1, 10):
+        ground[7][x] = WALL
+    ground[7][4] = DOOR
+
+    # Office interior: rooms on a grid with doors, per §3.3 "multi-room interior,
+    # requires door tiles".
+    for x in range(25, 39):
+        ground[19][x] = WALL
+        ground[24][x] = WALL
+    for y in range(15, 29):
+        ground[y][31] = WALL
+    for door in [(19, 28), (19, 35), (24, 28), (24, 35), (21, 31), (26, 31)]:
+        ground[door[0]][door[1]] = DOOR
+
+    # Residential block: dense debris, with a heavy-rubble core.
+    for y in range(15, 29):
+        for x in range(1, 21):
+            roll = rng.random()
+            if roll < 0.22:
+                objects[y][x] = DEBRIS
+            elif roll < 0.28:
+                objects[y][x] = RUBBLE_HEAVY
+
+    # Two corridors kept deliberately clear — these are what the aftershock
+    # re-blocks at tick 300, so they must start passable.
+    for y in range(15, 29):
+        objects[y][6] = EMPTY
+        objects[y][15] = EMPTY
+
+    # Fire seed in the street; it spreads every 25 ticks (§3.3).
+    objects[10][30] = FIRE
+
+    # One unstable stretch of street: half speed, scouts only until shored (P1).
+    for x in range(20, 26):
+        ground[12][x] = UNSTABLE
+
+    victims = _victims()
+    _clear_victim_tiles(objects, victims)
+
+    world = {
+        "name": "Aftershock",
+        "description": "Post-earthquake city block: collapsed residential, office interior, "
+                       "spreading fire, aftershock at tick 300.",
+        "width": WIDTH, "height": HEIGHT, "tile_size": TILE,
+        "seed": SEED,
+        "mission_length_ticks": 1200,
+        "layers": {"ground": ground, "objects": objects},
+        "zones": ZONES,
+        "spawn_points": {
+            "scout":  [{"x": 2, "y": 2}, {"x": 4, "y": 2}],
+            "lifter": [{"x": 2, "y": 4}],
+            "medic":  [{"x": 4, "y": 4}],
+        },
+        "victims": victims,
+        "escalations": _escalations(),
+    }
+    parse_map(world)   # never write a map that would not load
+    return world
+
+
+def _victims() -> list[dict]:
+    """8 victims in the §3.3 access mix: 3 reachable, 4 behind one debris wall,
+    1 behind two — the last forces a scout->lifter->lifter->medic chain."""
+    return [
+        {"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700, "access": "open",
+         "state": "unknown"},
+        {"id": "v2", "x": 26, "y": 10, "vitals_deadline": 650, "access": "open",
+         "state": "unknown"},
+        {"id": "v3", "x": 34, "y": 16, "vitals_deadline": 620, "access": "open",
+         "state": "unknown"},
+        {"id": "v4", "x": 4,  "y": 20, "vitals_deadline": 560, "access": "one_debris",
+         "state": "unknown"},
+        {"id": "v5", "x": 10, "y": 24, "vitals_deadline": 540, "access": "one_debris",
+         "state": "unknown"},
+        {"id": "v6", "x": 17, "y": 18, "vitals_deadline": 520, "access": "one_debris",
+         "state": "unknown"},
+        {"id": "v7", "x": 19, "y": 26, "vitals_deadline": 500, "access": "one_debris",
+         "state": "unknown"},
+        {"id": "v8", "x": 3,  "y": 27, "vitals_deadline": 470, "access": "two_debris",
+         "state": "unknown"},
+    ]
+
+
+def _clear_victim_tiles(objects: list[list[str]], victims: list[dict]) -> None:
+    """A victim's own tile is never rubble — the medic has to be able to stand
+    adjacent and work. Access difficulty comes from the surrounding tiles, which
+    the generator sets per the victim's `access` field."""
+    for victim in victims:
+        x, y = victim["x"], victim["y"]
+        objects[y][x] = EMPTY
+        if victim["access"] == "open":
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if 0 < x + dx < WIDTH - 1 and 0 < y + dy < HEIGHT - 1:
+                    objects[y + dy][x + dx] = EMPTY
+        elif victim["access"] == "one_debris":
+            objects[y][min(x + 1, WIDTH - 2)] = DEBRIS
+        elif victim["access"] == "two_debris":
+            objects[y][min(x + 1, WIDTH - 2)] = DEBRIS
+            objects[y][min(x + 2, WIDTH - 2)] = RUBBLE_HEAVY
+
+
+def _escalations() -> list[dict]:
+    """The tick-300 aftershock (§3.3): re-blocks two cleared corridors, reveals a
+    new victim, converts a street segment to unstable. This is what forces
+    visible replanning mid-demo."""
+    return [
+        {
+            "tick": 300,
+            "kind": "aftershock",
+            "screen_shake": True,
+            "block_tiles": (
+                [{"x": 6, "y": y, "tile": RUBBLE_HEAVY} for y in range(18, 22)]
+                + [{"x": 15, "y": y, "tile": DEBRIS} for y in range(22, 26)]
+            ),
+            "reveal_victims": [
+                {"id": "v9", "x": 28, "y": 26, "vitals_deadline": 400, "state": "unknown"}
+            ],
+            "unstable_tiles": [{"x": x, "y": 9} for x in range(14, 20)],
+        },
+    ]
+
+
+def main() -> None:
+    world = build()
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(world, indent=1))
+    print(f"wrote {OUT.relative_to(Path.cwd())} "
+          f"({world['width']}x{world['height']}, {len(world['victims'])} victims, "
+          f"{len(world['zones'])} zones)")
+
+
+if __name__ == "__main__":
+    main()

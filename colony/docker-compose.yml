@@ -1,0 +1,17 @@
+# Local dev cluster. Single node is enough for lanes 2-5 to build against; the
+# 3-node chaos rig for the node-kill demo (§6.5) is a separate concern.
+#
+# Pinned rather than :latest — §6.3's VECTOR syntax is validated against v26.2,
+# and the vector index behaviour we depend on is version-specific.
+services:
+  cockroach:
+    image: cockroachdb/cockroach:v26.2.5
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"   # sql
+      - "8080:8080"     # admin ui
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health?ready=1"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
