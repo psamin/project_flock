@@ -22,3 +22,5 @@ test:
 
 map:
 	uv run python -m world.build_aftershock
+sim:
+	uv run --extra dev uvicorn sim.server:app --reload --port 8000

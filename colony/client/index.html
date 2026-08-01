@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Colony — Aftershock</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      background: #14131a;
+      color: #e8e3d9;
+      font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 16px;
+    }
+    header { display: flex; gap: 24px; align-items: baseline; }
+    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.04em; }
+    #status { color: #8a8397; }
+    #hud { display: flex; gap: 18px; color: #b8b1c4; }
+    #hud b { color: #e8e3d9; font-weight: 600; }
+    #stage { line-height: 0; box-shadow: 0 8px 40px #0008; }
+    #ticker {
+      width: min(1280px, 96vw); height: 84px; overflow-y: auto;
+      background: #1c1a24; padding: 8px 12px; border-radius: 4px;
+      color: #9a93a8; font-size: 12px;
+    }
+    #ticker div { padding: 1px 0; }
+    #ticker .found { color: #f2c14e; }
+    #ticker .shock { color: #e2603f; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>COLONY</h1>
+    <span id="status">connecting…</span>
+  </header>
+  <div id="hud">
+    <span>tick <b id="m-tick">0</b></span>
+    <span>located <b id="m-located">0</b></span>
+    <span>stabilized <b id="m-stabilized">0</b></span>
+    <span>lost <b id="m-lost">0</b></span>
+  </div>
+  <div id="stage"></div>
+  <div id="ticker"></div>
+
+  <!-- No CDN, no bundler, no WebGL requirement. See the note at the top of
+       app.js for why the skeleton renders in Canvas 2D. -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
