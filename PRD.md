@@ -1,14 +1,14 @@
-# Fleet Coordination Layer — PRD v3
+# Fleet Coordination Layer — PRD v3.1
 
 **Working codename:** Colony *(roaches survive disasters — on-brand, rename freely)*
 **Hackathon:** CockroachDB × AWS "Build with Agentic Memory" (Devpost) — **deadline Aug 18, 5:00pm EDT**
-**Owner:** Praneeth · **Team:** 5 · **Date:** Aug 1, 2026 · **Changes from v2:** hackathon rules deep dive, tool-by-tool CRDB integration plan, vector syntax validated against v26.2 docs, AWS service decisions locked, resilience-demo mechanics corrected, day-1 checklist added; sections reordered so sources and open questions close the doc. (v2 added market research, scenario spec, FRs, DDL, metrics, lane checklists, day-by-day plan.)
+**Owner:** Praneeth · **Team:** 5 · **Date:** Aug 1, 2026 · **Changes from v3:** task recovery is now lease-native — self-expiring claims replace orchestrator heartbeat sweeps (FR-5, §4.4, DDL); exploration coordinated through sector claims (FR-16); the four-type memory taxonomy is made explicit and mapped table-by-table to the schema (§4.0, DDL comments, pitch lines); every Bedrock decision is logged with the memory rows that informed it (`plans.based_on`, FR-17); agents get a decentralized claiming fallback so the orchestrator is an optimizer, not a dependency; SDK, tests, day plan, and lane checklists updated to match. (v3 added the hackathon rules deep dive, tool-by-tool CRDB integration plan, validated vector syntax, AWS decisions, resilience mechanics, day-1 checklist.)
 
 ---
 
 ## 1. Executive summary
 
-Robots are already autonomous. They are not yet teammates. Colony is a shared-memory coordination layer, built on CockroachDB, that lets a heterogeneous robot fleet run a mission as one team: shared beliefs about the world, transactional task claiming, automatic handoffs when one robot's step unblocks another's, and replanning when the world changes. We demonstrate it in a disaster-relief simulation where the fleet keeps rescuing people even while a database node is killed mid-mission.
+Robots are already autonomous. They are not yet teammates. Colony is a shared-memory coordination layer, built on CockroachDB, that lets a heterogeneous robot fleet run a mission as one team: shared beliefs about the world, transactional task claiming, automatic handoffs when one robot's step unblocks another's, and replanning when the world changes. We demonstrate it in a disaster-relief simulation where the fleet keeps rescuing people even while a database node is killed mid-mission. v3.1 sharpens the two judge-facing stories: the schema now explicitly implements four memory systems — working, episodic, semantic, and provenance — and recovery is a property of the data model itself: a dead robot's lease expires and its work frees itself, no supervisor required.
 
 The market research below supports three claims we'll make to judges:
 
@@ -86,6 +86,8 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 - "AWS validated this need with RoboRunner, then sunset it. The teamwork layer is still homework. We did the homework."
 - "DARPA SubT's own lessons: one human can't be the fleet's brain. So we gave the fleet a brain that can't die — and then we killed a database node on camera to prove it."
 - "Search-and-rescue robotics is a $35B market. Individual autonomy is funded; team autonomy is the gap."
+- *(v3.1)* "A fleet needs four memories — working, episodic, semantic, provenance — and our schema implements each one as named tables. The memory design *is* the architecture."
+- *(v3.1)* "Kill a robot: its lease expires and its work frees itself. Kill the coordinator: robots claim safely for themselves, because claiming lives in the database. Kill a database node: the memory survives. Recovery is a property of the data model."
 
 ---
 
@@ -102,15 +104,18 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 - As a scout, when I spot a trapped person, my report merges with any existing sighting of the same person instead of creating a duplicate rescue effort.
 - As a lifter, when a scout's find creates a debris-clearing task I'm suited for, I claim it exactly once, even if another lifter tries at the same instant.
 - As a medic, the moment the lifter finishes clearing, my delivery task unblocks — without any robot messaging me directly.
-- As the fleet, when a robot dies mid-task, its task returns to the pool and gets reassigned within seconds.
+- As the fleet, when a robot dies mid-task, its lease expires and its task returns to the pool within seconds — no watchdog required.
 - As the fleet, when an aftershock changes the map, in-flight plans that are now invalid get replanned against current shared beliefs.
 - As an incident commander, I can ask in plain English which victims are unreached and why, and get an answer computed from live fleet memory. (P0 for demo, read-only.)
+- As an incident commander, I can ask *why* a robot made a specific decision and see the exact memories that drove it. (P0, v3.1.)
 - As the fleet, I keep coordinating without interruption when a database node is killed. (P0 — this is the thesis.)
 - As a future mission, I can retrieve semantically similar situations from past missions and adapt. (P1 stretch.)
 
 ### 3.3 Demo scenario spec: "Aftershock"
 
 **Map.** 40×30 tile grid, four zones: **Staging** (base + charging, top-left), **Street** (open, fast travel), **Collapsed residential block** (dense debris, most victims), **Office building** (multi-room interior, requires door tiles), plus a **courtyard** connecting them. Tile types: open, debris (blocks ground robots; cleared by lifter), rubble-heavy (2× clear time), fire (spreads; blocks everyone; extinguisher = P2 stretch role), unstable (half speed, scouts only until shored — P1), wall, door.
+
+**Sectors (v3.1).** `map.json` also defines a 4×3 exploration-sector grid (10×10 tiles per sector) used for sector claims (§4.4). Granularity is a playtest-#1 tuning knob.
 
 **Robot stat blocks (v0 — tune in playtesting):**
 
@@ -125,9 +130,9 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 
 **Dynamics.** Fire spreads to an adjacent flammable tile every 25 ticks. **Aftershock at tick 300:** re-blocks two previously cleared corridors, reveals 1 new victim, converts one street segment to unstable. This forces visible replanning mid-demo.
 
-**Win/loss.** Mission ends when all victims are stabilized/lost or at tick 1200. Score = victims stabilized, median time-to-stabilize, and the §5.6 metrics.
+**Win/loss.** Mission ends when all victims are stabilized/lost or at tick 1200. Score = victims stabilized, median time-to-stabilize, and the §4.7 metrics.
 
-**Baseline mode.** Identical map and robots, but shared memory is disabled: each robot keeps a private world model, picks its own tasks greedily, no claiming, no handoff triggers. This is the "coordination OFF" run — expect duplicated exploration, a double-teamed victim, and at least one victim lost to the clock. The side-by-side delta is the product.
+**Baseline mode.** Identical map and robots, but shared memory is disabled: each robot keeps a private world model, picks its own tasks greedily, no claiming, no handoff triggers, no sector claims (private frontier exploration only). This is the "coordination OFF" run — expect duplicated exploration, a double-teamed victim, and at least one victim lost to the clock. The side-by-side delta is the product.
 
 ### 3.4 Functional requirements
 
@@ -137,9 +142,9 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 | FR-2 | Task claiming is transactional: concurrent claims on one task yield exactly one winner. | P0 |
 | FR-3 | Completing a task auto-unblocks dependents (`depends_on` gating); dependents become visible to eligible robots within 1 tick (poll) / near-instantly (changefeed, P1). | P0 |
 | FR-4 | New observations pass a reconcile-before-broadcast gate: vector + spatial match against existing beliefs; merge or insert atomically. | P0 |
-| FR-5 | Missed heartbeats (>10s) release the robot's claimed tasks back to `open`. | P0 |
+| FR-5 *(rewritten v3.1)* | Task ownership is a lease: claims set `lease_expires_at`, renewed while the owner works; an expired lease makes the task claimable again inside the same claiming transaction. Robot loss self-heals with no supervisor on the recovery path. | P0 |
 | FR-6 | Orchestrator assigns open tasks by scored policy (role match, distance, battery, priority). | P0 |
-| FR-7 | Aftershock event invalidates affected path/claim state and triggers replans. | P0 |
+| FR-7 | Aftershock event invalidates affected path/claim state (release = status→open, lease cleared) and triggers replans. | P0 |
 | FR-8 | Fog-of-war UI: per-robot vision, with the shared known-world overlay filling in for all as any robot explores. | P0 |
 | FR-9 | Live scoreboard + coordination ON/OFF toggle and side-by-side metrics. | P0 |
 | FR-10 | Commander console: natural-language questions answered from live memory via CockroachDB managed MCP Server, read-only credentials. | P0 |
@@ -148,6 +153,8 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 | FR-13 | Cross-mission memory: post-run summaries embedded; new missions retrieve top-k similar past situations at planning time. | P1 |
 | FR-14 | Comms-constrained sync: robots only read/write shared memory inside uplink zones (base + relay radius), buffering otherwise. | P1 |
 | FR-15 | Isometric visual upgrade. | P2 |
+| FR-16 *(new v3.1)* | Exploration is coordinated via `explore_sector` tasks with short leases; two live scouts never sweep the same sector. Baseline mode reverts to private frontier exploration. | P0 |
+| FR-17 *(new v3.1)* | Every Bedrock plan is logged to `plans` with trigger, choice, rationale, and `based_on` — the memory rows in its prompt digest. The commander console can trace any decision to the memories that caused it. | P0 |
 
 ### 3.5 Non-functional requirements
 
@@ -164,7 +171,7 @@ North star: the aesthetic of Stanford's "Smallville" generative-agents town — 
 
 - **World:** 32px pixel-art tiles, top-down. Warm, slightly desaturated base palette with a small set of accent hues reserved for meaning: hazard orange-red, victim amber, role colors. Soft and cohesive over high-saturation — the map should feel like one place, not a rainbow.
 - **Robots:** chunky, readable silhouettes per role — hovering scout drone with a soft shadow, tracked lifter, wheeled medic cart. Name tag + small role icon above each.
-- **Thought bubbles (the Smallville signature):** every robot shows a live status bubble — 🔍 "scanning sector C", 🧱 "clearing debris", 📦 "kit en route" — and clicking a robot expands its latest Bedrock plan rationale. This is §4.3's "rationale surfacing" given its visual form; it's also how judges *see* agents thinking.
+- **Thought bubbles (the Smallville signature):** every robot shows a live status bubble — 🔍 "scanning sector C", 🧱 "clearing debris", 📦 "kit en route" — and clicking a robot expands its latest Bedrock plan rationale *plus its sources* ("based on 2 sightings + hazard #7" — the `plans.based_on` lineage, §4.3). This is how judges *see* agents thinking, and remembering.
 - **Coordination made visible:** an event ticker ("S1 found victim → task created → L1 claimed") plus brief path-ghost lines when a task is claimed. The shared map filling in through fog of war stays the hero visual.
 - **Life details, cheap:** 2–4 frame walk/hover cycles, 3-frame fire loop, gentle pulse on located victims, screen shake on the aftershock. No lighting engine, no particles beyond fire.
 - **Assets:** CC0 packs only (Kenney.nl and CC0 pixel tilesets on itch.io), or hand-drawn. Do not lift art from the Smallville repo, The Sims, or any licensed pack — the submission video must contain no third-party copyrighted material (§6.1). Lane 5 keeps an `ASSETS.md` crediting every source.
@@ -174,6 +181,19 @@ Style test for every screen: would it look at home in a generative-agents demo v
 ---
 
 ## 4. Architecture
+
+### 4.0 The four memories — the schema is the thesis *(new in v3.1)*
+
+Judging criterion #1 — and the tie-break — is Agentic Memory Design. Colony's answer: a fleet needs four distinct memory systems, and each one is a named part of the schema.
+
+| Memory | Question it answers | Tables | Where judges see it |
+|---|---|---|---|
+| **Working** | What is true right now? | `robots`, `tasks` (incl. leases), `victims`, `hazards` | Fog of war filling in; tasks flipping states live in SQL |
+| **Episodic** | What did we experience? | `observations` (+ 512-dim embeddings) | Reconcile gate merging a duplicate sighting |
+| **Semantic** | What have we learned across experiences? | `mission_memories` (P1) | Mission N+1 retrieves a similar past situation |
+| **Provenance** | Why did we act? | `plans` (`based_on` lineage) + `events` | Commander asks "why did L1 stop?" and gets the exact memories that drove it |
+
+This table opens the Devpost writeup and appears as a diagram in the video. Every schema decision below hangs off it, and the DDL in §4.5 is grouped and commented by memory type so the mapping is visible in the code itself.
 
 ### 4.1 Component view
 
@@ -190,11 +210,11 @@ Style test for every screen: would it look at home in a generative-agents demo v
     sense → sync → think → act → report
        │            │
        │ Bedrock    └── fleetmem SDK ── CockroachDB Cloud (3 nodes)
-       │ (Claude Haiku plans,               robots · tasks · observations(VECTOR)
-       │  Titan V2 embeddings)              victims · hazards · events
+       │ (Claude Haiku plans,               robots · tasks(+leases) · observations(VECTOR)
+       │  Titan V2 embeddings)              victims · hazards · events · plans
        │                                        ▲              ▲
  Orchestrator (async service) ──────────────────┘              │
-    · allocation · dependency unblocking · reassignment        │
+    · allocation · dependency unblocking · lost-marking        │
  Commander console ── Claude + CRDB managed MCP Server (read-only)
  Chaos rig ── kills/restores a CRDB node on cue
 ```
@@ -204,10 +224,10 @@ Style test for every screen: would it look at home in a generative-agents demo v
 1. Scout S1's vision covers tile (14,9); the sim hands it a percept: heat signature.
 2. S1 forms belief "victim, (14,9), behind debris"; embeds the description (Titan V2).
 3. **Reconcile gate:** `fleetmem.report_observation()` runs one transaction — vector top-k within 5 tiles; a match ≥0.82 cosine merges (bump confidence, add sighting); otherwise insert belief, create victim row, and create the task chain `clear_debris(14,8) → deliver_kit(14,9)` with `depends_on` linking them.
-4. Orchestrator sees `clear_debris` open; scores eligible robots; Lifter L1 wins; `claim_task` flips it `open→claimed` transactionally.
-5. L1 paths (A*) using shared hazard beliefs, clears for 3 ticks, calls `complete_task`.
+4. Orchestrator sees `clear_debris` open; scores eligible robots; Lifter L1 wins; `claim_task` flips it `open→claimed` and stamps a 15s lease, transactionally.
+5. L1 paths (A*) using shared hazard beliefs, clears for 3 ticks (renewing its lease via heartbeat), calls `complete_task` (which clears the lease).
 6. Completion trigger: `deliver_kit` unblocks (poll at MVP; changefeed at P1). Medic M1 claims, delivers, victim `stabilized`. Every transition lands in `events`.
-7. If L1's heartbeat lapses mid-clear, the claim releases and the next lifter (or replan) takes over. No human touched anything.
+7. If L1 dies mid-clear, its lease lapses within 15s and the very next claim attempt — orchestrator-assigned or another robot's own — takes the task over. No sweep, no watchdog, no human.
 
 ### 4.3 Agent design
 
@@ -219,40 +239,55 @@ async def agent_loop(robot):
         percepts = sense()                      # from sim, local vision only
         beliefs  = fleetmem.get_beliefs(area)   # shared world, cached 1s
         if needs_plan(robot, beliefs):          # idle, task done, world changed
-            plan = await bedrock_plan(robot, beliefs)   # async, rate-capped
+            plan = await bedrock_plan(robot, beliefs)     # async, rate-capped
+            fleetmem.log_plan(plan.trigger, plan.chosen,  # provenance: which
+                              plan.rationale, beliefs.ids) # memories fed this
         action = next_action(plan)              # A* movement, rule-based acts
         submit(action)
         fleetmem.report(percepts_delta, status) # via reconcile gate
-        fleetmem.heartbeat()
+        fleetmem.heartbeat()                    # status + lease renewal
 ```
 
 - **LLM discipline:** Bedrock (Claude Haiku) is called only on plan boundaries — task selection, replan-on-aftershock, conflict resolution — never per tick. Prompt = role card + current beliefs digest (≤1.5k tokens) + open tasks; output = strict JSON `{task_id | explore(sector) | return_to_base, rationale}`. Rationale strings surface in the UI — judges see the fleet thinking.
-- **Role behaviors:** scouts run frontier-exploration bias (prefer unexplored sectors weighted by victim priors); lifters idle-stage near the densest blocked-victim cluster; medics pre-position between base and reachable victims. Each is ~50 lines of rules; the LLM chooses *among* behaviors, rules execute them.
+- **Provenance discipline (v3.1):** the prompt-digest builder records the id of every belief row it includes; `log_plan` stores them in `based_on`. Clicking a robot's bubble shows rationale *plus* sources. This is FR-17, and the commander console's best party trick.
+- **Role behaviors:** scouts claim an `explore_sector` task and run frontier-exploration bias *within* their claimed sector; lifters idle-stage near the densest blocked-victim cluster; medics pre-position between base and reachable victims. Each is ~50 lines of rules; the LLM chooses *among* behaviors, rules execute them.
 - **Determinism:** with `--seeded`, LLM calls are recorded/replayed so demo runs are reproducible.
 
 ### 4.4 Coordination mechanics
 
-- **Task lifecycle:** `blocked → open → claimed → in_progress → done | failed(→open)`. `blocked` tasks hold unmet `depends_on`; completion of the last dependency flips them `open` in the same transaction.
-- **Claiming (the judge-friendly line of SQL):**
+- **Task lifecycle:** `blocked → open → claimed → in_progress → done | failed(→open)`. `blocked` tasks hold unmet `depends_on`; completion of the last dependency flips them `open` in the same transaction. `claimed`/`in_progress` carry a lease; an expired lease is claimable by anyone — equivalent to `failed(→open)` without anyone having to notice. Explicit releases (aftershock invalidation, agent gives up) set `status='open'` and clear the lease.
+- **Claiming (the judge-friendly SQL, v3.1):**
 
 ```sql
-UPDATE tasks SET status='claimed', claimed_by=$robot, claimed_at=now()
-WHERE id=$task AND status='open'
-RETURNING id;   -- serializable isolation: exactly one winner, always
+UPDATE tasks
+SET status='claimed', claimed_by=$robot, claimed_at=now(),
+    lease_expires_at = now() + INTERVAL '15 seconds'
+WHERE id=$task
+  AND (status='open'
+       OR (status IN ('claimed','in_progress') AND lease_expires_at < now()))
+RETURNING id;  -- serializable isolation: exactly one winner, always — and a
+               -- dead robot's task is claimable the moment its lease lapses
 ```
 
+- **Lease renewal:** `heartbeat()` renews every lease the robot holds (`SET lease_expires_at = now() + INTERVAL '15 seconds' WHERE claimed_by=$robot AND status IN ('claimed','in_progress')`), every ~5s — three missed renewals before expiry. All expiry math uses DB `now()`; robot-local clocks are never trusted, so clock skew can't cause false takeovers.
+- **Recovery is passive (v3.1).** The allocation query simply treats expired-lease tasks as open. The orchestrator's heartbeat scan survives only to mark robots `lost` for the UI and event log — it is no longer on the recovery path. SubT's #2 field problem (robot attrition) is handled by the data model, not a watchdog.
+- **Decentralized fallback (v3.1):** if no assignment arrives within 5s, an agent claims greedily for itself. The claim transaction makes decentralized claiming exactly as safe as orchestrated claiming — the orchestrator is an optimizer, not a dependency. Say this in the chaos segment.
+- **Sector claims (v3.1):** mission bootstrap seeds one `explore_sector` task per sector (12 sectors, §3.3) with short leases (~20s). A scout completes its sector task when shared coverage of that sector crosses ~85% (threshold tuned at playtest). Two live scouts can't duplicate a sweep; a dead scout's sector frees itself. Expected direct effect: duplicate-effort index → near zero in coordinated mode. Baseline disables sector tasks so the ON/OFF delta is attributable to sharing alone.
 - **Allocation score:** `2.0·role_match + 1.2·priority + 1.0·(1/(1+dist)) + 0.5·battery_norm`, greedy per open task. (Auction/CBBA-style allocation from the multi-robot task-allocation literature is a P2 talking point, not a build item.)
-- **Reassignment:** orchestrator scans heartbeats every 2s; >10s stale ⇒ release claims, mark robot `lost`, log event. Robot attrition — SubT's #2 field problem — becomes a 20-line query.
 - **Reconcile-before-broadcast:** the gate in §4.2 step 3. Prior-work note for the writeup: per-agent self-reflection (Reflexion-style) doesn't catch cross-agent conflicts; gating writes against shared state does. Novel, cheap, and demoable (show the merged-duplicate event in the log).
 - **Handoff triggers:** MVP polls open tasks at 1 Hz. P1 swaps in a CRDB changefeed on `tasks` → orchestrator/agents wake instantly. Same contract, faster push.
 
-### 4.5 Schema DDL (v0 — lane 1 validates against CRDB docs on day 1)
+### 4.5 Schema DDL (v1.1 — lane 1 validates against CRDB docs on day 1)
+
+Grouped by memory type (§4.0); the comments ship in the migration.
 
 ```sql
+-- ═══ WORKING MEMORY — what is true right now ═══════════════════════
+
 CREATE TABLE robots (
   id STRING PRIMARY KEY, role STRING NOT NULL,
   pos_x INT, pos_y INT, battery INT, status STRING,
-  current_task UUID, heartbeat_at TIMESTAMPTZ
+  current_task UUID, heartbeat_at TIMESTAMPTZ   -- for lost-marking/UI only
 );
 
 CREATE TABLE tasks (
@@ -260,20 +295,12 @@ CREATE TABLE tasks (
   mission_id UUID NOT NULL, kind STRING NOT NULL,
   target_x INT, target_y INT, priority INT DEFAULT 1,
   status STRING NOT NULL DEFAULT 'blocked',
-  depends_on UUID[],           -- unblock when all done
-  claimed_by STRING, claimed_at TIMESTAMPTZ, done_at TIMESTAMPTZ,
-  INDEX (mission_id, status)
+  depends_on UUID[],            -- unblock when all done
+  claimed_by STRING, claimed_at TIMESTAMPTZ,
+  lease_expires_at TIMESTAMPTZ, -- v3.1: ownership is a lease
+  done_at TIMESTAMPTZ,
+  INDEX (mission_id, status, lease_expires_at)
 );
-
-CREATE TABLE observations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  mission_id UUID, robot_id STRING, kind STRING,
-  pos_x INT, pos_y INT, payload JSONB,
-  embedding VECTOR(512),       -- Titan V2 @ 512 dims
-  confidence FLOAT, sightings INT DEFAULT 1,
-  observed_at TIMESTAMPTZ DEFAULT now()
-);
-CREATE VECTOR INDEX obs_embedding_idx ON observations (embedding);
 
 CREATE TABLE victims (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -287,13 +314,40 @@ CREATE TABLE hazards (
   mission_id UUID, kind STRING, area JSONB, severity INT, active BOOL
 );
 
-CREATE TABLE events (          -- append-only mission log; powers replay
+-- ═══ EPISODIC MEMORY — what we experienced ═════════════════════════
+
+CREATE TABLE observations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, robot_id STRING, kind STRING,
+  pos_x INT, pos_y INT, payload JSONB,
+  embedding VECTOR(512),        -- Titan V2 @ 512 dims
+  confidence FLOAT, sightings INT DEFAULT 1,
+  observed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE VECTOR INDEX obs_embedding_idx ON observations (embedding);
+
+-- ═══ PROVENANCE MEMORY — why we acted ══════════════════════════════
+
+CREATE TABLE events (           -- append-only mission log; powers replay
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   mission_id UUID, at TIMESTAMPTZ DEFAULT now(),
   actor STRING, verb STRING, detail JSONB
 );
 
-CREATE TABLE mission_memories ( -- P1 cross-mission learning
+CREATE TABLE plans (            -- v3.1: every Bedrock decision + its sources
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, robot_id STRING,
+  at TIMESTAMPTZ DEFAULT now(),
+  trigger STRING,               -- idle | task_done | world_changed | aftershock
+  chosen JSONB,                 -- {task_id | explore(sector) | return_to_base}
+  rationale STRING,
+  based_on UUID[],              -- observation/hazard rows in the prompt digest
+  INDEX (mission_id, robot_id, at)
+);
+
+-- ═══ SEMANTIC MEMORY — what we learned across missions (P1) ════════
+
+CREATE TABLE mission_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   summary STRING, embedding VECTOR(512), outcome JSONB,
   created_at TIMESTAMPTZ DEFAULT now()
@@ -302,7 +356,7 @@ CREATE TABLE mission_memories ( -- P1 cross-mission learning
 
 ### 4.6 Hackathon tooling map (summary — full deep dive in §6)
 
-- **CRDB tools (≥2 required):** ✅ Distributed Vector Indexing — reconcile gate + cross-mission recall. ✅ Managed MCP Server — commander console, read-only mode. ➕ Agent Skills Repo — run the resilience/production-readiness skills against our cluster and ship the outputs (§6.2). ➕ ccloud CLI — optional fourth.
+- **CRDB tools (≥2 required):** ✅ Distributed Vector Indexing — reconcile gate + cross-mission recall. ✅ Managed MCP Server — commander console, read-only mode, incl. provenance tracing. ➕ Agent Skills Repo — run the resilience/production-readiness skills against our cluster and ship the outputs (§6.2). ➕ ccloud CLI — optional fourth.
 - **AWS (≥1 required):** ✅ Bedrock — Claude (Haiku-class) planning + Titan V2 embeddings. ✅ S3 + CloudFront — frontend + replays. ✅ ECS Fargate — sim server + agents. ✅ Lambda — post-mission memory summarizer.
 - **Chaos rig:** see §6.5 — the node-kill segment runs on a self-hosted 3-node cluster (the Cloud free tier doesn't expose node control); primary fleet memory stays on CockroachDB Cloud.
 
@@ -310,7 +364,7 @@ CREATE TABLE mission_memories ( -- P1 cross-mission learning
 
 - **Rescue rate** = stabilized / total victims.
 - **Median time-to-stabilize** (ticks from mission start).
-- **Duplicate-effort index** = redundant tile visits / total visits (visits to tiles already explored by another robot), plus count of same-target double-work incidents.
+- **Duplicate-effort index** = redundant tile visits / total visits (visits to tiles already explored by another robot), plus count of same-target double-work incidents. Sector claims (FR-16) should push this toward zero in coordinated mode — report both modes side by side.
 - **Coverage@500** = explored reachable tiles / all reachable tiles at tick 500.
 - **Coordination gain** = (baseline median time − coordinated median time) / baseline. One number the video ends on.
 
@@ -319,7 +373,7 @@ CREATE TABLE mission_memories ( -- P1 cross-mission learning
 How to actually build the Smallville-style engine described in §3.6 — server-authoritative, client-pretty:
 
 - **Split:** the server simulates at 4 Hz and owns truth; the client renders at 60 fps. The client **interpolates** — tween each entity from its previous tick position to its new one over the 250ms window (simple lerp is fine). This one technique is what makes a 4 Hz sim look like The Sims instead of a chess clock. Never render raw tick jumps.
-- **World format:** `map.json` — `{width: 40, height: 30, tile_size: 32, layers: {ground[], objects[]}, zones[], spawn_points{}, victims[], escalations[]}`. Lane 5 authors it; lane 3 loads it; the server treats it as the initial world state.
+- **World format:** `map.json` — `{width: 40, height: 30, tile_size: 32, layers: {ground[], objects[]}, zones[], sectors[], spawn_points{}, victims[], escalations[]}`. Lane 5 authors it; lane 3 loads it; the server treats it as the initial world state.
 - **Tick pipeline (server, in order):** ingest queued robot actions → validate against world rules → apply movement/work → run dynamics (fire spread, vitals countdown, scheduled aftershock) → derive per-robot percepts (vision radius) → append state frame to the websocket broadcast. Deterministic given a seed: same seed + same action log = same mission, which is what makes the golden demo run reproducible.
 - **State frame (websocket, per tick):** `{tick, robots:[{id, x, y, facing, status, bubble}], victims:[…], tiles_changed:[…], events:[…], metrics:{…}}` — send diffs (`tiles_changed`), not the whole grid, after the initial full snapshot.
 - **Render layers (PixiJS, bottom → top):** 1 ground tilemap · 2 debris/hazards (animated fire) · 3 entities (victims, then robots) · 4 fog-of-war mask (alpha overlay; explored-but-stale tiles dimmed, unexplored dark) · 5 floaters (name tags, role icons, thought bubbles, path ghosts) · 6 HUD (scoreboard, ON/OFF toggle, event ticker). Bubbles and tags live in a separate container so they never sort-fight with sprites.
@@ -336,38 +390,41 @@ How to actually build the Smallville-style engine described in §3.6 — server-
 
 **Lane 1 — Memory & data layer · Praneeth (starting today)**
 - [ ] CRDB Cloud cluster (3 nodes) + local `cockroach demo` dev recipe
-- [ ] Schema v0 → validated v1 (incl. `VECTOR` + vector index syntax check)
-- [ ] `fleetmem` Python SDK: `report_observation, claim_task, complete_task, get_beliefs, heartbeat, log_event`
-- [ ] Claiming txn + concurrency test (two fake robots, 1,000 races, zero double-claims)
+- [ ] Schema v1.1 (lease column, `plans` table, memory-type comments) validated against docs, incl. `VECTOR` + vector index syntax
+- [ ] `fleetmem` Python SDK: `report_observation, claim_task, complete_task, get_beliefs, heartbeat (status + lease renewal), log_plan, log_event`
+- [ ] Lease claiming txn + concurrency tests: 1,000 open-claim races AND expired-lease takeover races — zero double-claims
 - [ ] Reconcile gate (embed → search → merge/insert txn) + unit tests
 - [ ] Changefeed spike (P1) · node-kill chaos script · per-robot credentials
 
 **Lane 2 — Robot agents · TBD**
 - [ ] Agent loop skeleton + sense/sync/think/act/report contract
 - [ ] A* over shared belief map; battery/return-to-base logic
-- [ ] Role behavior modules: scout / lifter / medic (+ relay P1)
+- [ ] Role behavior modules: scout (sector-claim + in-sector frontier bias) / lifter / medic (+ relay P1)
 - [ ] Bedrock planning: prompt cards, strict-JSON parsing, rate caps, recorded-replay mode
-- [ ] Rationale surfacing to UI · rule-based fallback path
+- [ ] Digest builder records `based_on` ids → `log_plan` on every plan (FR-17)
+- [ ] Orchestrator-quiet fallback: self-claim after 5s silence
+- [ ] Rationale + sources surfacing to UI · rule-based fallback path
 
 **Lane 3 — Sim world & rendering · TBD**
 - [ ] Tick server: world state, action validation, dynamics (fire, vitals, aftershock) — pipeline per §4.8
-- [ ] Tile map loader (map.json authored by lane 5)
+- [ ] Tile map loader (map.json authored by lane 5, incl. sectors)
 - [ ] PixiJS renderer: layered per §4.8, CC0 sprite atlases, client-side lerp between ticks
-- [ ] Fog of war (shared vs baseline modes) + thought bubbles, name tags, event ticker (§3.6)
+- [ ] Fog of war (shared vs baseline modes) + thought bubbles (rationale + based_on on click), name tags, event ticker (§3.6)
 - [ ] Websocket state protocol (diff frames) + reconnect · scoreboard & ON/OFF toggle UI
 
 **Lane 4 — Orchestration & missions · TBD**
 - [ ] Task-graph definitions + `depends_on` unblocking
-- [ ] Allocation scorer + reassignment-on-heartbeat-loss
+- [ ] Allocation scorer treating expired-lease tasks as open · sector task seeding at mission start
+- [ ] Robot `lost` marking (UI/events only — recovery is lease-native)
 - [ ] Baseline (coordination-OFF) mode
 - [ ] Metrics pipeline from `events` → scoreboard
-- [ ] Commander console: MCP Server hookup, read-only role, 5 canned demo questions
+- [ ] Commander console: MCP Server hookup, read-only role, 5 canned demo questions incl. "why did robot X do Y" (plans × observations join)
 
 **Lane 5 — Scenario, demo & submission · TBD**
-- [ ] "Aftershock" map JSON + art/sprite set + escalation script
-- [ ] Playtest & tune stat blocks (twice: Aug 8, Aug 12)
+- [ ] "Aftershock" map JSON (incl. sector grid) + art/sprite set + escalation script
+- [ ] Playtest & tune stat blocks + lease/sector knobs (twice: Aug 8, Aug 12)
 - [ ] AWS deploy: S3/CloudFront frontend, ECS backend, public URL
-- [ ] Video: script (§6 of v1), record beats + backups, edit to <3 min
+- [ ] Video: script, record beats + backups, edit to <3 min; writeup + video open with the four-memory table (§4.0); include the bubble-click provenance beat
 - [ ] Repo hygiene: README, MIT license visible, setup instructions, architecture diagram
 - [ ] Devpost writeup incl. tools-used section + CRDB feedback
 
@@ -375,22 +432,22 @@ Pairing note: lanes 2↔4 sync daily (agents consume orchestration). Lane 5 owns
 
 ### 5.2 Interface contracts — freeze Aug 3
 
-1. `fleetmem` SDK signatures (above) — lane 1 publishes stubs day 1 so lanes 2/4 build against fakes.
+1. `fleetmem` SDK signatures (v3.1 set above) — lane 1 publishes stubs day 1 so lanes 2/4 build against fakes.
 2. Agent↔sim action API: `move(dir) | act(verb, target) | idle`; server validates.
 3. Websocket state frame JSON (lane 3 publishes).
-4. Task JSON + `depends_on` semantics (lane 4 publishes).
+4. Task JSON + `depends_on` + lease semantics (lane 4 publishes).
 Changes after Aug 3 need a team ping, not a silent commit.
 
 ### 5.3 Day-by-day
 
 | Date | Milestone |
 |---|---|
-| Aug 1 (today) | Repo + CI, cluster up, schema v0, SDK stubs published, map JSON format agreed |
+| Aug 1 (today) | Repo + CI, cluster up, schema v1.1, SDK stubs published, map JSON format agreed |
 | Aug 2–3 | **Walking skeleton:** one scout moves, writes a belief, renders in browser. Contracts frozen. |
-| Aug 4–6 | Claiming + dependencies live; lifter & medic behaviors; fog-of-war |
+| Aug 4–6 | Leased claiming + dependencies live; sector-claim exploration; lifter & medic behaviors; fog-of-war |
 | Aug 7–8 | **MVP:** full scout→lifter→medic chain on Aftershock v1 map; playtest #1 |
-| Aug 9–10 | Reconcile gate on all writes; baseline mode; metrics on scoreboard |
-| Aug 11–12 | Aftershock replanning; MCP console; changefeed handoffs; playtest #2 |
+| Aug 9–10 | Reconcile gate on all writes; plan logging with `based_on`; baseline mode; metrics on scoreboard |
+| Aug 11–12 | Aftershock replanning; MCP console incl. provenance question; changefeed handoffs; playtest #2 |
 | Aug 13–14 | Node-kill rig + rehearsal; AWS deploy; public URL live |
 | Aug 15 | **Feature freeze.** Bug bash, determinism pass, seed the golden demo run |
 | Aug 16–17 | Video record/edit; README; Devpost writeup; diagram; CRDB feedback |
@@ -398,7 +455,7 @@ Changes after Aug 3 need a team ping, not a silent commit.
 
 ### 5.4 Testing & demo reliability
 
-- Concurrency: claim-race test in CI (lane 1).
+- Concurrency: claim-race + expired-lease-takeover tests in CI (lane 1).
 - Sim: golden-seed regression run nightly from Aug 8; diff the events log.
 - Chaos: node-kill rehearsed ≥5 times before recording; fallback = pre-recorded take.
 - LLM: recorded-replay mode for demos; live mode for the deployed URL with rule fallback.
@@ -408,6 +465,7 @@ Changes after Aug 3 need a team ping, not a silent commit.
 | Risk | Mitigation |
 |---|---|
 | ~~CRDB `VECTOR`/index syntax differs from draft DDL~~ | **Resolved Aug 1** — syntax validated against v26.2 docs (§6.3); cosine `<=>` confirmed for the reconcile gate |
+| Lease tuning: too short thrashes long clears; too long slows recovery | Defaults 15s TTL / 5s renewal (longest atomic action, a rubble-heavy clear, is 1.5s — comfortably inside); tune at both playtests; all expiry math uses DB `now()`, never robot clocks |
 | Bedrock latency spikes wreck pacing | Async planning, rate caps, rule fallback, recorded-replay for the video |
 | Five-way integration hell | Contracts frozen Aug 3; SDK stubs + fakes from day 1; walking skeleton before features |
 | Sim balance makes coordination look weak | Two scheduled playtests; map designed so ≥2 victims are unreachable without handoffs |
@@ -428,7 +486,7 @@ Everything below is from the official Devpost rules/resources pages (fetched Aug
 | Submission window: Jun 30 – **Aug 18, 5pm ET**. Judging: **Aug 19 – Sep 15**. Winners ~Sep 21. | The demo URL and repo must stay live, working, and free-to-access through **Sept 15**, not just Aug 18. Budget the deployed stack to idle cheaply for a month (see §6.4). |
 | **New projects only**, built during the submission period; standard frameworks + AI coding assistants explicitly allowed; any other pre-existing code must be disclosed | Fresh repo, first commit dated in-window. We disclose libraries and AI-assisted development in the README. Don't import old project code silently. |
 | Stage One is **pass/fail**: fits theme + reasonably applies the required tools. Stage Two: five equally weighted criteria | Passing Stage One is table stakes — the writeup must make the two CRDB tools and AWS usage unmissable in the first paragraph. |
-| **Tie-breaks follow criteria order**, starting with Agentic Memory Design | If we're tied with anyone, memory design wins the tie. It's already our strongest axis; over-invest there deliberately. |
+| **Tie-breaks follow criteria order**, starting with Agentic Memory Design | If we're tied with anyone, memory design wins the tie. It's already our strongest axis; §4.0 exists to over-invest there deliberately. |
 | Judges **may judge from the video + description alone** and are not required to test | The 3-minute video and text description carry most of the weight. Treat lane 5's deliverables as first-class engineering, not garnish. |
 | Video: <3 min, must show the project functioning **and the CockroachDB memory layer at work**, public on YouTube/Vimeo, **no third-party trademarks or copyrighted music** | Show live SQL/table views of tasks flipping states during the rescue — that's "memory layer at work," literally. Royalty-free or no music. Watch stray logos in screen recordings. |
 | Repo must be public with an OSI license **visible in the About section** | MIT, added day 1, pinned in repo About — not just a LICENSE file buried in the tree. |
@@ -438,7 +496,7 @@ Everything below is from the official Devpost rules/resources pages (fetched Aug
 
 | Tool | What it actually is (per docs) | How Colony uses it | Status |
 |---|---|---|---|
-| **Managed MCP Server** | Managed endpoint (`cockroachlabs.cloud/mcp`); config snippet copied from Cloud Console into Claude Code/Cursor/VS Code. Tools: list databases/tables, describe schemas & indexes, inspect cluster health and running queries, run read-only SQL + `EXPLAIN`; writes only when explicitly enabled. | **Runtime:** the commander console — a human asks natural-language questions ("which victims are unreached and why?") and the AI answers by querying live fleet memory, read-only. **Dev-time:** every teammate wires the MCP config into Claude Code/Cursor for schema inspection while building. | Required tool #1 ✅ |
+| **Managed MCP Server** | Managed endpoint (`cockroachlabs.cloud/mcp`); config snippet copied from Cloud Console into Claude Code/Cursor/VS Code. Tools: list databases/tables, describe schemas & indexes, inspect cluster health and running queries, run read-only SQL + `EXPLAIN`; writes only when explicitly enabled. | **Runtime:** the commander console — a human asks natural-language questions ("which victims are unreached and why?") and the AI answers by querying live fleet memory, read-only; v3.1 adds decision tracing ("why did L1 stop?") via `plans.based_on` joins. **Dev-time:** every teammate wires the MCP config into Claude Code/Cursor for schema inspection while building. | Required tool #1 ✅ |
 | **Distributed Vector Indexing** | Native `VECTOR` column type; `CREATE VECTOR INDEX`; similarity operators `<->` (L2), `<#>` (inner product), `<=>` (cosine); vectors, JSONB, and relational data in the same table, same transaction, serializable by default. | The reconcile-before-broadcast gate (cosine `<=>` search over `observations.embedding` inside the insert transaction) and `mission_memories` cross-mission recall. One system for beliefs + tasks + vectors = the "no consistency gap" story from their own docs, demonstrated. | Required tool #2 ✅ |
 | **Agent Skills Repo** | Open-source repo (`cockroachlabs/cockroachdb-skills`) of machine-executable skills per the agentskills.io spec — including domains for resilience & disaster recovery, observability, security/governance, and specific skills like validating production readiness and auditing user privileges. | Two uses. (1) Dev: schema/query design skills during lane 1's build. (2) **Judge-visible:** run the production-readiness, privilege-audit, and backup/DR-posture skills against our cluster before submission and commit the outputs to `/ops-audit` in the repo. A disaster-relief fleet that audited its own disaster-recovery posture with the sponsor's skills repo — that paragraph writes itself. | Strong tool #3 ✅ |
 | **ccloud CLI** | Agent-ready CLI for the Cloud control plane: create clusters, manage IP allowlists, SQL users, connection info; JSON output; service-account RBAC. | Cluster provisioning + per-robot SQL user creation scripted via ccloud in `infra/` (reproducible setup, shown in README). Optional — nice fourth tool, zero extra architecture. | Optional #4 |
@@ -448,7 +506,7 @@ Everything below is from the official Devpost rules/resources pages (fetched Aug
 
 - Schema DDL in §4.5 is consistent with v26.2 docs: `VECTOR` type + `CREATE VECTOR INDEX` are the documented syntax. Use **cosine (`<=>`)** for the reconcile gate.
 - The docs' own showcase pattern is exactly ours: vector search combined with relational filters in one query, one transaction — e.g. `ORDER BY embedding <=> $query LIMIT 5` with `WHERE` filters. Reuse that shape in the gate.
-- Serializable isolation is the default — the claiming `UPDATE … WHERE status='open'` needs no extra locking ceremony.
+- Serializable isolation is the default — the claiming `UPDATE … WHERE` (incl. the expired-lease clause) needs no extra locking ceremony.
 - CockroachDB Cloud free tier: no credit card, hackathon-eligible per the FAQ. Free-tier limits are ours to watch; embeddings at 512-dim × a few thousand observations is nothing.
 - MCP server is read-only by default; write tools are opt-in. Leave writes off — it *is* our access-control story.
 
@@ -472,7 +530,7 @@ The Cloud free tier doesn't hand you nodes to kill. So the plan is two clusters,
 1. **Primary fleet memory:** CockroachDB Cloud (free tier) — powers the deployed demo, the MCP console, and the vector work. This is what judges touch.
 2. **Chaos segment (video only):** the identical stack pointed at a **self-hosted 3-node CockroachDB cluster** (Docker Compose, or `cockroach demo --nodes 3` in rehearsal). Mid-rescue, kill node 2's container on camera; the fleet keeps claiming, completing, and handing off. Narrate honestly: "same software, self-hosted so we can murder a node live."
 
-This is stronger than pretending: it shows we understand the deployment models, and the survive-a-node-loss behavior is a property of the database, not of the hosting tier. FR-11 and the §5.3 Aug 13–14 milestone now mean this. If ccloud/Cloud tiers turn out to allow a scale-down demo on a paid Advanced cluster, lane 1 may substitute — but don't spend money to prove what Docker proves free.
+This is stronger than pretending: it shows we understand the deployment models, and the survive-a-node-loss behavior is a property of the database, not of the hosting tier. FR-11 and the §5.3 Aug 13–14 milestone now mean this. v3.1 makes the segment three kills deep: robot (lease expiry frees its task), orchestrator (agents self-claim safely), database node (memory survives) — narrate them in that order. If ccloud/Cloud tiers turn out to allow a scale-down demo on a paid Advanced cluster, lane 1 may substitute — but don't spend money to prove what Docker proves free.
 
 ### 6.6 Day-1 setup checklist (do today, before code)
 
@@ -482,7 +540,6 @@ This is stronger than pretending: it shows we understand the deployment models, 
 4. Repo: init public, MIT license visible in About, README skeleton with the tools-used section stubbed, first commit today (in-window timestamp).
 5. Clone `cockroachlabs/cockroachdb-skills`; lane 1 skims the schema-design and resilience/DR skills before writing the migration.
 
-
 ---
 
 ## 7. Sources
@@ -490,7 +547,6 @@ This is stronger than pretending: it shows we understand the deployment models, 
 Market sizing: MarketsandMarkets, AMR/AGV Fleet Management Software Market (Nov 2025) · Mordor Intelligence, Search and Rescue Robots Market (2025) · MRFR, SkyQuest, Research Nester SAR reports · SVB, Physical AI & the Future of Robotics Report (2026) · PitchBook 2025 robotics funding via Future Investments (May 2026).
 Competitive: MiR Fleet product pages · CB Insights robot-fleet-management ESP (Formant, Geek+) · SYNAOS MRFM (VDA 5050) · Open-RMF docs + JobToRob milestone coverage (mutex groups) · Open Robotics Discourse, "SOTA for Multi Robot Cooperation in RMF" (Jul 2025) · AWS IoT RoboRunner preview/GA announcements (Nov 2021 / Nov 2022), @aws-sdk/client-iot-roborunner removal notice, AWS RoboMaker end-of-support notice (Sept 10, 2025).
 Research: Team Explorer, "Modular, Resilient, and Scalable System Design… Lessons after DARPA SubT" (arXiv 2404.17759) · CTU-CRAS-NORLAB SubT field reports · Gupta et al., "RobotFleet" (arXiv 2510.10379, USC) · Cockroach Labs engineering blog on C-SPANN vector indexing and agent memory.
-
 
 Hackathon & tooling: Devpost hackathon overview, resources, and official rules pages (cockroachdb-ai.devpost.com, fetched Aug 1 2026) · CockroachDB docs v26.2: "CockroachDB and AI" (VECTOR type, CREATE VECTOR INDEX, similarity operators, MCP server tooling, Agent Skills, ccloud) · cockroachlabs/cockroachdb-skills (GitHub) · Cloud MCP quickstart + ccloud get-started docs (cockroachlabs.com/docs/cockroachcloud).
 
@@ -500,3 +556,4 @@ Hackathon & tooling: Devpost hackathon overview, resources, and official rules p
 2. Relay/uplink-zone mechanic (FR-14): great realism + SubT tie-in, but it's the riskiest P1. In or out by Aug 9?
 3. Live LLM in the deployed demo, or recorded-replay only with live mode behind a flag?
 4. Who takes which TBD lane? Decide today — lane 3 needs the strongest frontend hand, lane 4 the strongest distributed-systems hand.
+5. *(v3.1)* Sector-lease TTL and coverage threshold (20s / 85% defaults) — confirm or retune at playtest #1.
