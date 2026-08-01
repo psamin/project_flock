@@ -21,10 +21,37 @@ engines accept the wider slice and it costs nothing.
 NULL_DIGEST = "NULL_"
 HASH_SLICE = 16  # hex chars -> bit(64)
 
-# type name -> SQL expression template. Filled in one type at a time during M2;
-# any type absent here falls back to a plain ::text cast, which is a hypothesis,
-# not a guarantee.
-CANONICAL_CASTS: dict[str, str] = {}
+# Numeric canonicalization. `v::text` diverges because CockroachDB renders values
+# carrying an exponent in scientific notation ('1E+10') where Postgres always
+# renders plain ('10000000000'). to_char with an FM format agrees on both engines
+# AND normalizes display scale (1.50 -> 1.5, which is what we want: numerically
+# equal values must not raise a false divergence).
+#
+# But to_char is a *lossy* renderer, and lossy means collisions, and a collision
+# is a silent false pass. Two guards, both measured (see RESULTS.md):
+#   - CRDB's to_char raises "invalid operation" above 20 integer digits, so the
+#     guard must also keep to_char from ever being reached on such a value.
+#   - Values with more fractional digits than the format render identically
+#     (0.000…1 and 0.000…2 both become '0.') on BOTH engines — a real false pass.
+# Outside the guarded range we fall back to `::text`, which is lossless on each
+# engine but may render differently across them. That direction of error is safe:
+# a spurious divergence gets investigated, a spurious match does not.
+NUMERIC_INT_DIGITS = 20
+NUMERIC_FRAC_DIGITS = 30
+NUMERIC_FORMAT = "FM" + "9" * NUMERIC_INT_DIGITS + "." + "9" * NUMERIC_FRAC_DIGITS
+NUMERIC_CANONICAL = (
+    "case when abs({col}) < 1e20 and {col} = trunc({col}, 30)"
+    f" then to_char({{col}}, '{NUMERIC_FORMAT}')"
+    " else {col}::text end"
+)
+
+# data_type (as reported by information_schema, verified identical on both
+# engines) -> SQL expression template. Only types whose naive `::text` cast was
+# *measured* to diverge appear here; the other nine were proven equal as-is and
+# are documented in RESULTS.md rather than wrapped in ceremony.
+CANONICAL_CASTS: dict[str, str] = {
+    "numeric": NUMERIC_CANONICAL,
+}
 
 
 def canonical(col: str, type_name: str | None = None) -> str:
