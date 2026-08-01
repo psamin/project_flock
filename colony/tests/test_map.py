@@ -128,6 +128,24 @@ def test_out_of_bounds_is_never_passable(world):
     assert not world.passable(world.width, 0)
 
 
+def test_mission_metadata_survives_loading(world):
+    """The tick server needs the mission length to know when to stop, and the
+    seed is what makes a run reproducible (§4.8). Dropping them at load time
+    would make the map file lie about what it contains."""
+    assert world.mission_length_ticks == 1200
+    assert world.seed is not None
+    assert world.name == "Aftershock"
+
+
+def test_an_escalation_after_the_mission_ends_is_rejected(world):
+    """An aftershock scheduled past tick 1200 never fires, quietly removing the
+    replanning beat the whole demo is built around."""
+    data = json.loads(MAP_PATH.read_text())
+    data["escalations"][0]["tick"] = data["mission_length_ticks"] + 10
+    with pytest.raises(MapError, match="never fire"):
+        parse_map(data)
+
+
 def test_zone_lookup(world):
     assert world.zone_at(2, 2) == "staging"
     assert world.zone_at(*(35, 20)) == "office"

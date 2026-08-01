@@ -18,7 +18,7 @@ schema:
 		--set errexit=true < schema/v0.sql
 
 test:
-	uv run pytest -q
+	uv run --extra dev pytest -q
 
 map:
 	uv run python -m world.build_aftershock

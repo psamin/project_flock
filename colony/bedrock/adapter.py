@@ -35,6 +35,24 @@ EMBED_DIMS = 512  # matches observations.embedding VECTOR(512) in schema/v0.sql
 LIVE, RECORD, REPLAY = "live", "record", "replay"
 
 
+def _transient_errors() -> tuple[type[BaseException], ...]:
+    """Bedrock failures a robot should ride out by falling back, not by dying.
+
+    Throttling, transient service errors and transport timeouts all arrive as
+    botocore exceptions; without boto3 installed there is nothing to catch,
+    since the live path is unreachable anyway.
+    """
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        return (ClientError, BotoCoreError)
+    except ImportError:
+        return ()
+
+
+_TRANSIENT_ERRORS = _transient_errors()
+
+
 @dataclass
 class Plan:
     """Strict-JSON plan output (§4.3): {task_id | explore(sector) | return_to_base, rationale}."""
@@ -99,7 +117,12 @@ class BedrockAdapter:
             "dimensions": EMBED_DIMS,
             "normalize": True,
         })
-        response = self._client.invoke_model(modelId=EMBED_MODEL, body=body)
+        try:
+            response = self._client.invoke_model(modelId=EMBED_MODEL, body=body)
+        except _TRANSIENT_ERRORS:
+            # A throttled embedding must not drop the observation entirely; the
+            # reconcile gate degrades rather than the scout losing the sighting.
+            return _offline_embedding(text)
         vector = json.loads(response["body"].read())["embedding"]
         self.calls += 1
         if self.mode == RECORD:
@@ -110,14 +133,20 @@ class BedrockAdapter:
 
     def plan(self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]) -> Plan:
         """Ask for one decision. Prompt stays under ~1.5k tokens by design (§4.3)."""
-        prompt = _plan_prompt(role_card, beliefs_digest, open_tasks)
+        # Sorted before the prompt is built, because the prompt text is the
+        # cassette key. `open_tasks()` orders by priority alone, so two equal
+        # priority tasks can arrive in either order, producing two different
+        # prompts for the same mission state — a cassette miss, and a seeded run
+        # that is no longer reproducible. The id tiebreak makes it total.
+        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
+        prompt = _plan_prompt(role_card, beliefs_digest, tasks)
         key = _key("plan", prompt)
 
         if self.mode == REPLAY:
             cached = self._cassette.get(key)
             if cached is not None:
                 return Plan.parse(cached)
-            return _offline_plan(open_tasks)
+            return _offline_plan(tasks)
 
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
@@ -125,7 +154,12 @@ class BedrockAdapter:
             "temperature": 0,          # determinism matters more than flair here
             "messages": [{"role": "user", "content": prompt}],
         })
-        response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
+        try:
+            response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
+        except _TRANSIENT_ERRORS:
+            # Throttling or a Bedrock hiccup must not stall a robot mid-mission;
+            # §5.1 lane 2 requires a rule-based fallback path, and this is it.
+            return _offline_plan(tasks)
         text = json.loads(response["body"].read())["content"][0]["text"]
         self.calls += 1
         if self.mode == RECORD:
@@ -197,16 +231,30 @@ def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:
     )
 
 
+def has_credentials() -> bool:
+    """Whether boto3 can resolve credentials by any means.
+
+    Checking AWS_ACCESS_KEY_ID and AWS_PROFILE is not enough: the agents deploy
+    to ECS Fargate (§4.6), where credentials come from the task role and neither
+    variable is set. An env-var check would downgrade the deployed fleet to
+    offline planning while working perfectly on a laptop.
+    """
+    try:
+        import botocore.session
+
+        return botocore.session.get_session().get_credentials() is not None
+    except Exception:
+        return False
+
+
 def adapter_from_env() -> BedrockAdapter:
-    """Live only when explicitly asked for AND credentials exist; replay otherwise.
+    """Live only when explicitly asked for AND credentials resolve; replay otherwise.
 
     Defaulting to replay means a missing credential is a degraded demo, not a
     crashed one.
     """
     mode = os.environ.get("COLONY_BEDROCK_MODE", REPLAY)
-    if mode in (LIVE, RECORD) and not (
-        os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE")
-    ):
+    if mode in (LIVE, RECORD) and not has_credentials():
         mode = REPLAY
     cassette = os.environ.get("COLONY_BEDROCK_CASSETTE")
     return BedrockAdapter(

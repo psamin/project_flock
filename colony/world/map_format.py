@@ -28,6 +28,9 @@ class MapError(ValueError):
     """A map that cannot be loaded, with the reason."""
 
 
+DEFAULT_MISSION_TICKS = 1200   # §3.3: the mission ends at tick 1200
+
+
 @dataclass(frozen=True)
 class WorldMap:
     width: int
@@ -39,6 +42,14 @@ class WorldMap:
     spawn_points: dict[str, list[dict[str, int]]]
     victims: list[dict[str, Any]]
     escalations: list[dict[str, Any]]
+    # Mission metadata. Carried through rather than dropped on load: the tick
+    # server needs `mission_length_ticks` to know when the mission ends, and
+    # `seed` is what makes a demo run reproducible (§4.8 "same seed + same action
+    # log = same mission").
+    name: str = ""
+    description: str = ""
+    seed: int | None = None
+    mission_length_ticks: int = DEFAULT_MISSION_TICKS
 
     def ground_at(self, x: int, y: int) -> str:
         return self.ground[y][x]
@@ -114,17 +125,31 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
         if state not in VICTIM_STATES:
             raise MapError(f"victim state {state!r} is not one of {sorted(VICTIM_STATES)}")
 
+    mission_ticks = data.get("mission_length_ticks", DEFAULT_MISSION_TICKS)
+    if mission_ticks <= 0:
+        raise MapError(f"mission_length_ticks must be positive, got {mission_ticks}")
+
     for esc in data["escalations"]:
         if "tick" not in esc or "kind" not in esc:
             raise MapError("every escalation needs a 'tick' and a 'kind'")
         if esc["tick"] < 0:
             raise MapError(f"escalation tick must be non-negative, got {esc['tick']}")
+        # An escalation past the end of the mission never fires. Scheduling the
+        # aftershock at 1300 in a 1200-tick mission would quietly remove the
+        # replanning beat the demo is built around.
+        if esc["tick"] >= mission_ticks:
+            raise MapError(
+                f"escalation {esc['kind']!r} is scheduled at tick {esc['tick']},"
+                f" at or past the mission end ({mission_ticks}) — it would never fire"
+            )
 
     return WorldMap(
         width=width, height=height, tile_size=data["tile_size"],
         ground=ground, objects=objects, zones=data["zones"],
         spawn_points=data["spawn_points"], victims=data["victims"],
         escalations=data["escalations"],
+        name=data.get("name", ""), description=data.get("description", ""),
+        seed=data.get("seed"), mission_length_ticks=mission_ticks,
     )
 
 

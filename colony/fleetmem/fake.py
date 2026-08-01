@@ -143,6 +143,10 @@ class FakeFleetMem:
         with self._lock:
             task_id = uuid4()
             deps = list(depends_on)
+            unknown = [d for d in deps if d not in self._tasks]
+            if unknown:
+                # Matches CockroachFleetMem: see the note on its create_task.
+                raise ValueError(f"depends_on refers to unknown task ids: {unknown}")
             self._tasks[task_id] = {
                 "id": task_id, "mission_id": mission_id, "kind": kind,
                 "target_x": target[0], "target_y": target[1], "priority": priority,

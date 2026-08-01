@@ -109,22 +109,29 @@ class CockroachFleetMem:
             ).fetchone()
             return None if row is None else Match(row["id"], distance=0.0)
 
+        # kind and the position box are constrained IN THE QUERY, not filtered
+        # afterwards. Filtering a top-k result set in Python silently misses real
+        # duplicates: if `limit` nearer-but-irrelevant observations exist anywhere
+        # in the mission, the actual match never makes it into the rows, and
+        # report_observation inserts a second belief for one victim.
+        #
         # ORDER BY <=> with the mission_id prefix constrained is what lets the
         # cosine index serve this; see the index comment in schema/v0.sql.
         rows = self.conn.execute(
-            "SELECT id, pos_x, pos_y, kind, embedding <=> %s AS distance"
+            "SELECT id, embedding <=> %s AS distance"
             "  FROM observations"
             " WHERE mission_id = %s AND embedding IS NOT NULL"
+            "   AND kind = %s"
+            "   AND pos_x BETWEEN %s AND %s AND pos_y BETWEEN %s AND %s"
             " ORDER BY embedding <=> %s LIMIT %s",
-            (_vec(embedding), mission_id, _vec(embedding), limit),
+            (_vec(embedding), mission_id, kind,
+             box[0], box[2], box[1], box[3],
+             _vec(embedding), limit),
         ).fetchall()
 
         for r in rows:
-            if r["distance"] > MERGE_DISTANCE or r["kind"] != kind:
-                continue
-            if abs(r["pos_x"] - x) > MERGE_RADIUS_TILES or abs(r["pos_y"] - y) > MERGE_RADIUS_TILES:
-                continue
-            return Match(r["id"], distance=float(r["distance"]))
+            if r["distance"] <= MERGE_DISTANCE:
+                return Match(r["id"], distance=float(r["distance"]))
         return None
 
     def get_beliefs(
@@ -156,8 +163,22 @@ class CockroachFleetMem:
         priority: int = 1,
         depends_on: Sequence[UUID] = (),
     ) -> UUID:
-        """Create a task. Starts `open` with no dependencies, `blocked` with."""
+        """Create a task. Starts `open` with no dependencies, `blocked` with.
+
+        Unknown dependency ids are rejected. Left unchecked the two
+        implementations disagree: the client's `NOT EXISTS` unblock subquery
+        finds no row for a missing dependency and so opens the task immediately,
+        while the fake raises. A task that silently unblocks is the worse of the
+        two — it dispatches a medic to a victim still behind rubble — so both
+        refuse the bad input up front instead.
+        """
         deps = list(depends_on)
+        if deps:
+            known = self.conn.execute(
+                "SELECT count(*) AS n FROM tasks WHERE id = ANY(%s)", (deps,)
+            ).fetchone()["n"]
+            if known != len(set(deps)):
+                raise ValueError(f"depends_on refers to unknown task ids: {deps}")
         row = self.conn.execute(
             "INSERT INTO tasks"
             " (mission_id, kind, target_x, target_y, priority, status, depends_on)"

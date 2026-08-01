@@ -5,9 +5,13 @@ dependency unblocking, and the reconcile gate that stops two scouts turning one
 victim into two.
 """
 
+import hashlib
+import math
 import uuid
 
-from bedrock.adapter import BedrockAdapter
+import pytest
+
+from bedrock.adapter import EMBED_DIMS, BedrockAdapter
 from fleetmem.types import BLOCKED, CLAIMED, DONE, OPEN
 
 
@@ -60,6 +64,70 @@ def test_gate_still_works_without_embeddings(mem, mission):
     a = mem.report_observation(mission, "s1", "victim", (7, 7))
     b = mem.report_observation(mission, "s2", "victim", (8, 7))
     assert a == b
+
+
+def _unit(seed: str) -> list[float]:
+    """Deterministic unit vector, no numpy."""
+    digest = hashlib.sha512(seed.encode()).digest()
+    raw = [(digest[i % len(digest)] / 255.0) - 0.5 for i in range(EMBED_DIMS)]
+    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+    return [v / norm for v in raw]
+
+
+def _blend(base: list[float], other: list[float], weight: float) -> list[float]:
+    mixed = [a + weight * b for a, b in zip(base, other)]
+    norm = math.sqrt(sum(v * v for v in mixed)) or 1.0
+    return [v / norm for v in mixed]
+
+
+# Far from (14,9) so they cannot legitimately merge with it, and far from each
+# other so they stay distinct beliefs rather than collapsing into one.
+DECOY_POSITIONS = [(0, 0), (35, 0), (0, 29), (35, 29), (35, 15)]
+
+
+def test_merge_survives_nearer_but_ineligible_beliefs(mem, mission):
+    """Regression: the candidate filter must be part of the nearest-neighbour
+    query, not applied to its results.
+
+    Two scouts describe one victim slightly differently, so the second sighting's
+    embedding is close to the first but not identical. Meanwhile five same-kind
+    beliefs elsewhere on the map sit *nearer* in embedding space. Filtering
+    position after a top-k means the five decoys fill the result set, the real
+    duplicate never surfaces, and one victim becomes two — the double-dispatch
+    the gate exists to prevent.
+
+    Verified to fail against the pre-fix implementation (2 beliefs at (14,9))
+    and pass after it (1 belief, 2 sightings). Earlier gate tests all ran on
+    near-empty missions and could not have caught this.
+    """
+    stored = _unit("victim under rubble at 14,9")
+    second_sighting = _blend(stored, _unit("scout-2 phrasing"), 0.05)
+
+    mem.report_observation(mission, "s1", "victim", (14, 9), embedding=stored)
+    for i, pos in enumerate(DECOY_POSITIONS):
+        mem.report_observation(
+            mission, "s2", "victim", pos,
+            embedding=_blend(second_sighting, _unit(f"decoy{i}"), 0.004),
+        )
+
+    again = mem.report_observation(
+        mission, "s3", "victim", (14, 9), embedding=second_sighting
+    )
+
+    at_target = [b for b in mem.get_beliefs(mission, kind="victim") if b.pos == (14, 9)]
+    assert len(at_target) == 1, f"duplicate victim created at (14,9): {at_target}"
+    assert at_target[0].id == again
+    assert at_target[0].sightings == 2
+
+
+def test_unknown_dependency_ids_are_rejected(mem, mission):
+    """Regression: unchecked, the client silently opened such a task while the
+    fake raised KeyError. Either way a medic could be dispatched to a victim
+    still behind rubble."""
+    import uuid as _uuid
+
+    with pytest.raises(ValueError, match="unknown task"):
+        mem.create_task(mission, "deliver_kit", depends_on=[_uuid.uuid4()])
 
 
 def test_beliefs_can_be_scoped_to_an_area(mem, mission):

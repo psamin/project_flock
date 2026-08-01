@@ -81,6 +81,61 @@ def test_offline_plan_explores_when_there_is_nothing_to_do():
     assert BedrockAdapter().plan("scout", "nothing seen", []).action == "explore"
 
 
+def test_equal_priority_tasks_plan_identically_regardless_of_input_order():
+    """Regression: the prompt text is the cassette key, and open_tasks() orders
+    by priority alone. Two equal-priority tasks arriving in either order gave two
+    different prompts for the same mission state — a cassette miss, and a seeded
+    run that no longer replays."""
+    tasks = [
+        {"id": "aaa", "kind": "clear_debris", "priority": 5},
+        {"id": "bbb", "kind": "clear_debris", "priority": 5},
+    ]
+    forward = BedrockAdapter().plan("lifter", "debris everywhere", tasks)
+    reversed_ = BedrockAdapter().plan("lifter", "debris everywhere", list(reversed(tasks)))
+    assert forward.task_id == reversed_.task_id
+
+
+def test_cassette_key_is_order_independent(tmp_path):
+    from bedrock.adapter import _key, _plan_prompt
+
+    tasks = [
+        {"id": "aaa", "kind": "clear_debris", "priority": 5, "target_x": 1, "target_y": 1},
+        {"id": "bbb", "kind": "clear_debris", "priority": 5, "target_x": 2, "target_y": 2},
+    ]
+    ordered = sorted(tasks, key=lambda t: (-t["priority"], str(t["id"])))
+    ordered_reversed = sorted(
+        list(reversed(tasks)), key=lambda t: (-t["priority"], str(t["id"]))
+    )
+    assert _key("plan", _plan_prompt("lifter", "d", ordered)) == _key(
+        "plan", _plan_prompt("lifter", "d", ordered_reversed)
+    )
+
+
+# --- resilience --------------------------------------------------------------
+
+
+def test_a_throttled_bedrock_call_falls_back_instead_of_stalling_a_robot(monkeypatch):
+    """§5.1 lane 2 requires a rule-based fallback. A ThrottlingException mid-
+    mission must degrade the plan, not kill the agent loop."""
+    pytest.importorskip("boto3", reason="AWS extra not installed")
+    from botocore.exceptions import ClientError
+
+    class Throttled:
+        def invoke_model(self, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+                "InvokeModel",
+            )
+
+    monkeypatch.setattr("boto3.client", lambda *a, **k: Throttled())
+    adapter = BedrockAdapter(mode=LIVE)
+
+    plan = adapter.plan("lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}])
+    assert plan.action == "claim_task" and plan.task_id == "t1"
+
+    assert len(adapter.embed("victim under rubble")) == EMBED_DIMS
+
+
 def test_plan_always_carries_a_rationale():
     """Rationales are surfaced as thought bubbles (§3.6) — an empty one is a
     blank bubble in the demo video."""
@@ -108,15 +163,30 @@ def test_replay_prefers_the_cassette_over_the_offline_path(tmp_path):
 def test_missing_credentials_downgrade_to_replay(monkeypatch):
     """A missing credential should mean a degraded demo, not a crashed one."""
     monkeypatch.setenv("COLONY_BEDROCK_MODE", LIVE)
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr("bedrock.adapter.has_credentials", lambda: False)
     assert adapter_from_env().mode == REPLAY
 
 
+def test_credentials_from_a_task_role_still_count(monkeypatch):
+    """Regression: checking AWS_ACCESS_KEY_ID/AWS_PROFILE alone downgraded the
+    ECS Fargate deployment (§4.6) to offline planning, since task-role
+    credentials set neither variable."""
+    pytest.importorskip("boto3", reason="AWS extra not installed")
+    monkeypatch.setenv("COLONY_BEDROCK_MODE", LIVE)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr("bedrock.adapter.has_credentials", lambda: True)
+    monkeypatch.setattr("boto3.client", lambda *a, **k: object())
+    assert adapter_from_env().mode == LIVE
+
+
 def test_explicit_mode_is_honoured_when_credentials_exist(monkeypatch):
+    """Exercises the real credential resolution rather than stubbing it — an
+    access key with no secret does not resolve, which is why this needs both."""
     pytest.importorskip("boto3", reason="AWS extra not installed")
     monkeypatch.setenv("COLONY_BEDROCK_MODE", RECORD)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
     monkeypatch.setattr("boto3.client", lambda *a, **k: object())
     assert adapter_from_env().mode == RECORD
 
