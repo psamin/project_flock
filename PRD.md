@@ -1,638 +1,474 @@
-# Project Flock — Database Migration Copilot with Swarm Verification
+# Fleet Coordination Layer — PRD v3
 
-> Migrate any database to CockroachDB — with the **human playbook automated as agents**: risks audited, mitigations decided, the runbook driven end-to-end, every row verified by a **swarm**, and every lesson kept. The copilot's memory **compounds**: each migration makes the next one smarter. Underneath it all, one durable, strongly-consistent shared memory: CockroachDB — the destination database is also the migration's brain.
-
-**Hackathon:** CockroachDB × AWS — Build with Agentic Memory
-**Version:** v2 — restructured around the human-steps → agents mapping (§2), an explicit agent roster (§3), and a settled memory design (§4)
-
-**One-liner:** MOLT moves and checks the bytes, deterministically and well. **Flock is everything that's currently a human:** it assesses, plans, decides, drives, explains, and remembers — with human sign-off kept at exactly three gates.
+**Working codename:** Colony *(roaches survive disasters — on-brand, rename freely)*
+**Hackathon:** CockroachDB × AWS "Build with Agentic Memory" (Devpost) — **deadline Aug 18, 5:00pm EDT**
+**Owner:** Praneeth · **Team:** 5 · **Date:** Aug 1, 2026 · **Changes from v2:** hackathon rules deep dive, tool-by-tool CRDB integration plan, vector syntax validated against v26.2 docs, AWS service decisions locked, resilience-demo mechanics corrected, day-1 checklist added; sections reordered so sources and open questions close the doc. (v2 added market research, scenario spec, FRs, DDL, metrics, lane checklists, day-by-day plan.)
 
 ---
 
-## TL;DR
+## 1. Executive summary
 
-A Postgres → CockroachDB migration today is four good CLI tools (MOLT Convert / Fetch / Replicator / Verify) glued together by a human: reading Convert's report against the docs, writing the pre-mortem by hand, resolving every schema finding into a DDL decision, babysitting the load, interpreting verification logs, syncing sequences manually after load, making the cutover call from terminal output, and carrying the lessons out the door when it's over. Flock automates that glue as a roster of agents (§3), each mapped 1:1 to a step of the standard playbook (§2), with humans kept at exactly the three points where judgment should stay human: the risk register, the plan + DDL, and the final cutover.
+Robots are already autonomous. They are not yet teammates. Colony is a shared-memory coordination layer, built on CockroachDB, that lets a heterogeneous robot fleet run a mission as one team: shared beliefs about the world, transactional task claiming, automatic handoffs when one robot's step unblocks another's, and replanning when the world changes. We demonstrate it in a disaster-relief simulation where the fleet keeps rescuing people even while a database node is killed mid-mission.
 
-Two mechanisms make it more than a wrapper. A **gap-audit engine** — mechanical rule-matching over structured schema *and workload* descriptors, seeded with curated quirks and *sharpened by every migration it has run* — produces a provenance-linked risk register and opportunity report. And a **swarm** of verifier agents claims per-object checks atomically (`FOR UPDATE SKIP LOCKED`), runs hierarchical checksum diffs *in-engine across the two databases*, and votes on cutover in one serializable transaction — coordinating entirely through CockroachDB, which acts simultaneously as **task queue, blackboard, pub/sub bus, vector memory, and audit backend**. Every run ends in reflection: the trajectory is distilled into engine-keyed rules with provenance and a lifecycle (`seeded → candidate → confirmed`), stored in CockroachDB's vector index (**the memory**) and rendered to markdown artifacts (**the human view**, §4). Run 2 provably beats run 1 because the memory improved, not the model.
+The market research below supports three claims we'll make to judges:
 
----
-
-## The focus: two pillars (read this first)
-
-The hackathon's center of gravity is one sentence from the brief: *"memory is not an afterthought, it is the thing that makes an agent useful in production."* Flock is built as two proofs of that sentence; everything else in this document is plumbing, sized accordingly.
-
-- **Pillar 1 — working memory at swarm scale.** The verification swarm *is* the brief's motivating image: hundreds of ephemeral Lambda workers spawning autonomously, writing claims/verdicts/heartbeats constantly, dying mid-task while the memory survives and self-heals. Lambda workers are ephemeral by construction — "stateless agents, durable CockroachDB memory" is the runtime model, not a slogan.
-- **Pillar 2 — experience memory that compounds.** Migration gives memory a reason to exist beyond coordination: quirks recur across migrations, so remembering pays. The proof is behavioral and takes exactly two runs (§14): run 1 fails on an injected divergence and distills the lesson; run 2 — the *same* migration — flags the problem *before execution*, citing the rule it learned. Better because the memory improved, not the model.
-
-**The submission in one sentence:** a migration copilot whose swarm coordinates through CockroachDB and whose second migration is provably better than its first — because the memory, not the model, improved.
-
-Sized as plumbing in service of the pillars: schema conversion and bulk load (deterministic — MOLT Fetch, wrapped); the gap audit (the *surface where memory becomes visible* — ten curated quirks, not an expert system); the external OTel viewer (garnish — the CockroachDB-backed ledger + dashboard are the observability story). Outside the blast radius entirely (P2): day-2 mode, MySQL, dependency analysis, CDC cutover.
+1. **The gap is real.** Every layer of today's fleet software stack — vendor fleet managers, vendor-agnostic platforms, interoperability standards, even AWS's own discontinued RoboRunner — stops at telemetry, traffic deconfliction, and one-task-to-one-robot dispatch. Task-level teamwork between robots is the layer nobody ships.
+2. **The demand is documented.** Users of Open-RMF, the leading open-source fleet framework, are literally asking its forums for inter-robot task dependency and handoffs. DARPA SubT identified operator overload and robot attrition as the top field problems — both are coordination problems.
+3. **The timing is right.** Record capital is flooding into making individual robots smarter (foundation models, humanoids), while the "team brain" layer stays unclaimed. LLM agents plus distributed SQL with vector search make that layer buildable now — by five people in seventeen days.
 
 ---
 
-## 1. The problem — what's still human after MOLT
+## 2. Market research
 
-Cockroach Labs already ships good deterministic tooling: MOLT Convert flags DDL incompatibilities, Fetch moves data with checkpointed continuation, Replicator streams changes for minimal-downtime cutover with failback, and Verify compares rows concurrently. The gaps that remain are precisely the *human* gaps — and they're the ones this hackathon is about:
+### 2.1 Market size and growth
 
-1. **Dialect gaps live in the workload, and nothing reads the workload.** Convert audits an uploaded `.sql` file. Nothing in the standard flow reads `pg_stat_statements` or the query log — so a gap that lives in a *query* rather than in DDL (an isolation-sensitive transaction shape, a `LISTEN/NOTIFY` consumer, a lag-tolerant read pattern) is invisible until production. App-semantic differences (serializable retry errors, contention) are documented as "optimize your queries" — i.e., left entirely to the human.
-2. **Verification is a single process a human babysits and interprets.** MOLT Verify is multi-threaded but runs as one process on one machine: it ships 20k-row batches over the network to compare in the binary, dies without self-healing, can't compare geospatial types, trips on collated string PKs, and emits *logs* — a human reads `num_mismatch` and conditional-success warnings and *judges* whether the migration is clean. The verdict is a human's interpretation of terminal output, not a queryable fact.
-3. **The knowledge doesn't compound.** Each migration is a one-off, consultant-heavy effort — Cockroach's own answer to this gap is a paid migration service with engineers guiding you through the cutover window. What the last run taught about *this engine's quirks* leaves with the people.
-4. **Agent systems can't be trusted in production.** Surveys put ~95% of enterprise AI pilots as never reaching production — not for lack of model capability, but for lack of architectural robustness, governance, and traceability. A black-box agent that touches your data is a non-starter.
+Three concentric markets matter to this project:
 
-**What we're really building:** the *human layer* of database migration, automated with agents and made auditable — where memory makes it smart, a swarm makes it fast, and observability makes it trustworthy. We never compete with MOLT on moving bytes; we replace the person driving it.
+| Market | Size & trajectory | Source |
+|---|---|---|
+| **AMR/AGV fleet management software** (the direct category) | ~$1.58B in 2025 → projected $5.23B by 2032, 18.7% CAGR. Driven by warehouses, manufacturing, logistics hubs, e-commerce fulfillment. | MarketsandMarkets, Nov 2025 |
+| **Search-and-rescue robotics** (our showcase domain) | Estimates cluster around $25–35B in 2025 with mid-teens CAGR; Mordor Intelligence puts it at $35.3B (2025) → $70.3B (2030) at 14.8% CAGR. Other firms (MRFR, SkyQuest, Research Nester) land in the $22–28B base range growing 13–20%. Autonomy is the fastest-growing operation segment. | Mordor Intelligence 2025; MRFR; SkyQuest; Research Nester |
+| **Physical AI / robotics venture market** (the wave we ride) | Robotics and physical-AI startups raised a record ~$27.6B across ~1,009 deals in 2025 — more than double the prior year (PitchBook). SVB's 2026 report finds hardware now takes roughly a third of US VC excluding the OpenAI/Anthropic mega-rounds, and 2026 YTD had already eclipsed all of 2025 by mid-year. | PitchBook via Future Investments, May 2026; SVB Physical AI Report 2026 |
 
----
+Takeaway for the pitch: the fleet-software category alone is a multi-billion-dollar market growing ~19% a year, and the disaster-robotics domain we demo in is an order of magnitude larger. We are not inventing demand; we're filling a documented hole in a funded stack.
 
-## 2. The playbook, step by step — every human step becomes an agent
+### 2.2 Competitive landscape
 
-This is the product spec. The left columns are the standard migration sequence as Cockroach's own docs describe it — including the parts the docs explicitly assign to humans (the pre-mortem, sequence creation, query optimization). The right columns are the Flock agent that owns each step and what, if anything, stays human.
+The space sorts into five groups. None of them do what we're building.
 
-| # | Playbook step | What the human does today | Flock owner | What stays human |
-|---|---|---|---|---|
-| 1 | **Assess & discover** | Inventory the source, read Convert's report against the feature-support docs, list what won't map | **Introspector** (deterministic) + **Auditor** | Nothing — output is the register |
-| 2 | **Write the pre-mortem** | The docs literally instruct teams to write one: likely failure points, ranked severity, mitigations — on a wiki | **Auditor** — the risk register *is* the pre-mortem, generated with per-finding provenance | **Gate 1: approve the register** |
-| 3 | **Plan the migration** | Choose the flow (planned downtime vs replication), sequence the steps, write the runbook | **Planner** | **Gate 2: approve plan + DDL** |
-| 4 | **Prepare the environment** | Connectivity, users/permissions, buckets, replication prereqs (`wal_level=logical`, slot capacity) | **Preflight** — deterministic checks; red blocks the run | Fix whatever Preflight flags |
-| 5 | **Convert schema + resolve findings** | Run Convert, then resolve each incompatibility by hand: INT width, sequences → UUID or hash-sharded, triggers, unsupported types | **Conversion Resolver** — one decision per finding via mitigation templates, whitelist-validated | DDL diff approved as part of Gate 2 |
-| 6 | **The DDL dance** | Apply schema; drop constraints/indexes for load; recreate after | **Load Driver** sequences it | — |
-| 7 | **Drive the bulk load** | Run `molt fetch` with the right flags, watch it, resume from checkpoints on failure | **Load Driver** — wraps MOLT Fetch, parses its structured output, auto-continues | — |
-| 8 | **Sync sequences** | The official flow leaves sequential keys as a *manual post-load step*; restart values set by hand — the classic post-cutover duplicate-key incident | **Sequence Reconciler** + a first-class `sequence_state` check kind | — |
-| 9 | **Verify & interpret** | Run `molt verify`, read the logs, judge whether the warnings matter | **Verifier swarm** + **Quorum** — verdicts are rows; the gate is a serializable transaction, not a judgment call over logs | — |
-| 10 | **Diagnose failures** | Grep logs, guess, retry | **Diagnosis agent** — root-cause postmortem written to memory | — |
-| 11 | **The cutover call** | Go/no-go decided from terminal output; pause writes; flip traffic | **Gate** arms cutover only on all-leaf-pass | **Gate 3: confirm cutover** |
-| 12 | **Capture the lessons** | Retro doc nobody reads; knowledge leaves with the engineers — or was rented from the migration-services team | **Reflection agent** — trajectory → rules with provenance and lifecycle status | — |
-| 13 | **Render the paper trail** | Write the runbook / report / retro by hand | **Scribe** — risk report, plan, runbook, postmortems rendered to markdown from the DB | Read them |
-
-**What deliberately stays human (and only this):** the three gates — register, plan + DDL, cutover — plus application-side code changes. Retry loops for serialization errors (`40001`), ORM behavior under Serializable, replacing `LISTEN/NOTIFY` consumers: Flock **flags these as informational findings with effort estimates** (the Auditor sees the transaction shapes in the workload descriptors) but never edits application code. Flagged, not fixed, is the honest boundary.
-
-**Day-2 mode (P2, one paragraph, on purpose):** once you're on CockroachDB, the same loop points inward — source = the live cluster, snapshot = pre-change backup + pinned timestamp, execute = online schema change, verify = old-vs-new `AS OF SYSTEM TIME` diffs, rollback = `RESTORE`. Same memory, same swarm, same ledger; every day-2 change keeps feeding the memory the replatform built. Nothing else in this document spends words on it.
-
-**Direction is deliberately one-way:** sources → CockroachDB. Rules are keyed by source *and* target engine, so bidirectional is future work, not a rewrite. PostgreSQL is P0; MySQL and others are pluggable quirk packs later. **Ecosystem fit in one line:** MOLT moves and checks the bytes; Flock is the layer Cockroach currently staffs with humans and consultants — it assesses, plans, decides, explains, and remembers.
-
----
-
-## 3. The agent roster
-
-One agent per human step, each with a hard rule about where the LLM sits: **the LLM plans, narrates, diagnoses, and reflects; deterministic code detects, executes, and verifies.** No agent lets a model freely mutate data or DDL — models emit *parameters for deterministic tools*, validated against whitelists.
-
-| Agent | What it does | LLM? | Human gate |
+| Category | Representative players | What they actually do | What they don't do |
 |---|---|---|---|
-| **Preflight** | Connectivity, permissions, `wal_level=logical`, replication-slot capacity, bucket access, target reachability. Hard-blocks on red | No (LLM only explains a failure) | Blocks until green |
-| **Introspector** | Catalogs + `pg_stat_statements` → **structured feature descriptors** (JSON): types, sequences, triggers, extensions, collations, constraint shapes, query/transaction shapes | No | — |
-| **Auditor** | Descriptors × rules → findings. Retrieval: exact `(source_engine, feature)` key match first, vector recall second. **Detection is mechanical; the LLM writes the narrative per finding** | Narration only | Gate 1 |
-| **Planner** | Drafts the migration plan grounded in the audit + recalled history; emits converter mappings (from a whitelist), fetch flags, verification decomposition, cutover steps | Yes (strong tier) | Gate 2 |
-| **Conversion Resolver** | Per approved finding, applies the mitigation template → concrete DDL decisions; whitelist-validated type mappings | Template-driven | DDL diff in Gate 2 |
-| **Load Driver** | Sequences the DDL dance; wraps **MOLT Fetch** — constructs flags, parses structured output, resumes from checkpoints | No on happy path; LLM explains failures | — |
-| **Verifier swarm** | Claims leaf checks, runs in-engine checksum diffs across both databases, writes verdicts; stateless, leased, heartbeating | **Never** — pure SQL, zero tokens | — |
-| **Sequence Reconciler** | Post-load: creates sequences, sets restart = `max(pk) + headroom`, emits `sequence_state` checks into the same queue | No | — |
-| **Quorum / Gate** | Serializable evaluation: all *leaf* checks resolved ∧ zero failed ⇒ arm cutover | No | Gate 3 |
-| **Diagnosis** | On no-go: reads the failed check's trace + recalled incidents → structured root-cause postmortem | Yes (strong tier) | — |
-| **Reflection** | Trajectory + postmortems → candidate rules; dedupe/link; lifecycle transitions | Yes | — |
-| **Scribe** | Renders DB state → markdown artifacts (risk report, plan, cutover runbook, postmortems) to S3 + repo. Makes no decisions | Light | — |
+| **Single-vendor fleet managers** | MiR Fleet, Geek+, Locus Robotics, KUKA | Centralized dashboards for one vendor's robots. MiR Fleet, for example, auto-assigns each task to the most suitable AMR by location and availability, and manages traffic for 100+ robots. | One task → one robot. No multi-robot task chains, no shared beliefs, locked to one hardware vendor. |
+| **Vendor-agnostic fleet platforms** | Formant, InOrbit, SYNAOS | Observability, teleoperation, data ingestion, analytics across mixed fleets. SYNAOS orchestrates heterogeneous AGV/AMR fleets over the VDA 5050 standard. | These are monitoring and dispatch layers. Robots don't share a world model or trigger each other's work. The "intelligence" is dashboards for humans. |
+| **Interoperability standards** | VDA 5050, MassRobotics interop standard, **Open-RMF** | Common message formats; traffic deconfliction. Open-RMF (backed by Intrinsic/OSRF) is the flagship: fleet adapters, map alignment, task allocation, and "mutex groups" — virtual locks so only one robot occupies a corridor or doorway at a time. | Traffic rules ≠ teamwork. In July 2025 a user on the official Open Robotics forum asked whether RMF supports actual inter-robot task dependency — robot A carries an item to a rendezvous, robot B takes it onward — as opposed to just multi-fleet scheduling. That handoff pattern, the exact core of our product, is what the community is asking for and not getting. |
+| **The hyperscaler attempt** | **AWS IoT RoboRunner** (2021–~2024) | AWS previewed RoboRunner in Nov 2021 and made it GA in Nov 2022, built on Amazon fulfillment-center tech: a central repository standardizing robot status, location, facility and task data across vendors, plus "Shared Space Management" for corridor traffic. Task orchestration was left to customers to build on its APIs. Its client has since been removed from the AWS SDK, and sibling service RoboMaker hit end-of-support on Sept 10, 2025. | RoboRunner proves two things at once: a hyperscaler validated the exact need (multi-vendor fleets working together), and the product still stopped at data standardization + traffic — the teamwork layer was homework. Then it quietly went away. The need didn't. |
+| **Research frontier** | DARPA SubT teams; USC's RobotFleet (Oct 2025) | SubT (2018–2021) fielded heterogeneous ground+aerial teams for underground search with one human operator; its post-mortems flag operator cognitive overload, robot attrition, and heterogeneous interoperability as the defining challenges, with degraded comms forcing robots to exchange data only when necessary. RobotFleet, an open-source USC framework, uses LLM planners over a shared declarative world state to coordinate heterogeneous robots — published October 2025. | Research is converging on exactly our architecture (LLM reasoning + shared world state) but ships as papers and prototypes, not as a durable, resilient memory substrate. Nobody in this row treats the shared state itself as production infrastructure that must survive failures. That's our wedge — and CockroachDB's whole thesis. |
 
-The copilot that sequences these is a **control plane**: sequential, human-gated, and resumable from the `migrations` row — kill it mid-run, restart it, and it picks up at the recorded stage. The verification pass is the **data plane**: orchestrator-free, coordinated entirely through the blackboard + changefeeds. "No central orchestrator" is claimed for the data plane only; the control plane is deliberately boring.
+### 2.3 Gap analysis: the coordination stack
+
+Think of fleet software as a five-layer stack. The market has filled four:
+
+```
+ L5  Shared cognition & task teamwork      ← EMPTY. This is Colony.
+     (shared beliefs, task chains, handoffs,
+      reassignment, cross-mission learning)
+ L4  Task dispatch                          MiR Fleet, Locus, RoboRunner samples
+     (one task → best single robot)
+ L3  Traffic deconfliction                  Open-RMF mutex groups, VDA 5050,
+     (don't collide, share corridors)       RoboRunner Shared Space Mgmt
+ L2  Telemetry & observability              Formant, InOrbit
+ L1  Connectivity & fleet gateways          Vendor SDKs, ROS 2, VDA 5050
+```
+
+Every incumbent tops out at L3–L4. The evidence that L5 is wanted: the Open-RMF community explicitly requesting task dependency between robots; SubT post-mortems showing one operator can't be the fleet's brain; AWS building (then abandoning) the data substrate for it. L5 is also precisely what "agentic memory" means when the agents have bodies — which is why this project fits this hackathon so unusually well.
+
+### 2.4 Why now
+
+Four shifts make L5 buildable in 2026 when it wasn't in 2021:
+
+1. **Robot brains are being commoditized.** At CES 2026, Nvidia's Jensen Huang declared robotics is having its "ChatGPT moment," and Boston Dynamics announced in January 2026 that Google DeepMind's Gemini Robotics models will power Atlas — the clearest sign yet that per-robot intelligence is becoming a purchasable layer. When every robot has a capable brain, the bottleneck moves to the team.
+2. **Capital is funding the wrong layer (for now).** 2026 physical-AI funding is dominated by robotic foundation models and general-purpose robots — roughly three-quarters of disclosed capital by mid-2026 — i.e., individual capability. Fleet coordination software barely registers as a funded category. That's white space, not absence of need.
+3. **LLM agents make task-level reasoning cheap.** Decomposing "rescue the person behind that rubble" into a scout→lifter→medic chain used to be a bespoke planning-systems problem. Now it's a prompt plus a well-designed state store.
+4. **The state store finally exists.** Coordination state needs transactional integrity (no two robots claim one victim), semantic recall (is this the same victim seen from the other side?), event streams (completion triggers), and survival through infrastructure failure. Distributed SQL + native vectors + changefeeds is exactly that shape. Five years ago you'd have glued together four systems and the glue would be the weak point.
+
+### 2.5 Positioning
+
+**For** operators of heterogeneous robot fleets in high-stakes environments, **who** need robots to work as a team rather than a set of individually-clever units, **Colony** is a coordination layer **that** gives the fleet a shared, durable brain — beliefs, tasks, triggers, and learning — **unlike** fleet managers and interop standards that stop at dashboards and traffic rules, **because** it treats fleet memory as production infrastructure that survives failure, built on CockroachDB.
+
+Wedge and expansion story (for the "real-world impact" criterion): disaster response is the showcase because coordination failures there cost lives and infrastructure failure is guaranteed — but the same layer applies unchanged to warehouse task chains (pick→transport→pack), hospital logistics, mining, and construction. The demo is a sim; the schema, claiming semantics, and reconcile gate are the real product and are robot-vendor-agnostic by design (any robot that can hit the `fleetmem` API can join the team — same "mixed levels of integration" philosophy that made Open-RMF adoptable).
+
+### 2.6 What this means for the pitch
+
+Lines the video and Devpost writeup should use, each backed by a source in §7:
+
+- "Fleet management software is a $1.6B market growing 19% a year — and every product in it stops at traffic rules and single-robot dispatch."
+- "Users of the leading open-source fleet framework are asking its forums for robot-to-robot handoffs. We built that."
+- "AWS validated this need with RoboRunner, then sunset it. The teamwork layer is still homework. We did the homework."
+- "DARPA SubT's own lessons: one human can't be the fleet's brain. So we gave the fleet a brain that can't die — and then we killed a database node on camera to prove it."
+- "Search-and-rescue robotics is a $35B market. Individual autonomy is funded; team autonomy is the gap."
 
 ---
 
-## 4. Memory design — CockroachDB is the memory; markdown is the view
+## 3. Product specification
 
-The open question ("md files or a vector DB?") is settled: **both, with a strict one-way arrow.**
+### 3.1 Personas
 
-**CockroachDB is the single source of truth for memory.** Rules, incidents, findings, and the trace ledger are rows — with a vector index for semantic recall, exact keys for deterministic retrieval, provenance as foreign keys, and transactional coupling to the coordination tables. A rule can point at the exact failed check that taught it because they live in the same database; that join is the provenance story, and it's impossible in a folder of markdown.
+- **Incident commander (human, primary demo persona).** Oversees the mission, doesn't micromanage robots. Needs situational awareness in seconds: who's unreached, what's blocking, what changed. Served by the MCP-powered console. Directly addresses the SubT operator-overload finding.
+- **Robot integrator (developer persona, post-hackathon).** Wants any robot to join the team by implementing a small API. Served by the `fleetmem` SDK and schema contract.
+- **Hackathon judge (meta-persona).** Needs to see, in under 3 minutes, that CockroachDB is load-bearing, the coordination is real, and the idea generalizes. Every design choice below is audited against this persona.
 
-**Markdown artifacts are rendered views, never the store.** The Scribe regenerates the risk report, migration plan, cutover runbook, and postmortems from the DB whenever state changes, writing them to S3 and the repo — human-readable, diffable in PRs, attachable to tickets. The arrow is one-way (DB → md); nothing ever reads a markdown file back as truth.
+### 3.2 User stories (P0 unless marked)
 
-Why not md-as-memory: no provenance keys or joins to verdicts; no transactional coupling with coordination (reintroducing exactly the dual-write race the one-substrate design kills); no vector recall; concurrent agent writers mean merge conflicts; and it forfeits one of the hackathon's named tools (the distributed vector index).
+- As a scout, when I spot a trapped person, my report merges with any existing sighting of the same person instead of creating a duplicate rescue effort.
+- As a lifter, when a scout's find creates a debris-clearing task I'm suited for, I claim it exactly once, even if another lifter tries at the same instant.
+- As a medic, the moment the lifter finishes clearing, my delivery task unblocks — without any robot messaging me directly.
+- As the fleet, when a robot dies mid-task, its task returns to the pool and gets reassigned within seconds.
+- As the fleet, when an aftershock changes the map, in-flight plans that are now invalid get replanned against current shared beliefs.
+- As an incident commander, I can ask in plain English which victims are unreached and why, and get an answer computed from live fleet memory. (P0 for demo, read-only.)
+- As the fleet, I keep coordinating without interruption when a database node is killed. (P0 — this is the thesis.)
+- As a future mission, I can retrieve semantically similar situations from past missions and adapt. (P1 stretch.)
 
-### 4.1 What memory holds
+### 3.3 Demo scenario spec: "Aftershock"
 
-| Memory | Contents | Retrieved by |
+**Map.** 40×30 tile grid, four zones: **Staging** (base + charging, top-left), **Street** (open, fast travel), **Collapsed residential block** (dense debris, most victims), **Office building** (multi-room interior, requires door tiles), plus a **courtyard** connecting them. Tile types: open, debris (blocks ground robots; cleared by lifter), rubble-heavy (2× clear time), fire (spreads; blocks everyone; extinguisher = P2 stretch role), unstable (half speed, scouts only until shored — P1), wall, door.
+
+**Robot stat blocks (v0 — tune in playtesting):**
+
+| Role | Count | Speed (tiles/tick) | Vision radius | Battery (ticks) | Abilities |
+|---|---|---|---|---|---|
+| Scout drone | 2 | 3 | 6 | 120 (recharge at base) | Flies over debris; cannot interact; senses victims/hazards |
+| Lifter | 1 | 1 | 2 | 300 | Clears debris (3 ticks/tile; 6 for rubble-heavy) |
+| Medic courier | 1 | 2 | 3 | 200 | Carries 2 supply kits; stabilize = 2 ticks adjacent to victim; restock at base |
+| Relay (P1) | 1 | 2 | 3 | 250 | Extends uplink zone (see §5, comms-constrained sync) |
+
+**Victims.** 8 total. Each has position (hidden until sensed), vitals countdown (400–700 ticks, visible once found), and a state machine: `unknown → located → access_blocked? → reachable → stabilized | lost`. Mix: 3 directly reachable (fast wins for demo pacing), 4 behind one debris wall, 1 behind two (forces a scout→lifter→lifter→medic chain).
+
+**Dynamics.** Fire spreads to an adjacent flammable tile every 25 ticks. **Aftershock at tick 300:** re-blocks two previously cleared corridors, reveals 1 new victim, converts one street segment to unstable. This forces visible replanning mid-demo.
+
+**Win/loss.** Mission ends when all victims are stabilized/lost or at tick 1200. Score = victims stabilized, median time-to-stabilize, and the §5.6 metrics.
+
+**Baseline mode.** Identical map and robots, but shared memory is disabled: each robot keeps a private world model, picks its own tasks greedily, no claiming, no handoff triggers. This is the "coordination OFF" run — expect duplicated exploration, a double-teamed victim, and at least one victim lost to the clock. The side-by-side delta is the product.
+
+### 3.4 Functional requirements
+
+| ID | Requirement | Priority |
 |---|---|---|
-| `memory_rules` | Distilled, engine-keyed rules with detector, mitigation template, provenance, lifecycle status, embedding | Auditor (exact key, then vector), Planner |
-| Incidents / postmortems | Diagnosis output: what broke, why, what to check next time — linked to the failed check's trace | Diagnosis, Reflection, Planner |
-| `gap_findings` | The risk register: per-finding severity, risk, mitigation, opportunity, rule provenance, approval | Planner, Scribe, dashboard |
-| `agent_trace` | Every agent action, claim, verdict, model call — the audit ledger, time-travelable | Everything; MCP; the provenance click-through |
+| FR-1 | Robots write observations, claims, and status exclusively through the `fleetmem` SDK; no robot-to-robot channels exist. | P0 |
+| FR-2 | Task claiming is transactional: concurrent claims on one task yield exactly one winner. | P0 |
+| FR-3 | Completing a task auto-unblocks dependents (`depends_on` gating); dependents become visible to eligible robots within 1 tick (poll) / near-instantly (changefeed, P1). | P0 |
+| FR-4 | New observations pass a reconcile-before-broadcast gate: vector + spatial match against existing beliefs; merge or insert atomically. | P0 |
+| FR-5 | Missed heartbeats (>10s) release the robot's claimed tasks back to `open`. | P0 |
+| FR-6 | Orchestrator assigns open tasks by scored policy (role match, distance, battery, priority). | P0 |
+| FR-7 | Aftershock event invalidates affected path/claim state and triggers replans. | P0 |
+| FR-8 | Fog-of-war UI: per-robot vision, with the shared known-world overlay filling in for all as any robot explores. | P0 |
+| FR-9 | Live scoreboard + coordination ON/OFF toggle and side-by-side metrics. | P0 |
+| FR-10 | Commander console: natural-language questions answered from live memory via CockroachDB managed MCP Server, read-only credentials. | P0 |
+| FR-11 | Node-kill resilience: killing 1 of 3 CRDB nodes mid-mission causes zero task loss and no fleet stall. | P0 |
+| FR-12 | Mission event log supports full replay of a run. | P1 |
+| FR-13 | Cross-mission memory: post-run summaries embedded; new missions retrieve top-k similar past situations at planning time. | P1 |
+| FR-14 | Comms-constrained sync: robots only read/write shared memory inside uplink zones (base + relay radius), buffering otherwise. | P1 |
+| FR-15 | Isometric visual upgrade. | P2 |
 
-### 4.2 The rule schema (settling the "resolve first" item from v1 §17)
+### 3.5 Non-functional requirements
 
-A rule is: key `(source_engine, target_engine, feature)`; a **detector** — a structured predicate or SQL over the Introspector's feature descriptors, so matching is *mechanical*; the rule text; a **mitigation template** the Resolver can apply; provenance (`source_migration`, NULL = seeded); and a lifecycle — **`seeded | candidate | confirmed`**. Reflection emits *candidates*; a rule is promoted to *confirmed* when it prevents a failure — which is literally what run 2 of the demo does, so the transition goes on the metrics panel: **caught → learned → prevented → confirmed.** Dedupe: same key + high embedding similarity ⇒ link the rules, don't merge them.
-
-### 4.3 The retrieval rails (why run 2 can't flake on stage)
-
-The run-2 payoff must not depend on an LLM behaving during the demo. So: the Introspector emits structured descriptors; the Auditor retrieves rules by **exact `(source_engine, feature)` key match first, vector similarity second**; whether a rule *fires* is decided by its detector, mechanically; the LLM only writes the human-readable narrative per finding. The citation renders from `rule_id → source_migration` regardless of what the model says. Run 2 flags the learned quirk even on the model's worst day — and as a side effect, the audit never needs to feed a whole schema through Bedrock.
-
-### 4.4 The reflection pipeline
-
-After every run, pass or fail: trajectory + any diagnosis postmortem → candidate rules (ExpeL-style distillation, "engine X feature Y bites in context Z; do W") → dedupe/link against existing rules (A-MEM-style) → embed → store with provenance. On failure, the Diagnosis agent's postmortem is the primary input. This is what makes the memory *compound*: the copilot doesn't just remember what happened — it remembers what it learned, in a form the next audit retrieves mechanically.
-
----
-
-## 5. The gap audit (learn the schema *and workload*, audit the risks, suggest what's newly possible)
-
-The step that makes Flock a *copilot* rather than a pipeline — and the surface where memory becomes visible: the audit is what looks different between a cold-memory and warm-memory run (§14). Not an expert system; ten curated, provenance-linked quirks beat fifty generic ones. Before anything executes:
-
-1. **Introspect the source.** Schema, types, sequences, defaults, triggers, procedures, extensions, constraints, collations — plus the *workload*: representative queries and transaction shapes from `pg_stat_statements`, because dialect gaps live in queries as much as in DDL. Nothing in the standard toolkit does this half.
-2. **Audit against the rules.** Every descriptor is matched against detectors (mechanically), producing the **risk register**: one finding per gap with severity, *why it breaks*, the **mitigation** (equivalent behavior on CockroachDB, or absorbed app-side), and estimated effort.
-3. **Suggest opportunities.** The inverse audit: CockroachDB features that fit the *observed* usage — "your schema does X the hard way; the target does it natively."
-4. **Render one artifact.** The **Migration Risk & Opportunity Report** — the generated pre-mortem, every claim citing its rule or the migration that taught it — approved by a human before any execution (Gate 1).
-
-Illustrative seed entries (support levels verified against current docs in Phase 0 — they move fast):
-
-| Source pattern | Risk on CockroachDB | Mitigation / opportunity |
-|---|---|---|
-| `SERIAL` / sequential keys | Write hotspots on ranges | UUID keys or hash-sharded indexes; sequence restart handled by the Reconciler |
-| Implicit `INT` width | PG defaults to 32-bit; CockroachDB `INT` = `INT8` — silent width change | Explicit `INT4`/`INT8` decision per column in the DDL diff |
-| Long / contended transactions in the workload | Serializable surfaces retry errors (`40001`) the old isolation hid | **Informational, app-side:** retry loops, shorter transactions — flagged with effort, never auto-fixed |
-| `LISTEN/NOTIFY`, trigger-based outbox | Not supported / limited | **Changefeeds** — native CDC, no outbox table |
-| Cron purge jobs / soft-delete sweepers | Carries over as toil | **Row-level TTL** does it declaratively |
-| Stored procedures / triggers | Partial support, dialect differences | Verify support per feature; move logic app-side or to changefeed consumers |
-| Full-text search | No native FTS | Trigram indexes for light cases; external search for heavy — with effort estimate |
-| Read-replica lag workarounds | Unnecessary | **Follower reads** / global tables — consistent by default |
-| Tables without primary keys | Range checksums need stable keys | **Degraded verification** (counts + aggregates) + a register finding — a verifier limitation turned into product behavior |
-
-5. **The learned layer.** Every run's outcomes — which mitigations worked, which mappings bit back, what the diff caught — are distilled into rules (§4.4). The seeded rulebook makes the first migration competent; the learned rules make the fiftieth one sharp. The seed covers the head of the distribution; **learning covers the tail** — that's the answer to "why wasn't the demo quirk seeded," and it's the thesis.
+- **Tick rate:** 4 Hz authoritative server tick; sim must sustain 6 robots + dynamics at <150ms/tick compute.
+- **Memory latency:** `fleetmem` read/write p95 < 60ms from agents (same-region CRDB Cloud).
+- **Planning latency:** Bedrock plan calls are async — a robot continues its current action while a plan is in flight; p95 plan turnaround < 3s; hard cap 4 plan calls/robot/minute with rule-based fallback.
+- **Cost ceiling:** < $40 total Bedrock spend for the hackathon (Haiku for planning, Titan V2 512-dim for embeddings; both are pennies per mission at our call caps).
+- **Demo reliability:** seeded RNG for deterministic recording runs; the public demo auto-restarts missions; every video beat has a pre-recorded backup take.
+- **Security posture (judge-visible):** per-robot service credentials; commander MCP access read-only; least-privilege by construction.
 
 ---
 
-## 6. The swarm
+## 4. Architecture
 
-### 6.1 Why a swarm actually belongs here
+### 4.1 Component view
 
-Most "multi-agent" projects are theater — more agents don't make a single reasoning task better. Migrations are the exception, because the expensive part is **breadth, not depth**: parity per table × row-range, sequence state per sequence, presence per index/constraint. That's embarrassingly parallel.
+```
+ Browser ── PixiJS renderer · fog-of-war · scoreboard · ON/OFF toggle
+    ▲ websocket (state frames, 4 Hz)
+    │
+ Sim server (Python 3.12 / FastAPI) — authoritative world
+    · tick loop: apply actions → world dynamics → broadcast
+    · validates all robot actions
+    ▲ actions / local percepts (in-process queues)
+    │
+ Robot agents — one asyncio task per robot
+    sense → sync → think → act → report
+       │            │
+       │ Bedrock    └── fleetmem SDK ── CockroachDB Cloud (3 nodes)
+       │ (Claude Haiku plans,               robots · tasks · observations(VECTOR)
+       │  Titan V2 embeddings)              victims · hazards · events
+       │                                        ▲              ▲
+ Orchestrator (async service) ──────────────────┘              │
+    · allocation · dependency unblocking · reassignment        │
+ Commander console ── Claude + CRDB managed MCP Server (read-only)
+ Chaos rig ── kills/restores a CRDB node on cue
+```
 
-> **Honest framing, calibrated against the real baseline.** MOLT Verify is already concurrent — the differentiator is *not* "parallel vs serial." It's architectural: **distributed** (many machines vs one process), **self-healing** (leases return a dead worker's check to the pool vs start-over), **in-engine** (checksums computed inside both databases, bytes shipped only where ranges diverge, vs 20k-row batches pulled over the network), **recursive** (divergences corner themselves), and **auditable** (verdicts are queryable rows with provenance vs logs a human interprets). The swarm's value is speed, resilience, and trust on parallelizable verification — planning stays careful and human-gated.
+### 4.2 One rescue chain, end to end
 
-### 6.2 Hierarchical cross-database verification (the core)
+1. Scout S1's vision covers tile (14,9); the sim hands it a percept: heat signature.
+2. S1 forms belief "victim, (14,9), behind debris"; embeds the description (Titan V2).
+3. **Reconcile gate:** `fleetmem.report_observation()` runs one transaction — vector top-k within 5 tiles; a match ≥0.82 cosine merges (bump confidence, add sighting); otherwise insert belief, create victim row, and create the task chain `clear_debris(14,8) → deliver_kit(14,9)` with `depends_on` linking them.
+4. Orchestrator sees `clear_debris` open; scores eligible robots; Lifter L1 wins; `claim_task` flips it `open→claimed` transactionally.
+5. L1 paths (A*) using shared hazard beliefs, clears for 3 ticks, calls `complete_task`.
+6. Completion trigger: `deliver_kit` unblocks (poll at MVP; changefeed at P1). Medic M1 claims, delivers, victim `stabilized`. Every transition lands in `events`.
+7. If L1's heartbeat lapses mid-clear, the claim releases and the next lifter (or replan) takes over. No human touched anything.
 
-After load, the planner decomposes verification into per-object checks. Verifiers claim atomically (`FOR UPDATE SKIP LOCKED`), checksum coarse row-ranges **in-engine on both databases**, and only where checksums diverge, recurse — spawning finer child checks back into the same queue for any verifier to claim. Cheap when nothing changed, precise where something did, visible live on the coverage heatmap. Pure SQL: **parity verifiers burn zero LLM tokens.**
+### 4.3 Agent design
 
-**Canonicalization is the hardest technical problem in this document, named as such.** Cross-engine checksum equality requires every value to render identically on both engines: `NUMERIC` trailing zeros, float formatting, `timestamptz` precision, bool rendering, bytea encoding. Two design commitments: an **order-independent aggregate** (sum/XOR of per-row `hash(canonical_row)`) so ordering and collation drop out entirely, and a **per-type canonical-cast layer with a golden test suite** — one table per supported type, identical on both engines, asserting equal checksums — as a named Phase 0/1 exit criterion with real time allocated. This is the risk MOLT Verify sidesteps by shipping rows; we take it on deliberately to buy in-engine efficiency, and the golden suite is how we de-risk it.
+Loop (runs every tick unless noted):
 
-### 6.3 Task lifecycle, leases, and what "zero duplicates" means
+```python
+async def agent_loop(robot):
+    while mission.active:
+        percepts = sense()                      # from sim, local vision only
+        beliefs  = fleetmem.get_beliefs(area)   # shared world, cached 1s
+        if needs_plan(robot, beliefs):          # idle, task done, world changed
+            plan = await bedrock_plan(robot, beliefs)   # async, rate-capped
+        action = next_action(plan)              # A* movement, rule-based acts
+        submit(action)
+        fleetmem.report(percepts_delta, status) # via reconcile gate
+        fleetmem.heartbeat()
+```
 
-States: `pending → claimed → passed | failed | split`. A diverging parent transitions to `split` and **writes no verdict** — its children carry the truth. Long checks **heartbeat** (bump `lease_expires`) so a three-minute checksum doesn't outlive a 60-second lease and manufacture a fake duplicate. Each claim carries an **epoch**; verdicts are idempotent on `(task_id, claim_epoch)`, so at-least-once execution can't double-count. The duplicate-claim metric is precisely defined — **two distinct owners producing verdicts for the same epoch** — which is what makes "pinned at 0" falsifiable rather than decorative.
+- **LLM discipline:** Bedrock (Claude Haiku) is called only on plan boundaries — task selection, replan-on-aftershock, conflict resolution — never per tick. Prompt = role card + current beliefs digest (≤1.5k tokens) + open tasks; output = strict JSON `{task_id | explore(sector) | return_to_base, rationale}`. Rationale strings surface in the UI — judges see the fleet thinking.
+- **Role behaviors:** scouts run frontier-exploration bias (prefer unexplored sectors weighted by victim priors); lifters idle-stage near the densest blocked-victim cluster; medics pre-position between base and reachable victims. Each is ~50 lines of rules; the LLM chooses *among* behaviors, rules execute them.
+- **Determinism:** with `--seeded`, LLM calls are recorded/replayed so demo runs are reproducible.
 
-### 6.4 Check kinds beyond row parity
+### 4.4 Coordination mechanics
 
-`parity` (hierarchical checksum), `sequence_state` (restart value ≥ max(pk) — the classic post-cutover duplicate-key incident that row checksums can't catch, and a step the official flow leaves manual), `object_presence` (indexes, constraints recreated after load), and `aggregate` (per-column count/sum/min/max — also the degraded mode for PK-less tables). All flow through the same queue, leases, and quorum.
+- **Task lifecycle:** `blocked → open → claimed → in_progress → done | failed(→open)`. `blocked` tasks hold unmet `depends_on`; completion of the last dependency flips them `open` in the same transaction.
+- **Claiming (the judge-friendly line of SQL):**
 
-### 6.5 Quorum cutover gate
+```sql
+UPDATE tasks SET status='claimed', claimed_by=$robot, claimed_at=now()
+WHERE id=$task AND status='open'
+RETURNING id;   -- serializable isolation: exactly one winner, always
+```
 
-Verifiers vote per-object results into `verify_results`. Cutover is armed **only when every *leaf* task is resolved and zero have failed** — evaluated in a serializable transaction, so recursion mid-flight can't produce a premature pass and split parents can't wedge the gate. One mismatch ⇒ **no-go: abort, and the untouched source keeps serving.** Before cutover, aborting is free — that's the replatform safety story.
+- **Allocation score:** `2.0·role_match + 1.2·priority + 1.0·(1/(1+dist)) + 0.5·battery_norm`, greedy per open task. (Auction/CBBA-style allocation from the multi-robot task-allocation literature is a P2 talking point, not a build item.)
+- **Reassignment:** orchestrator scans heartbeats every 2s; >10s stale ⇒ release claims, mark robot `lost`, log event. Robot attrition — SubT's #2 field problem — becomes a 20-line query.
+- **Reconcile-before-broadcast:** the gate in §4.2 step 3. Prior-work note for the writeup: per-agent self-reflection (Reflexion-style) doesn't catch cross-agent conflicts; gating writes against shared state does. Novel, cheap, and demoable (show the merged-duplicate event in the log).
+- **Handoff triggers:** MVP polls open tasks at 1 Hz. P1 swaps in a CRDB changefeed on `tasks` → orchestrator/agents wake instantly. Same contract, faster push.
 
-### 6.6 Diagnosis on failure
+### 4.5 Schema DDL (v0 — lane 1 validates against CRDB docs on day 1)
 
-Abort isn't the end. On no-go, a **diagnosis agent** (strong tier, D-Bot lineage) reads the failed check's trace + recalled incidents and writes a structured root-cause postmortem into memory, where Reflection distills it into a rule. Re-plan the same migration and the copilot cites the lesson.
+```sql
+CREATE TABLE robots (
+  id STRING PRIMARY KEY, role STRING NOT NULL,
+  pos_x INT, pos_y INT, battery INT, status STRING,
+  current_task UUID, heartbeat_at TIMESTAMPTZ
+);
 
-### 6.7 Parallel dependency analysis *(P2)*
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID NOT NULL, kind STRING NOT NULL,
+  target_x INT, target_y INT, priority INT DEFAULT 1,
+  status STRING NOT NULL DEFAULT 'blocked',
+  depends_on UUID[],           -- unblock when all done
+  claimed_by STRING, claimed_at TIMESTAMPTZ, done_at TIMESTAMPTZ,
+  INDEX (mission_id, status)
+);
 
-The swarm crawls the dependency graph and workload queries — which queries touch objects whose semantics change — each agent claiming a subgraph. Valuable; outside the demo's blast radius.
+CREATE TABLE observations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, robot_id STRING, kind STRING,
+  pos_x INT, pos_y INT, payload JSONB,
+  embedding VECTOR(512),       -- Titan V2 @ 512 dims
+  confidence FLOAT, sightings INT DEFAULT 1,
+  observed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE VECTOR INDEX obs_embedding_idx ON observations (embedding);
+
+CREATE TABLE victims (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, pos_x INT, pos_y INT,
+  state STRING NOT NULL DEFAULT 'located',
+  vitals_deadline INT, reported_by STRING, confidence FLOAT
+);
+
+CREATE TABLE hazards (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, kind STRING, area JSONB, severity INT, active BOOL
+);
+
+CREATE TABLE events (          -- append-only mission log; powers replay
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id UUID, at TIMESTAMPTZ DEFAULT now(),
+  actor STRING, verb STRING, detail JSONB
+);
+
+CREATE TABLE mission_memories ( -- P1 cross-mission learning
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  summary STRING, embedding VECTOR(512), outcome JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### 4.6 Hackathon tooling map (summary — full deep dive in §6)
+
+- **CRDB tools (≥2 required):** ✅ Distributed Vector Indexing — reconcile gate + cross-mission recall. ✅ Managed MCP Server — commander console, read-only mode. ➕ Agent Skills Repo — run the resilience/production-readiness skills against our cluster and ship the outputs (§6.2). ➕ ccloud CLI — optional fourth.
+- **AWS (≥1 required):** ✅ Bedrock — Claude (Haiku-class) planning + Titan V2 embeddings. ✅ S3 + CloudFront — frontend + replays. ✅ ECS Fargate — sim server + agents. ✅ Lambda — post-mission memory summarizer.
+- **Chaos rig:** see §6.5 — the node-kill segment runs on a self-hosted 3-node cluster (the Cloud free tier doesn't expose node control); primary fleet memory stays on CockroachDB Cloud.
+
+### 4.7 Metrics (computed from `events`, shown on scoreboard)
+
+- **Rescue rate** = stabilized / total victims.
+- **Median time-to-stabilize** (ticks from mission start).
+- **Duplicate-effort index** = redundant tile visits / total visits (visits to tiles already explored by another robot), plus count of same-target double-work incidents.
+- **Coverage@500** = explored reachable tiles / all reachable tiles at tick 500.
+- **Coordination gain** = (baseline median time − coordinated median time) / baseline. One number the video ends on.
 
 ---
 
-## 7. The copilot loop
+## 5. Delivery plan
 
-```
-connect ─▶ preflight ─▶ introspect ─▶ recall ─▶ gap audit ─▶ [G1: approve register]
-   ─▶ plan + resolve conversions ─▶ [G2: approve plan + DDL] ─▶ convert ─▶ load (MOLT Fetch)
-   ─▶ reconcile sequences ─▶ swarm verify ─▶ quorum ─▶ [G3: confirm cutover] ─▶ cutover
-   ─▶ reflect ─▶ render artifacts
-```
+### 5.1 Lanes and subtask checklists (5 people)
 
-- **Preflight.** Deterministic environment checks; red blocks the run before anything touches data.
-- **Introspect.** Catalogs + workload → structured feature descriptors (§5).
-- **Recall.** Rules and incidents retrieved from the vector index — exact engine/feature keys first, similarity second: *have we migrated from this engine before? what bit us? what rule did it teach?*
-- **Gap audit.** Risk register + opportunity report; Gate 1.
-- **Plan + resolve.** The Planner drafts the plan; the Resolver turns each approved finding into whitelist-validated DDL decisions; Gate 2 approves plan and DDL diff together. The LLM plans; **deterministic tools execute.**
-- **Convert + load.** DDL applied; the Load Driver runs the drop-indexes / MOLT Fetch / recreate sequence, parsing Fetch's output and resuming from checkpoints. The LLM never hand-copies rows.
-- **Reconcile sequences.** Restart values set and verified as first-class checks.
-- **Verify.** The swarm (§6).
-- **Cutover gate.** Leaf-quorum all-pass **and** human confirmation ⇒ cutover. Any failure ⇒ automatic abort; the source keeps serving, unharmed.
-- **Reflect + render.** Rules distilled with provenance; the Scribe regenerates the markdown artifacts.
+**Lane 1 — Memory & data layer · Praneeth (starting today)**
+- [ ] CRDB Cloud cluster (3 nodes) + local `cockroach demo` dev recipe
+- [ ] Schema v0 → validated v1 (incl. `VECTOR` + vector index syntax check)
+- [ ] `fleetmem` Python SDK: `report_observation, claim_task, complete_task, get_beliefs, heartbeat, log_event`
+- [ ] Claiming txn + concurrency test (two fake robots, 1,000 races, zero double-claims)
+- [ ] Reconcile gate (embed → search → merge/insert txn) + unit tests
+- [ ] Changefeed spike (P1) · node-kill chaos script · per-robot credentials
 
----
+**Lane 2 — Robot agents · TBD**
+- [ ] Agent loop skeleton + sense/sync/think/act/report contract
+- [ ] A* over shared belief map; battery/return-to-base logic
+- [ ] Role behavior modules: scout / lifter / medic (+ relay P1)
+- [ ] Bedrock planning: prompt cards, strict-JSON parsing, rate caps, recorded-replay mode
+- [ ] Rationale surfacing to UI · rule-based fallback path
 
-## 8. One substrate, five jobs
+**Lane 3 — Sim world & rendering · TBD**
+- [ ] Tick server: world state, action validation, dynamics (fire, vitals, aftershock)
+- [ ] Tile map loader (map defined in JSON by lane 5)
+- [ ] PixiJS renderer: sprites, animation, fog-of-war + shared-map overlay
+- [ ] Websocket state protocol + reconnect · scoreboard & ON/OFF toggle UI
 
-Every serious swarm needs coordination services *and* a telemetry story. The default stack wires them as separate systems with no consistency *between* them — the dual-write races between queue, state store, bus, vector DB, and audit log are where swarms silently corrupt. Flock collapses all five into CockroachDB — **the destination database is also the migration's brain** — so claiming a check, writing its verdict, updating the quorum, and recording the audit row happen in **one atomic transaction**:
+**Lane 4 — Orchestration & missions · TBD**
+- [ ] Task-graph definitions + `depends_on` unblocking
+- [ ] Allocation scorer + reassignment-on-heartbeat-loss
+- [ ] Baseline (coordination-OFF) mode
+- [ ] Metrics pipeline from `events` → scoreboard
+- [ ] Commander console: MCP Server hookup, read-only role, 5 canned demo questions
 
-| Need | Default stack | Flock |
-|---|---|---|
-| Task queue (exactly-once claims) | SQS | `verify_tasks` + `FOR UPDATE SKIP LOCKED` |
-| Shared state / blackboard | Postgres | `verify_results`, `migrations`, `gap_findings`, serializable txns |
-| Pub/sub (wake agents on change) | Redis / Kafka | **Changefeeds** → webhook sink → Lambda |
-| Vector memory (semantic recall) | Pinecone | **Distributed vector index**: incidents + rules, same rows as operational data |
-| Observability / audit backend | Datadog + a separate audit store | `agent_trace` ledger — SQL-queryable, **time-travelable** with `AS OF SYSTEM TIME` |
+**Lane 5 — Scenario, demo & submission · TBD**
+- [ ] "Aftershock" map JSON + art/sprite set + escalation script
+- [ ] Playtest & tune stat blocks (twice: Aug 8, Aug 12)
+- [ ] AWS deploy: S3/CloudFront frontend, ECS backend, public URL
+- [ ] Video: script (§6 of v1), record beats + backups, edit to <3 min
+- [ ] Repo hygiene: README, MIT license visible, setup instructions, architecture diagram
+- [ ] Devpost writeup incl. tools-used section + CRDB feedback
 
-## 9. Architecture & observability
+Pairing note: lanes 2↔4 sync daily (agents consume orchestration). Lane 5 owns the deadline and holds scope veto from Aug 13.
 
-```
-  source DB (Postgres on RDS)
-        │ preflight ▸ introspect (catalogs + workload)
-        ▼
-  recall ─▶ gap audit ─▶ [G1] ─▶ plan + resolve ─▶ [G2] ─▶ convert ─▶ load (MOLT Fetch)
-  (rules,    (risk register +                                   │ ▸ reconcile sequences
-   incidents) opportunity report)                               ▼
-                                                    decompose verification
-                                                  (per object × check kind × range)
-                                                                │
-            ┌──────────────────  CockroachDB (target)  ────────┴────────────┐
-            │ verify_tasks │ verify_results │ gap_findings │ rules │ vectors │
-            │                agent_trace (audit ledger)                     │
-            └───────┬───────────────────────────────┬───────────────────────┘
-        claim (SKIP LOCKED, epoch,          changefeed (webhook sink)
-                heartbeat)                          │
-                │                         ┌─────────┴──────────┐
-                ▼                         ▼                    ▼
-      ┌─────────────────────┐     ┌───────────────────┐  ┌───────────────┐
-      │  verifier agents    │────▶│ quorum / gate      │  │ live dashboard │
-      │  in-engine checksum │     │ leaf all-pass ⇒ arm│  │ + provenance   │
-      │  source ↔ target    │     │ cutover; fail⇒abort│  │  click-through │
-      └─────────────────────┘     └─────────┬─────────┘  └───────────────┘
-                ▲                            │                    │
-                └──────── self-heal ◀────────┘          Scribe ─▶ S3 (md artifacts)
-               (expired leases re-pool; epoch++)
-```
+### 5.2 Interface contracts — freeze Aug 3
 
-Stateless verifiers (Lambda for bursty fan-out, ECS if the pass outgrows the 15-minute ceiling); all state in the shared memory; the data plane has no orchestrator — coordination is emergent from the blackboard + changefeeds.
+1. `fleetmem` SDK signatures (above) — lane 1 publishes stubs day 1 so lanes 2/4 build against fakes.
+2. Agent↔sim action API: `move(dir) | act(verb, target) | idle`; server validates.
+3. Websocket state frame JSON (lane 3 publishes).
+4. Task JSON + `depends_on` semantics (lane 4 publishes).
+Changes after Aug 3 need a team ping, not a silent commit.
 
-### 9.1 Why observability is non-negotiable
+### 5.3 Day-by-day
 
-The canonical war story: an agent quietly served stale data, every health check green, and it took six hours of log-grepping because tool executions weren't first-class spans. **A silent migration break is exactly this failure**, and a swarm multiplies the opacity. Observability turns "trust me" into "look" — and it's the single biggest thing between an agent demo and a production-credible system, which is where the judging weight sits.
+| Date | Milestone |
+|---|---|
+| Aug 1 (today) | Repo + CI, cluster up, schema v0, SDK stubs published, map JSON format agreed |
+| Aug 2–3 | **Walking skeleton:** one scout moves, writes a belief, renders in browser. Contracts frozen. |
+| Aug 4–6 | Claiming + dependencies live; lifter & medic behaviors; fog-of-war |
+| Aug 7–8 | **MVP:** full scout→lifter→medic chain on Aftershock v1 map; playtest #1 |
+| Aug 9–10 | Reconcile gate on all writes; baseline mode; metrics on scoreboard |
+| Aug 11–12 | Aftershock replanning; MCP console; changefeed handoffs; playtest #2 |
+| Aug 13–14 | Node-kill rig + rehearsal; AWS deploy; public URL live |
+| Aug 15 | **Feature freeze.** Bug bash, determinism pass, seed the golden demo run |
+| Aug 16–17 | Video record/edit; README; Devpost writeup; diagram; CRDB feedback |
+| Aug 18 | Submit by **noon EDT** — five hours of buffer, on purpose |
 
-### 9.2 What we instrument (OTel GenAI conventions)
+### 5.4 Testing & demo reliability
 
-Vendor-neutral spans capturing the *decision graph*, not just the I/O boundary:
+- Concurrency: claim-race test in CI (lane 1).
+- Sim: golden-seed regression run nightly from Aug 8; diff the events log.
+- Chaos: node-kill rehearsed ≥5 times before recording; fallback = pre-recorded take.
+- LLM: recorded-replay mode for demos; live mode for the deployed URL with rule fallback.
 
-```
-invoke_agent  (gen_ai.agent.name = "verifier")
-├─ memory.retrieve      -- recall incidents + rules (vector index)
-├─ llm.chat             -- gen_ai.request.model, token usage   (absent for parity verifiers)
-├─ db.execute           -- the in-engine checksum diff (hot path)
-└─ event: verification.verdict { object, epoch, passed, detail }
-```
+### 5.5 Risks (delta from v1)
 
-Agent / LLM / DB / memory-retrieval / verification span kinds; the whole migration is one connected trace, gate to gate. Content lives in span *events* (droppable at the Collector), never attributes; overhead <1% with async batch export.
-
-### 9.3 CockroachDB *is* the observability backend
-
-- **Durable audit ledger** — every action, audit decision, and verdict is an append-only `agent_trace` / `gap_findings` row: SQL-queryable, time-travelable ("what did the swarm believe at any past instant?").
-- **Live dashboard via changefeed** for quorum wake-up and event streaming; the dashboard read path may fall back to indexed polling (§13.1) — the ledger, not the transport, is the story.
-- **Provenance click-through as a first-class view:** finding → rule → run-1 postmortem → the failed check's trace. This is the demo's most memorable artifact and the MCP moment's fallback.
-- **MCP as the operator's window** — the managed MCP server (read-only role, audit-logged) lets an operator interrogate live swarm state, the register, and the ledger in natural language from Claude Code.
-- **External OTel viewer** (Tempo / Langfuse / OpenObserve): P2 garnish for span drill-down.
-
-### 9.4 Three views for the demo
-
-1. **Live swarm dashboard**: agents online, checks by state, the **duplicate-claim counter pinned at 0**, coverage heatmap filling in real time, checks/sec.
-2. **Per-migration trace**: the decision graph gate-to-gate; click any span for the recall, model call + cost, diff query, verdict.
-3. **Audit / provenance ledger**: who did what, when, and why — including why each gap was mitigated the way it was — reconstructable at any past instant.
-
-### 9.5 Metrics (SLOs for a migration)
-
-Verification coverage %, checks/sec, **duplicate-claim rate (must be 0, as defined in §6.3)**, breaking-change catch rate (from the fault-injection library), caught → learned → prevented → confirmed, mean abort time, token cost per tier — the reliability standards you hold for APIs, applied to every inference.
+| Risk | Mitigation |
+|---|---|
+| ~~CRDB `VECTOR`/index syntax differs from draft DDL~~ | **Resolved Aug 1** — syntax validated against v26.2 docs (§6.3); cosine `<=>` confirmed for the reconcile gate |
+| Bedrock latency spikes wreck pacing | Async planning, rate caps, rule fallback, recorded-replay for the video |
+| Five-way integration hell | Contracts frozen Aug 3; SDK stubs + fakes from day 1; walking skeleton before features |
+| Sim balance makes coordination look weak | Two scheduled playtests; map designed so ≥2 victims are unreachable without handoffs |
+| Baseline mode is accidentally too dumb (judges smell a strawman) | Baseline robots keep full individual autonomy + greedy search — only *sharing* is removed; state this explicitly in the video |
+| Scope creep | P0/P1/P2 labels above; lane 5 veto from Aug 13 |
 
 ---
 
-## 10. Research → real failure → mechanism
+## 6. Hackathon deep dive & tooling decisions
 
-Every idea maps to a concrete failure mode — nothing adopted for novelty. **Implemented** = built into Flock; **validates design** = justifies a choice.
+Everything below is from the official Devpost rules/resources pages (fetched Aug 1) and the CockroachDB v26.2 docs. Links in §7.
 
-| Research idea | The real failure it addresses | Mechanism in Flock | Status |
+### 6.1 Rules that change how we operate
+
+| Rule | What it means for us |
+|---|---|
+| Teams of **up to 5** individuals | We're exactly at the cap. Lock the roster now — nobody else can be added later. Appoint one **Representative** (suggest: Praneeth) who registers the team, submits, and receives/distributes any prize. Everyone joins via Devpost and agrees to Devpost ToS + AWS Event Terms. |
+| Submission window: Jun 30 – **Aug 18, 5pm ET**. Judging: **Aug 19 – Sep 15**. Winners ~Sep 21. | The demo URL and repo must stay live, working, and free-to-access through **Sept 15**, not just Aug 18. Budget the deployed stack to idle cheaply for a month (see §6.4). |
+| **New projects only**, built during the submission period; standard frameworks + AI coding assistants explicitly allowed; any other pre-existing code must be disclosed | Fresh repo, first commit dated in-window. We disclose libraries and AI-assisted development in the README. Don't import old project code silently. |
+| Stage One is **pass/fail**: fits theme + reasonably applies the required tools. Stage Two: five equally weighted criteria | Passing Stage One is table stakes — the writeup must make the two CRDB tools and AWS usage unmissable in the first paragraph. |
+| **Tie-breaks follow criteria order**, starting with Agentic Memory Design | If we're tied with anyone, memory design wins the tie. It's already our strongest axis; over-invest there deliberately. |
+| Judges **may judge from the video + description alone** and are not required to test | The 3-minute video and text description carry most of the weight. Treat lane 5's deliverables as first-class engineering, not garnish. |
+| Video: <3 min, must show the project functioning **and the CockroachDB memory layer at work**, public on YouTube/Vimeo, **no third-party trademarks or copyrighted music** | Show live SQL/table views of tasks flipping states during the rescue — that's "memory layer at work," literally. Royalty-free or no music. Watch stray logos in screen recordings. |
+| Repo must be public with an OSI license **visible in the About section** | MIT, added day 1, pinned in repo About — not just a LICENSE file buried in the tree. |
+| "All required CockroachDB and AWS components must be **meaningfully integrated — not just initialized**" | Their words. Our writeup answers "what did the agent actually do with each tool" per tool, one paragraph each (§6.2, §6.4 give the answers). |
+
+### 6.2 CockroachDB tooling — tool-by-tool integration plan
+
+| Tool | What it actually is (per docs) | How Colony uses it | Status |
 |---|---|---|---|
-| **Datafold DMA / data-diff** | Migration silently diverges data | **Hierarchical checksum diff** (§6.2) with in-engine canonical hashing | **Implemented** — core verifier |
-| **ExpeL / A-MEM** (2024–25) | Failures are forgotten; lessons don't compound | **Reflection** (§4.4): trajectories → engine-keyed rules with provenance + lifecycle, linked to related memories | **Implemented** — core memory |
-| **D-Bot / DBAIOps** (VLDB 2024–26) | Failures get rolled back but never explained | **Diagnosis agent** (§6.6): root-cause postmortem into memory | **Implemented** — P1 |
-| **Illusion of Multi-Agent Advantage / AI Agents That Matter** | Multi-agent theater; benchmarks ignoring cost | **Baselines that bite** (§13.19): same harness at `max_workers=1` *and* `molt verify` on the same schema — same verdicts, N× wall-clock, no self-heal, no ledger | **Implemented** — demo evidence |
-| **OTel GenAI conventions + AgentOps, AgentTrace, "Agent Traces to Trust"** | Black-box agents you can't audit | §9: standardized traces, live dashboard, queryable provenance | **Implemented** — core |
-| **CrackSQL** (SIGMOD 2025) | LLM freely rewrites SQL/DDL, introduces breakage | LLM constrained to planning/auditing/narration; deterministic tools mutate. (Its dialect-translation mechanism = P2 stretch) | Validates design |
-| **"Data Agents: Hype?"** survey (2025) | Over-trust in autonomous agents | Safety envelope: three gates, source untouched until cutover, verify-before-commit | Validates design |
-| **Online schema change** (F1, VLDB 2013) | Blocking DDL causes downtime | Native online schema changes (day-2, P2) | Validates design |
-| **Project Sid / PIANO, AgentSociety** | Large populations corrupt shared state | One strongly-consistent memory; one decision bottleneck (the quorum) | Validates design |
+| **Managed MCP Server** | Managed endpoint (`cockroachlabs.cloud/mcp`); config snippet copied from Cloud Console into Claude Code/Cursor/VS Code. Tools: list databases/tables, describe schemas & indexes, inspect cluster health and running queries, run read-only SQL + `EXPLAIN`; writes only when explicitly enabled. | **Runtime:** the commander console — a human asks natural-language questions ("which victims are unreached and why?") and the AI answers by querying live fleet memory, read-only. **Dev-time:** every teammate wires the MCP config into Claude Code/Cursor for schema inspection while building. | Required tool #1 ✅ |
+| **Distributed Vector Indexing** | Native `VECTOR` column type; `CREATE VECTOR INDEX`; similarity operators `<->` (L2), `<#>` (inner product), `<=>` (cosine); vectors, JSONB, and relational data in the same table, same transaction, serializable by default. | The reconcile-before-broadcast gate (cosine `<=>` search over `observations.embedding` inside the insert transaction) and `mission_memories` cross-mission recall. One system for beliefs + tasks + vectors = the "no consistency gap" story from their own docs, demonstrated. | Required tool #2 ✅ |
+| **Agent Skills Repo** | Open-source repo (`cockroachlabs/cockroachdb-skills`) of machine-executable skills per the agentskills.io spec — including domains for resilience & disaster recovery, observability, security/governance, and specific skills like validating production readiness and auditing user privileges. | Two uses. (1) Dev: schema/query design skills during lane 1's build. (2) **Judge-visible:** run the production-readiness, privilege-audit, and backup/DR-posture skills against our cluster before submission and commit the outputs to `/ops-audit` in the repo. A disaster-relief fleet that audited its own disaster-recovery posture with the sponsor's skills repo — that paragraph writes itself. | Strong tool #3 ✅ |
+| **ccloud CLI** | Agent-ready CLI for the Cloud control plane: create clusters, manage IP allowlists, SQL users, connection info; JSON output; service-account RBAC. | Cluster provisioning + per-robot SQL user creation scripted via ccloud in `infra/` (reproducible setup, shown in README). Optional — nice fourth tool, zero extra architecture. | Optional #4 |
+| Docs MCP server, Claude Code plugin, LangChain integrations | Docs-only MCP endpoint; editor plugins; LangChain provider/vector store/chat history. | Dev accelerators only. LangChain's CRDB vector store is a fallback if lane 1's raw-SQL vector path hits friction; core stays raw SQL for transactional control. | Dev aids |
 
----
+### 6.3 Validated technical facts (so lane 1 doesn't rediscover them)
 
-## 11. CockroachDB usage — relational *and* distributed
+- Schema DDL in §4.5 is consistent with v26.2 docs: `VECTOR` type + `CREATE VECTOR INDEX` are the documented syntax. Use **cosine (`<=>`)** for the reconcile gate.
+- The docs' own showcase pattern is exactly ours: vector search combined with relational filters in one query, one transaction — e.g. `ORDER BY embedding <=> $query LIMIT 5` with `WHERE` filters. Reuse that shape in the gate.
+- Serializable isolation is the default — the claiming `UPDATE … WHERE status='open'` needs no extra locking ceremony.
+- CockroachDB Cloud free tier: no credit card, hackathon-eligible per the FAQ. Free-tier limits are ours to watch; embeddings at 512-dim × a few thousand observations is nothing.
+- MCP server is read-only by default; write tools are opt-in. Leave writes off — it *is* our access-control story.
 
-`(*)` = one of the hackathon's four named tools (minimum two; Flock uses three).
+### 6.4 AWS services — decisions and rationale
 
-| Feature | Role |
-|---|---|
-| CockroachDB as migration *target* | The product story: Flock is the agentic on-ramp (the layer around MOLT) |
-| Serializable txns + `FOR UPDATE SKIP LOCKED` | Exactly-once claiming across a concurrent swarm |
-| Changefeeds (CDC) | Wake the quorum as results land; stream events — no separate bus |
-| Row-level TTL + leases + epochs | Dead verifiers' checks re-pool; the pass self-heals |
-| `AS OF SYSTEM TIME` | Time-travel over the audit ledger (and day-2 diffs, P2) |
-| Backups via **ccloud CLI** `(*)` | Provisioning/ops scripts; day-2 snapshot + rollback path (P2) |
-| **Distributed vector index** `(*)` | The compounding memory: rules + incidents, same rows as operational data |
-| **Managed MCP Server** `(*)` | Read-only, audit-logged operator window into swarm state, register, provenance |
-| Survivability | Kill half the swarm mid-pass; the verdict comes out identical |
-
-## 12. AWS usage
-
-| Service | Role |
-|---|---|
-| **Amazon Bedrock** | Where language lives: audit narration, planning, diagnosis, reflection; embeddings. Parity verifiers call no model |
-| **Amazon RDS (PostgreSQL)** | The demo's *source* — the thing being migrated |
-| **AWS Lambda** | Changefeed consumers (quorum) and bursty verifier fan-out |
-| **Amazon S3** | The Scribe's rendered artifacts: risk reports, plans, runbooks, postmortems |
-
-No SQS, Redis, external vector DB, or separate telemetry store — CockroachDB is the queue, bus, vector memory, and audit backend.
-
----
-
-## 13. Design decisions (settled now, so architecture doesn't churn)
-
-1. **Coordination bus = changefeed webhook (HTTPS) sink fronting Lambda.** No native Lambda sink exists; delivery is at-least-once ⇒ every consumer idempotent. Changefeeds are kept for **quorum wake-up**, where those semantics fit. The dashboard needs a browser path a webhook can't provide, so a small always-on service exists regardless — its read path may simply poll indexed views; a config choice, not a redesign. If the Cloud tier gates changefeeds (Phase 0 verifies), indexed polling backs the same consumer interface everywhere.
-2. **Exactly-once *claiming*, at-least-once *execution*, idempotent effects.** Claims carry epochs; verdicts are keyed `(task_id, claim_epoch)` so re-runs can't double-count in the quorum (§6.3).
-3. **Scale target: ~50 tables, 1,000+ leaf checks, ~300 concurrent verifiers** (config-driven). The swarm story is check count and concurrency, not table count — and fabricating 300 plausible tables with believable data is a hidden multi-day tar pit that buys nothing.
-4. **Single-region cluster is the core deployment.** Chaos story = SIGKILL half the verifiers; multi-region is stretch, only after the demo is frozen.
-5. **Exactly three human gates** — register (G1), plan + DDL (G2), cutover (G3). Failure needs no human: abort is automatic; the source keeps serving.
-6. **LLM placement rule (roster-wide):** the LLM plans, narrates, diagnoses, reflects; deterministic code detects, executes, verifies. Parity verifiers are pure SQL — zero tokens at any scale. A full verification pass costs cents.
-7. **The dashboard, traces, risk report, provenance click-through, and chaos controls are core product** — they are the functional demo URL judges use.
-8. **Snapshot discipline.** The parity reference is the frozen source snapshot (freeze-window, #14). Day-2 (P2): raise `gc.ttlseconds` for the run so `AS OF SYSTEM TIME` never loses its reference.
-9. **OTel GenAI conventions, defensively adopted.** Dual-emission (`OTEL_SEMCONV_STABILITY_OPT_IN`); content in span events, never attributes; checksums and verdicts logged, never data rows.
-10. **Agents hit the databases directly on the hot path.** MCP is the *operator's* window — read-only via a SELECT-only SQL role — not a data plane for 300 workers. **MCP demo fallback:** the provenance click-through view (§9.3) delivers the same moment if MCP misbehaves on stage.
-11. **Verifier algorithm = hierarchical checksum diff with a canonical-cast layer.** Order-independent aggregate (sum/XOR of per-row hashes); per-type canonicalization proven by a **golden test suite** — every supported type, both engines, equal checksums — a named Phase 0/1 exit criterion. Recursion depth and fan-out capped by config; row-level comparison only at leaves.
-12. **Direction: sources → CockroachDB only.** Rules keyed `(source, target, feature)` so bidirectional is future work, not a rewrite.
-13. **Sources: PostgreSQL P0; MySQL and others are P2 quirk packs.** "Any database" is an architecture property, not a hackathon promise.
-14. **Cutover: Replicator + failback is the production path; freeze-window is the demo simplification, stated as such.** The quorum gate is the decision layer that *arms* the drain-and-cutover; post-cutover failback is what makes the production story complete. We say this out loud rather than letting a judge say it first.
-15. **Quirk KB = seeded + learned rules, both with provenance and lifecycle** (`seeded | candidate | confirmed`, §4.2). Seed curated against current docs in Phase 0; a confident-but-stale mitigation is this system's most dangerous output.
-16. **Bulk movement = wrap MOLT Fetch. Decided now, not Phase 0.** Load is a solved tar pit (snapshots, FK handling, resumability) and wrapping is the stronger ecosystem story. The Phase 0 spike verifies flag construction and output parsing — not the decision. Schema conversion: assume the Schema Conversion Tool isn't scriptable; the Resolver is a small in-house converter constrained to a whitelisted mapping set, with the demo schema chosen inside that set.
-17. **Injected demo quirk = timestamp precision truncation.** Plausibly absent from a curated seed (unlike `BIGINT→INT`, which judges would expect seeded), crisp on the heatmap, and it sets up the thesis line: *the seed covers the head of the distribution; learning covers the tail.*
-18. **Run 1 → run 2 reset is a scripted, rehearsed runbook.** Wipe and reload the target; preserve `memory_*` and run-1 `agent_trace` in a separate schema the reset cannot touch. The wipe happens on camera — it makes the surviving memory visible.
-19. **Baselines that bite:** (a) the same harness at `max_workers = 1`, and (b) **`molt verify` on the same schema** — the baseline in every judge's head. Claim wall-clock, self-healing under SIGKILL, and what logs can't answer that the ledger can. Don't claim token parity — parity checks are token-free, so it reads as padding.
-20. **App-side changes: out of scope to execute, in scope to flag** (§2). The Auditor emits informational findings with effort estimates; Flock never edits application code.
-
----
-
-## 14. The demo — two runs, one lesson
-
-A two-act arc: migrate a ~50-table PostgreSQL database (on RDS, with generated data, seeded quirks, and generated workload traffic) to CockroachDB, **twice**. Act one shows working memory at swarm scale (pillar 1); act two proves the experience memory compounds (pillar 2). Every beat has a degradation ladder: chaos at 30 verifiers reads the same as 300; the two-run arc on 10 tables still proves pillar 2.
-
-**Run 1 — cold memory:**
-
-1. **Preflight + introspect + audit.** Environment goes green; the schema and workload map fill in; the **risk register** renders from the seeded rulebook — the `SERIAL` hotspot with a hash-sharded mitigation, the trigger outbox with a changefeed alternative, the purge cron as a row-level-TTL opportunity, the contended transaction shape as an app-side `40001` advisory — each finding citing its rule. Gate 1: approve.
-2. **Plan + convert + load.** The DDL diff is approved (Gate 2); the Load Driver runs the dance and MOLT Fetch moves the data; the Reconciler sets sequence restarts; the heatmap lights up with 1,000+ pending checks; Lambda verifiers spin up.
-3. **Zero double-work.** The duplicate-claim counter stays pinned at **0** (`SKIP LOCKED` + epochs). Toggle to a naive read-then-update claim (quarantined pool) and watch it climb — the money shot, now falsifiable by definition (§6.3).
-4. **Survive chaos.** SIGKILL half the verifiers mid-pass — leases expire, epochs bump, checks re-pool, the pass finishes with zero lost work. Ephemeral agents, durable memory.
-5. **Catch the silent divergence.** The injected timestamp-precision truncation turns a range checksum **red** — the mismatch recurses live, the red cell fanning into finer child checks until the diverging rows are cornered. **No-go: cutover aborts; the untouched source keeps serving.** Diagnosis posts its postmortem; Reflection distills the candidate rule.
-6. **The reset, on camera.** The target is wiped and reloaded from the runbook — and the memory schema visibly survives the wipe. Ephemeral everything, durable memory, again.
-
-**Run 2 — warm memory (the payoff):**
-
-7. **The same migration, replanned.** The audit now flags the truncation **before execution** — deterministically, via the rule's detector (§4.3) — citing the rule learned one act ago, with its provenance chain one click deep: finding → rule → run-1 postmortem → the failed check's trace. The plan routes around it; verification goes green; the human cuts over. The rule transitions to **confirmed**. Ask via MCP: *"what did you learn from run 1?"* — answered from the ledger; if MCP misbehaves, the click-through *is* the moment.
-8. **Close on the metrics panel.** 100% coverage, 0 duplicates, **caught → learned → prevented → confirmed**, mean abort time, token cost (parity: zero) — next to the baselines: the same harness at `max_workers=1`, and `molt verify` on the same schema — same verdicts, N× the wall-clock, no self-heal, no queryable ledger. The swarm buys speed and trust, not theater.
-
-All coordinated through the shared memory, no orchestrator in the data plane. Every beat reproducible by a judge at the demo URL — whose default view is a **time-travel replay of a golden run** (a scrubber over `agent_trace` via `AS OF SYSTEM TIME`), with live runs behind one button so judges never share mutable state. The video (<3 min) follows the same arc.
-
----
-
-## 15. Honest caveats
-
-- **Breadth, not brains.** The swarm parallelizes verification coverage; it does not make the plan smarter. Planning, audit approval, and cutover stay human-gated.
-- **Canonicalization is the hardest problem here** (§6.2). The golden test suite is the mitigation, and it gets real calendar time — a checksum layer that lies is worse than no verifier.
-- **Wrong advice is worse than no advice.** Seeded rules are curated against current docs in Phase 0, carry provenance, and are versioned; a confident-but-stale mitigation is the most dangerous output this system can produce.
-- **The app layer is flagged, never fixed.** Retry loops, ORM behavior, `LISTEN/NOTIFY` consumers are informational findings with effort estimates. Executing app-side changes is out of scope, full stop.
-- **Freeze-window is a demo simplification.** Production cutover is Replicator + failback (§13.14); we scope honestly rather than hiding the assumption.
-- **"Any database" discipline.** The architecture is pluggable; the hackathon claim is Postgres. Overpromising engine coverage is how the core demo dies.
-- **Contention.** Naive claiming thrashes hot rows. Mitigations: `SKIP LOCKED`, sharded `verify_tasks` if load tests demand it, short heartbeated leases.
-- **Lambda networking is a real decision, not a detail.** 300 workers = a connection storm against Cloud connection limits plus VPC-to-RDS with egress to CockroachDB. Jittered spawn, connection reuse across warm invocations, ECS if the sustained pass demands it.
-- **Observability ≠ correctness.** A green dashboard with a weak diff is false comfort — diff on multiple signals (counts, checksums, aggregates, sequence state) against generated-but-realistic data.
-- **Trace content is sensitive.** Prompts/results live in droppable span events; the ledger stores checksums and verdicts, never data rows. Secrets via Secrets Manager; MCP behind a SELECT-only role.
-- **Bedrock quotas.** Mostly defused by design — parity verifiers call no model. Audit/diagnosis bursts get quota increases filed in Phase 0 plus a token bucket + jittered backoff.
-
----
-
-## 16. Judging alignment
-
-| Criterion | How Flock scores |
-|---|---|
-| **Agentic Memory Design** | Memory is the coordination substrate (queue + blackboard + bus + vectors) *and* the compounding cross-migration memory *and* the audit store — one store, many roles. Proven on camera: run 2 beats run 1 because the memory improved, not the model, and the rule's lifecycle (`candidate → confirmed`) is the receipt |
-| **Technical Implementation** | Serializable `SKIP LOCKED` claiming with epochs and heartbeats, changefeed coordination, in-engine hierarchical checksum diffs over a golden-tested canonical layer, transactional leaf-quorum, OTel GenAI instrumentation — correct, current, non-trivial |
-| **Real-World Impact** | Getting *onto* CockroachDB is the journey Cockroach built MOLT for — Flock automates the layer they currently staff with humans and migration-services engineers, and every data team fears this workflow |
-| **Production Readiness** | Three human gates, source-untouched-until-cutover, self-healing leases, chaos-tested, falsifiable SLOs, queryable + time-travelable audit — directly answering the trust gap that sinks ~95% of agent pilots |
-| **Creativity & Originality** | The destination database doubles as the migration's coordination brain **and** observability backend — including time-travel over the audit trail itself; memory that compounds across migrations with a visible lifecycle |
-
----
-
-## 17. Phases
-
-Sequential; a phase starts only when the previous phase's exit criteria pass.
-
-| Phase | Focus | Exit criteria |
+| Service | Role in Colony | Why this one |
 |---|---|---|
-| **Phase 0** | Spikes + foundations | Verified on the real Cloud tier: changefeed webhook sink, vector index, `SKIP LOCKED` micro-benchmark, MCP connect; OTel dual-emission smoke test. RDS source provisioned. **MOLT Fetch wrap spike** (flag construction + output parsing — the decision is made, §13.16). **Canonical-cast golden suite green across all supported types.** **Schema + data generator with seeded quirks; workload generator** (`pg_stat_statements` needs traffic to introspect); fault-injection library (also produces the catch-rate metric). Sequence-reconcile spike. Seeded quirk KB curated against current docs. Bedrock quota increases filed |
-| **Phase 1** | Pillar 2 end-to-end (serial) | The full **two-run arc** on a small schema with one serial verifier: preflight → introspect → audit → G1 → plan + resolve → G2 → convert → load → reconcile → verify → abort on injected divergence → diagnose → distill → **reset via runbook** → re-run where the audit flags the problem *before execution via the rule's detector*, citing provenance. Scribe renders artifacts. Exit bar: run 2 provably differs because of a stored memory; instrumented from the first span |
-| **Phase 2** | Pillar 1 at scale | Concurrent claiming with epochs + heartbeats (duplicates = 0 at 100+ verifiers, per the §6.3 definition) → hierarchical diff with recursive child checks + `split` lifecycle (pure SQL, zero tokens) → all four check kinds → leases/self-heal under SIGKILL → changefeed-driven leaf-quorum; `agent_trace` populated by every agent; claim-path load test; Lambda connection strategy settled |
-| **Phase 3** | The two-run demo surface | Dashboard (heatmap, counters, SLO panel, register view, **provenance click-through**) + naive-claim toggle + chaos control at ~300 verifiers; the full §14 arc runs unnarrated, including the reset beat and the MCP moment with its fallback; **both baselines captured** (`max_workers=1` and `molt verify`); golden-run replay scrubber; ccloud scripts |
-| **Phase 4** | Freeze & polish | All demo beats pass ≥3 consecutive full runs; README + diagram; video recorded; demo URL soak-tested. Stretch (multi-region, MySQL pack, CDC cutover, day-2) only after this passes |
-| **Phase 5** | Submit | Repo public (Apache-2.0), submission filed with ≥24h buffer |
+| **Amazon Bedrock** (core) | Robot planning calls (Claude Haiku-class — pick the current fast/cheap Claude model listed in the region; enable model access in the Bedrock console on day 1, it's not instant) + **Titan Text Embeddings V2 at 512 dims** for observations and mission memories. | The listed AWS service that touches the agent's brain directly; pay-per-token fits our capped call budget; keeps the whole AI path on AWS as the hackathon intends. |
+| **ECS Fargate** (core) | Sim server + agent processes as one container service. | The sim is a long-lived 4 Hz tick loop with persistent websockets — Lambda's execution model is wrong for that. Fargate = containers without cluster management. One small task (0.5 vCPU) idles cheaply through the Sept 15 judging window. |
+| **S3 + CloudFront** (core) | Static frontend hosting; mission replay JSON artifacts. | Free-tier friendly, zero maintenance, survives judging month at ~$0. |
+| **AWS Lambda** (supporting) | Post-mission summarizer: mission ends → Lambda embeds the run summary via Bedrock → writes `mission_memories`. | A genuinely event-shaped job — the one place serverless is the right tool, and it makes "cross-mission learning" a named AWS integration rather than a cron job. |
+| SageMaker — **not used** | — | No custom training/inference; using it would be padding, and judges reward meaningful integration, not service count. |
+| Bedrock Agents — **deliberately not used** | — | Our thesis is that coordination lives in *durable shared memory*, not in a hosted orchestration runtime. Outsourcing the task graph to Bedrock Agents would blur the CockroachDB-as-brain story. Say this in the writeup — it preempts the "why didn't you just use Bedrock Agents?" question and shows insight into agentic-system design (the Creativity criterion's own wording). |
 
-## 18. Open questions (agenda for the architecture discussion)
+Note on credits: the hackathon provides **AWS Free Tier only** — no special credit grant. Total projected spend at our caps: single-digit dollars for Bedrock, low tens for a month of Fargate idle. Lane 5 sets a billing alarm day 1.
 
-- **Reflection prompt wording + rule-merge policy.** The schema and lifecycle are settled (§4.2); what remains is the distillation prompt itself and the exact link-vs-merge threshold.
-- **Where `molt verify` fits as a signal:** baseline only (§13.19), or also invoked as a leaf-level check kind for defense in depth?
-- **Demo schema design:** which ~50-table schema + generator — needs the seeded quirks (sequences, trigger outbox, purge cron, a contended transaction shape) and believable volume.
-- **Checksum function + range sizing + recursion caps** — constrained by one rule: it must survive the golden suite identically on both engines.
-- Language/stack (Python vs TypeScript; Bedrock SDK ergonomics).
-- Verifier substrate: Lambda (bursty, webhook-native) vs ECS (no 15-min ceiling) — one primary, harness portable.
-- CockroachDB Cloud tier, given Phase 0 findings on changefeeds/vector/MCP.
-- Embedding model on Bedrock (Titan vs Cohere) + index parameters.
-- OTel viewer (Tempo vs Langfuse vs OpenObserve) and Collector deployment.
-- Dashboard stack + read strategy that never degrades the claim path (polling is acceptable here; changefeeds stay for quorum).
+### 6.5 Resilience demo — corrected mechanics
+
+The Cloud free tier doesn't hand you nodes to kill. So the plan is two clusters, one schema:
+
+1. **Primary fleet memory:** CockroachDB Cloud (free tier) — powers the deployed demo, the MCP console, and the vector work. This is what judges touch.
+2. **Chaos segment (video only):** the identical stack pointed at a **self-hosted 3-node CockroachDB cluster** (Docker Compose, or `cockroach demo --nodes 3` in rehearsal). Mid-rescue, kill node 2's container on camera; the fleet keeps claiming, completing, and handing off. Narrate honestly: "same software, self-hosted so we can murder a node live."
+
+This is stronger than pretending: it shows we understand the deployment models, and the survive-a-node-loss behavior is a property of the database, not of the hosting tier. FR-11 and the §5.3 Aug 13–14 milestone now mean this. If ccloud/Cloud tiers turn out to allow a scale-down demo on a paid Advanced cluster, lane 1 may substitute — but don't spend money to prove what Docker proves free.
+
+### 6.6 Day-1 setup checklist (do today, before code)
+
+1. All five: create Devpost accounts, join the hackathon, form the team; Praneeth registered as Representative.
+2. Praneeth: CockroachDB Cloud signup (free, no card) → create cluster → copy MCP config snippet into Claude Code/Cursor for everyone → create per-robot SQL users (via ccloud if adopting tool #4).
+3. AWS account: enable **Bedrock model access** (Claude + Titan V2) in the target region immediately — approval isn't always instant. Set the billing alarm.
+4. Repo: init public, MIT license visible in About, README skeleton with the tools-used section stubbed, first commit today (in-window timestamp).
+5. Clone `cockroachlabs/cockroachdb-skills`; lane 1 skims the schema-design and resilience/DR skills before writing the migration.
+
 
 ---
 
-## Appendix A — Swarm-verification SQL patterns (illustrative)
+## 7. Sources
 
-> Illustrative of required semantics; exact syntax fixed against current CockroachDB docs after Phase 0.
+Market sizing: MarketsandMarkets, AMR/AGV Fleet Management Software Market (Nov 2025) · Mordor Intelligence, Search and Rescue Robots Market (2025) · MRFR, SkyQuest, Research Nester SAR reports · SVB, Physical AI & the Future of Robotics Report (2026) · PitchBook 2025 robotics funding via Future Investments (May 2026).
+Competitive: MiR Fleet product pages · CB Insights robot-fleet-management ESP (Formant, Geek+) · SYNAOS MRFM (VDA 5050) · Open-RMF docs + JobToRob milestone coverage (mutex groups) · Open Robotics Discourse, "SOTA for Multi Robot Cooperation in RMF" (Jul 2025) · AWS IoT RoboRunner preview/GA announcements (Nov 2021 / Nov 2022), @aws-sdk/client-iot-roborunner removal notice, AWS RoboMaker end-of-support notice (Sept 10, 2025).
+Research: Team Explorer, "Modular, Resilient, and Scalable System Design… Lessons after DARPA SubT" (arXiv 2404.17759) · CTU-CRAS-NORLAB SubT field reports · Gupta et al., "RobotFleet" (arXiv 2510.10379, USC) · Cockroach Labs engineering blog on C-SPANN vector indexing and agent memory.
 
-**Task lifecycle columns (see §6.3):**
-```sql
-CREATE TABLE verify_tasks (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  migration_id  UUID NOT NULL,
-  object_type   STRING, object_name STRING,
-  check_kind    STRING,        -- parity | sequence_state | object_presence | aggregate
-  bounds        JSONB,         -- range bounds for parity checks
-  parent_task   UUID,          -- non-NULL for recursion children
-  status        STRING NOT NULL DEFAULT 'pending',  -- pending|claimed|passed|failed|split
-  owner         STRING,
-  claim_epoch   INT NOT NULL DEFAULT 0,
-  lease_expires TIMESTAMPTZ,
-  created_at    TIMESTAMPTZ DEFAULT now()
-);
-```
 
-**Atomic claim — no two agents verify the same object:**
-```sql
-UPDATE verify_tasks
-   SET status = 'claimed', owner = $agent_id,
-       claim_epoch = claim_epoch + 1,
-       lease_expires = now() + INTERVAL '60 seconds'
- WHERE id = (
-       SELECT id FROM verify_tasks
-        WHERE migration_id = $mig AND status = 'pending'
-        ORDER BY created_at
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1)
-RETURNING id, claim_epoch, object_name, check_kind, bounds;
-```
+Hackathon & tooling: Devpost hackathon overview, resources, and official rules pages (cockroachdb-ai.devpost.com, fetched Aug 1 2026) · CockroachDB docs v26.2: "CockroachDB and AI" (VECTOR type, CREATE VECTOR INDEX, similarity operators, MCP server tooling, Agent Skills, ccloud) · cockroachlabs/cockroachdb-skills (GitHub) · Cloud MCP quickstart + ccloud get-started docs (cockroachlabs.com/docs/cockroachcloud).
 
-**Heartbeat — a long check renews its lease instead of manufacturing a duplicate:**
-```sql
-UPDATE verify_tasks
-   SET lease_expires = now() + INTERVAL '60 seconds'
- WHERE id = $task AND owner = $agent_id AND claim_epoch = $epoch;
-```
+## 8. Open questions for the team
 
-**Idempotent verdict — keyed by (task, epoch) so re-runs can't double-count:**
-```sql
-INSERT INTO verify_results (task_id, claim_epoch, migration_id, object_name, passed, detail)
-VALUES ($task, $epoch, $mig, $obj, $passed, $detail)
-ON CONFLICT (task_id, claim_epoch) DO NOTHING;
-UPDATE verify_tasks SET status = CASE WHEN $passed THEN 'passed' ELSE 'failed' END
- WHERE id = $task AND claim_epoch = $epoch;
-```
-
-**Hierarchical diff — a diverging range becomes 'split' (no verdict) and spawns children:**
-```sql
-INSERT INTO verify_tasks (migration_id, object_name, check_kind, bounds, parent_task, status)
-SELECT $mig, $obj, 'parity', r.bounds, $task, 'pending'
-  FROM split_bounds($lo, $hi, 8) AS r(bounds);   -- fan-out + depth capped by config
-UPDATE verify_tasks SET status = 'split' WHERE id = $task AND claim_epoch = $epoch;
-```
-
-**Sequence-state check — the classic post-cutover incident row checksums can't catch:**
-```sql
--- worker reads target sequence restart and max(pk); passes iff restart > max
-SELECT last_value FROM $sequence;             -- on target
-SELECT max($pk_col) FROM $table;              -- on target
--- verdict written via the idempotent pattern above
-```
-
-**Leaf-quorum cutover gate — split parents can't wedge it; mid-flight recursion can't fake a pass:**
-```sql
-UPDATE migrations
-   SET status = CASE
-     WHEN NOT EXISTS (SELECT 1 FROM verify_tasks
-                       WHERE migration_id = $mig
-                         AND status IN ('pending','claimed'))          -- all leaves resolved
-      AND NOT EXISTS (SELECT 1 FROM verify_tasks
-                       WHERE migration_id = $mig AND status = 'failed') -- zero failures
-     THEN 'ready_for_cutover'   -- Gate 3: human confirms
-     ELSE 'aborted'             -- source untouched, still system of record
-   END
- WHERE id = $mig;
-```
-
-**Self-heal — a dead verifier's check returns to the pool (next claim bumps the epoch):**
-```sql
-UPDATE verify_tasks SET status = 'pending', owner = NULL
- WHERE status = 'claimed' AND lease_expires < now();
-```
-
-**Coordination bus — quorum wakes as results land (webhook sink; at-least-once ⇒ idempotent consumers):**
-```sql
-CREATE CHANGEFEED FOR TABLE verify_results
-  INTO 'webhook-https://<bus-endpoint>'
-  WITH updated, resolved;
-```
-
-## Appendix B — Observability schema & queries (illustrative)
-
-**Append-only audit / trace ledger (in the shared memory):**
-```sql
-CREATE TABLE agent_trace (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  trace_id     STRING NOT NULL,          -- OTel trace id
-  span_id      STRING NOT NULL,
-  migration_id UUID,
-  agent_id     STRING,
-  kind         STRING,                    -- invoke_agent|llm.chat|db.execute|memory.retrieve|verdict|gate
-  object_name  STRING,
-  claim_epoch  INT,
-  passed       BOOL,
-  tokens_in    INT, tokens_out INT, cost_usd DECIMAL,
-  detail       JSONB,                     -- checksums + verdicts, never data rows
-  ts           TIMESTAMPTZ DEFAULT now()
-);
-```
-
-**Every failed check with its reasoning:**
-```sql
-SELECT object_name, detail->>'reason' AS why, agent_id, ts
-  FROM agent_trace
- WHERE migration_id = $mig AND kind = 'verdict' AND passed = false
- ORDER BY ts;
-```
-
-**Time-travel the audit — what had the swarm verified as of a past instant? (also powers the demo's replay scrubber):**
-```sql
-SELECT count(*) FILTER (WHERE passed) AS passed,
-       count(*) FILTER (WHERE NOT passed) AS failed
-  FROM agent_trace AS OF SYSTEM TIME '-10m'
- WHERE migration_id = $mig AND kind = 'verdict';
-```
-
-**Live SLO panel — coverage, failures, cost:**
-```sql
-SELECT count(DISTINCT object_name)                           AS objects_checked,
-       count(*) FILTER (WHERE kind='verdict' AND NOT passed) AS failures,
-       sum(cost_usd)                                         AS run_cost
-  FROM agent_trace
- WHERE migration_id = $mig;
-```
-
-## Appendix C — Compounding memory & the gap audit (illustrative)
-
-**Distilled rules with detector, mitigation template, provenance, and lifecycle (§4.2):**
-```sql
-CREATE TABLE memory_rules (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source_engine    STRING NOT NULL,   -- 'postgresql' | 'mysql' | ...
-  target_engine    STRING NOT NULL,   -- 'cockroachdb' (direction-agnostic by design)
-  feature          STRING NOT NULL,   -- 'sequences' | 'type:timestamptz' | 'txn:contended' | ...
-  detector         JSONB,             -- structured predicate / SQL over feature descriptors — matching is mechanical
-  rule             TEXT NOT NULL,     -- "timestamptz(6)→lower precision silently truncates; map precision explicitly"
-  mitigation       TEXT,              -- template the Resolver applies
-  status           STRING NOT NULL DEFAULT 'candidate',  -- seeded | candidate | confirmed
-  source_migration UUID,              -- provenance: the run that taught this (NULL = seeded)
-  links            UUID[],            -- related rules/incidents (dedupe by key + similarity ⇒ link, don't merge)
-  embedding        VECTOR(1536),      -- dimension per chosen embedding model
-  created_at       TIMESTAMPTZ DEFAULT now()
-);
-```
-
-**Gap-audit recall — exact key first (deterministic rail), similarity second:**
-```sql
-SELECT rule, feature, status, source_migration FROM memory_rules
- WHERE source_engine = $src AND target_engine = 'cockroachdb' AND feature = ANY($observed_features);
-
-SELECT rule, feature, status, source_migration FROM memory_rules
- WHERE source_engine = $src AND target_engine = 'cockroachdb'
- ORDER BY embedding <-> $schema_embedding LIMIT 10;
-```
-
-**Rule confirmation — the run-2 transition that goes on the metrics panel:**
-```sql
-UPDATE memory_rules SET status = 'confirmed'
- WHERE id = $rule_id AND status = 'candidate';   -- fired pre-execution and prevented the run-1 failure
-```
-
-**Risk register — the generated, human-approved pre-mortem:**
-```sql
-CREATE TABLE gap_findings (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  migration_id UUID NOT NULL,
-  feature      STRING NOT NULL,
-  severity     STRING NOT NULL,      -- 'blocker' | 'risk' | 'opportunity' | 'informational'
-  risk         TEXT,
-  mitigation   TEXT,
-  opportunity  TEXT,
-  rule_id      UUID,                 -- provenance: the memory rule behind this finding
-  approved     BOOL DEFAULT false,   -- Gate 1 sign-off, per finding
-  created_at   TIMESTAMPTZ DEFAULT now()
-);
-```
+1. Name: keep "Colony," or vote on alternatives before the repo goes public (repo rename later is annoying).
+2. Relay/uplink-zone mechanic (FR-14): great realism + SubT tie-in, but it's the riskiest P1. In or out by Aug 9?
+3. Live LLM in the deployed demo, or recorded-replay only with live mode behind a flag?
+4. Who takes which TBD lane? Decide today — lane 3 needs the strongest frontend hand, lane 4 the strongest distributed-systems hand.
