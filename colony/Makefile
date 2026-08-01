@@ -15,7 +15,7 @@ schema:
 	docker compose exec -T cockroach ./cockroach sql --insecure \
 		-e "CREATE DATABASE IF NOT EXISTS colony"
 	docker compose exec -T cockroach ./cockroach sql --insecure -d colony \
-		--set errexit=true < schema/v0.sql
+		--set errexit=true < schema/v1_1.sql
 
 test:
 	uv run --extra dev pytest -q

@@ -154,11 +154,11 @@ def test_zone_lookup(world):
 # --- validator ---------------------------------------------------------------
 
 
-def _minimal() -> dict:
+def _minimal(width: int = 2, height: int = 2) -> dict:
     return {
-        "width": 2, "height": 2, "tile_size": 32,
-        "layers": {"ground": [["open", "open"], ["open", "open"]],
-                   "objects": [["", ""], ["", ""]]},
+        "width": width, "height": height, "tile_size": 32,
+        "layers": {"ground": [["open"] * width for _ in range(height)],
+                   "objects": [[""] * width for _ in range(height)]},
         "zones": [], "spawn_points": {}, "victims": [], "escalations": [],
     }
 
@@ -265,3 +265,65 @@ def test_zone_outside_the_map_is_rejected():
     data["zones"] = [{"name": "big", "x": 0, "y": 0, "width": 99, "height": 1}]
     with pytest.raises(MapError, match="bounds"):
         parse_map(data)
+
+
+# --- exploration sectors (§3.3, v3.1) ---------------------------------------
+
+
+def test_the_map_has_the_four_by_three_sector_grid(world):
+    """FR-16 seeds one `explore_sector` task per sector; §3.3 fixes the grid at
+    4x3 of 10x10 tiles."""
+    assert len(world.sectors) == 12
+    assert all(s["width"] == 10 and s["height"] == 10 for s in world.sectors)
+    assert {s["id"] for s in world.sectors} == {
+        f"{c}{r}" for c in "ABCD" for r in (1, 2, 3)
+    }
+
+
+def test_sectors_tile_the_whole_map(world):
+    """Every tile must belong to exactly one sector, or ground in no sector could
+    never be assigned and would stay unswept forever."""
+    seen = {}
+    for y in range(world.height):
+        for x in range(world.width):
+            sector = world.sector_at(x, y)
+            assert sector is not None, f"({x},{y}) is in no sector"
+            seen.setdefault(sector, 0)
+            seen[sector] += 1
+    assert sum(seen.values()) == world.width * world.height
+    assert set(seen) == {s["id"] for s in world.sectors}
+
+
+def test_sector_lookup_by_id(world):
+    assert world.sector("A1")["x"] == 0
+    with pytest.raises(KeyError):
+        world.sector("Z9")
+
+
+def test_sectors_that_leave_a_gap_are_rejected():
+    data = _minimal(width=20, height=10)
+    data["sectors"] = [{"id": "A1", "x": 0, "y": 0, "width": 10, "height": 10}]
+    with pytest.raises(MapError, match="every tile must belong"):
+        parse_map(data)
+
+
+def test_duplicate_sector_ids_are_rejected():
+    data = _minimal(width=20, height=10)
+    data["sectors"] = [
+        {"id": "A1", "x": 0, "y": 0, "width": 10, "height": 10},
+        {"id": "A1", "x": 10, "y": 0, "width": 10, "height": 10},
+    ]
+    with pytest.raises(MapError, match="duplicate sector"):
+        parse_map(data)
+
+
+def test_a_sector_outside_the_map_is_rejected():
+    data = _minimal(width=10, height=10)
+    data["sectors"] = [{"id": "A1", "x": 5, "y": 0, "width": 10, "height": 10}]
+    with pytest.raises(MapError, match="bounds"):
+        parse_map(data)
+
+
+def test_a_map_without_sectors_still_loads():
+    """Sectors are optional so small fixtures and older maps keep working."""
+    assert parse_map(_minimal()).sectors == []

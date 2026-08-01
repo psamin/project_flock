@@ -47,7 +47,7 @@ jobs:
           docker exec -i crdb ./cockroach sql --insecure \
             -e "CREATE DATABASE IF NOT EXISTS colony"
           docker exec -i crdb ./cockroach sql --insecure -d colony \
-            --set errexit=true < schema/v0.sql
+            --set errexit=true < schema/v1_1.sql
 
       - name: Install dependencies
         run: uv sync --extra dev

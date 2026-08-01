@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from agents.scout import Scout
+from agents.scout import Scout, split_sectors
 from bedrock.adapter import BedrockAdapter
 from sim.protocol import IDLE, MOVE
 from sim.world import World
@@ -17,9 +17,9 @@ def scout_world():
     return World(load_map(MAP_PATH), seed=3)
 
 
-def _scout(mem, mission, seed=0):
+def _scout(mem, mission, seed=0, sectors=()):
     return Scout(robot_id="s1", mission_id=mission, mem=mem,
-                 embedder=BedrockAdapter(), seed=seed)
+                 embedder=BedrockAdapter(), seed=seed, sectors=sectors)
 
 
 def test_a_scout_reports_what_it_sees_into_shared_memory(mem, mission):
@@ -105,12 +105,17 @@ def test_a_scout_actually_covers_ground(mem, mission, scout_world):
     assert len(scout.explored) > 200, f"only saw {len(scout.explored)} tiles in 60 ticks"
 
 
+def _shares(count):
+    """Same contiguous split the server uses."""
+    return split_sectors(load_map(MAP_PATH).sectors, count)
+
+
 def _explore(mem, mission, embedder, count, ticks, sectored=True):
     """Run `count` scouts and return (their explored union, the world)."""
     world = World(load_map(MAP_PATH), seed=3)
     scouts = [
         Scout(robot_id=rid, mission_id=mission, mem=mem, embedder=embedder, seed=i,
-              sector=i if sectored else 0, sector_count=count if sectored else 1)
+              sectors=_shares(count)[i] if sectored else ())
         for i, rid in enumerate(["s1", "s2"][:count])
     ]
     for _ in range(ticks):

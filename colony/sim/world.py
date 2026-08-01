@@ -150,7 +150,11 @@ class World:
         """Advance exactly one tick and return the frame describing it."""
         self.tick += 1
         self._tiles_changed = []
-        self.events = []
+        # `events` is deliberately NOT cleared here. Agents call percept()
+        # before step() (see Mission.tick_once and Scout.step), and percept
+        # appends victim_found — clearing at the top of the tick threw those
+        # away, so no sighting ever reached fleet memory or the event ticker.
+        # The list is drained when the frame is emitted instead.
 
         submitted = actions or {}
         # Iterate the roster, not the submitted actions: a robot part-way
@@ -200,6 +204,15 @@ class World:
 
     def _begin_work(self, robot: Robot, action: Action) -> None:
         tx, ty = action.target
+        # Bounds first: Action.parse validates shape only, and adjacency uses
+        # absolute differences, so an off-map target slips through whenever the
+        # robot stands at an edge. A negative coordinate would then index from
+        # the far side and silently rewrite a tile across the map, and an
+        # over-large one raises IndexError inside the tick loop — which is the
+        # one thing an illegal action must never do.
+        if not (0 <= tx < self.map.width and 0 <= ty < self.map.height):
+            self._reject(robot, f"target ({tx},{ty}) is outside the map")
+            return
         if abs(tx - robot.x) + abs(ty - robot.y) > 1:
             self._reject(robot, f"target ({tx},{ty}) is not adjacent")
             return
@@ -368,11 +381,12 @@ class World:
                 "mission_length_ticks": self.map.mission_length_ticks,
                 "ground": self.ground, "objects": self.objects,
                 "zones": self.map.zones,
+                "sectors": self.map.sectors,
             },
         )
 
     def _frame(self) -> StateFrame:
-        return StateFrame(
+        frame = StateFrame(
             tick=self.tick, kind="diff",
             robots=[r.to_json() for r in self.robots.values()],
             victims=[v.to_json() for v in self.victims.values()],
@@ -380,6 +394,8 @@ class World:
             events=list(self.events),
             metrics=self.metrics(),
         )
+        self.events = []   # drained on emit, so nothing is lost or sent twice
+        return frame
 
     def metrics(self) -> dict[str, Any]:
         states = [v.state for v in self.victims.values()]

@@ -15,10 +15,12 @@ from fleetmem.fake import FakeFleetMem
 # The published SDK surface (§5.1 lane 1).
 SDK_METHODS = [
     "report_observation", "get_beliefs", "claim_task", "complete_task",
-    "heartbeat", "log_event",
+    "heartbeat", "log_plan", "log_event",
+    # lease mechanics (§4.4) — recovery lives here, so the fake must match
+    "renew_leases", "release_task",
     # supporting methods the orchestrator and tests rely on
     "create_task", "open_tasks", "find_similar", "register_robot",
-    "stale_robots", "events", "close",
+    "stale_robots", "events", "plans_for", "close",
 ]
 
 

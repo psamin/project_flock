@@ -322,3 +322,73 @@ def test_the_mission_ends_at_the_map_s_tick_limit():
         assert not world.finished
     world.step({})
     assert world.finished
+
+
+# --- regressions from review ------------------------------------------------
+
+
+def test_percept_events_survive_the_tick_that_follows():
+    """Regression: step() cleared `events` at the top of the tick, but agents
+    call percept() *before* step() (Mission.tick_once, Scout.step). Every
+    victim_found was silently dropped — never logged to fleet memory, never
+    shown in the ticker. The old tests missed it by calling percept() without a
+    following step()."""
+    data = _flat(
+        width=20, height=20,
+        spawn_points={"scout": [{"x": 10, "y": 10}]},
+        victims=[{"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700}],
+    )
+    world = World(parse_map(data), seed=0)
+
+    world.percept("s1")                       # sees the victim
+    frame = world.step({"s1": Action.idle()})  # the tick that follows
+
+    assert any(e["verb"] == "victim_found" for e in frame.events), (
+        f"victim_found was discarded: {frame.events}"
+    )
+
+
+def test_events_are_not_delivered_twice():
+    """The other half: draining on emit rather than never clearing."""
+    data = _flat(
+        width=20, height=20,
+        spawn_points={"scout": [{"x": 10, "y": 10}]},
+        victims=[{"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700}],
+    )
+    world = World(parse_map(data), seed=0)
+    world.percept("s1")
+
+    first = world.step({"s1": Action.idle()})
+    second = world.step({"s1": Action.idle()})
+
+    assert any(e["verb"] == "victim_found" for e in first.events)
+    assert not any(e["verb"] == "victim_found" for e in second.events), "replayed"
+
+
+@pytest.mark.parametrize("target", [(-1, 5), (5, -1), (999, 5), (5, 999)])
+def test_work_on_an_off_map_target_is_refused(target):
+    """Regression: adjacency used absolute differences, so an off-map target
+    passed whenever the robot stood at an edge. A negative coordinate then
+    indexed from the far side and rewrote a tile across the map; an over-large
+    one raised IndexError inside the tick loop, which an illegal action must
+    never do."""
+    data = _flat(spawn_points={"lifter": [{"x": 0, "y": 5}]})
+    world = World(parse_map(data), seed=0)
+
+    frame = world.step({"l1": Action.act("clear_debris", target)})
+
+    assert any("outside the map" in e["detail"].get("reason", "") for e in frame.events)
+    assert world.robots["l1"].work_left == 0
+
+
+def test_an_off_map_target_does_not_corrupt_a_distant_tile():
+    data = _flat(spawn_points={"lifter": [{"x": 0, "y": 5}]})
+    data["layers"]["objects"][5][9] = DEBRIS
+    world = World(parse_map(data), seed=0)
+    before = [row[:] for row in world.objects]
+
+    world.step({"l1": Action.act("clear_debris", (-1, 5))})
+    for _ in range(5):
+        world.step({})
+
+    assert world.objects == before, "an out-of-bounds target changed the world"

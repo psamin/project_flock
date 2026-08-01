@@ -234,3 +234,62 @@ def test_events_are_appended_in_order(mem, mission):
     mem.log_event(mission, "l1", "task_claimed", {"kind": "clear_debris"})
     verbs = [e["verb"] for e in mem.events(mission)]
     assert verbs == ["victim_found", "task_claimed"]
+
+
+# --- provenance memory: plans (FR-17, §4.0) ---------------------------------
+
+
+def test_a_plan_records_the_memories_that_drove_it(mem, mission):
+    """The provenance leg of the four-memory thesis. Storing `based_on` is what
+    turns "the robot went to the office" into an answer to "why?" that a judge
+    can trace back to specific rows."""
+    a = mem.report_observation(mission, "s1", "victim", (14, 9))
+    b = mem.report_observation(mission, "s1", "hazard", (20, 9))
+
+    plan_id = mem.log_plan(
+        mission, "l1", trigger="task_done",
+        chosen={"action": "claim_task", "task_id": "t1"},
+        rationale="closest reachable victim, route avoids the fire",
+        based_on=[a, b],
+    )
+
+    plans = mem.plans_for(mission, "l1")
+    assert len(plans) == 1
+    assert plans[0].id == plan_id
+    assert plans[0].trigger == "task_done"
+    assert plans[0].chosen["action"] == "claim_task"
+    assert set(plans[0].based_on) == {a, b}
+
+
+def test_plans_are_scoped_by_robot_and_mission(mem, mission):
+    mem.log_plan(mission, "s1", "idle", {"action": "explore"}, "sweeping A1")
+    mem.log_plan(mission, "l1", "idle", {"action": "explore"}, "staging")
+
+    assert len(mem.plans_for(mission)) == 2
+    assert len(mem.plans_for(mission, "s1")) == 1
+    assert mem.plans_for(uuid.uuid4()) == []
+
+
+def test_a_plan_with_no_sources_is_still_recorded(mem, mission):
+    """Rule-based fallback plans have no digest behind them; they must still be
+    traceable, or the decision log has holes exactly when Bedrock was down."""
+    mem.log_plan(mission, "s1", "idle", {"action": "explore"}, "no tasks open")
+    assert mem.plans_for(mission)[0].based_on == []
+
+
+# --- lease semantics shared by both implementations -------------------------
+
+
+def test_open_tasks_includes_work_abandoned_by_a_dead_robot(mem, mission):
+    """Recovery has no separate step: to the allocator, a dead lease is just
+    availability (§4.4)."""
+    task = mem.create_task(mission, "clear_debris", (1, 1))
+    mem.claim_task(task, "l1", lease_seconds=-1)
+
+    assert task in {t.id for t in mem.open_tasks(mission)}
+
+
+def test_open_tasks_excludes_live_work(mem, mission):
+    task = mem.create_task(mission, "clear_debris", (1, 1))
+    mem.claim_task(task, "l1")
+    assert task not in {t.id for t in mem.open_tasks(mission)}

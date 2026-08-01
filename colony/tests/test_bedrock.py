@@ -17,7 +17,7 @@ from bedrock.adapter import (
 
 
 def test_embedding_matches_the_schema_width():
-    """VECTOR(512) in schema/v0.sql; a mismatch fails only at INSERT time."""
+    """VECTOR(512) in schema/v1_1.sql; a mismatch fails only at INSERT time."""
     assert len(BedrockAdapter().embed("victim under rubble")) == EMBED_DIMS
 
 

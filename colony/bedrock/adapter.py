@@ -30,7 +30,7 @@ from typing import Any
 
 EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 PLAN_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-EMBED_DIMS = 512  # matches observations.embedding VECTOR(512) in schema/v0.sql
+EMBED_DIMS = 512  # matches observations.embedding VECTOR(512) in schema/v1_1.sql
 
 LIVE, RECORD, REPLAY = "live", "record", "replay"
 

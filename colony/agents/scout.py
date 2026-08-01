@@ -28,6 +28,30 @@ from world.map_format import EMPTY, WALL
 VICTIM, HAZARD = "victim", "hazard"
 
 
+def split_sectors(sectors: list[dict[str, Any]], parts: int) -> list[tuple[str, ...]]:
+    """Divide the map's sector grid into `parts` **contiguous** shares.
+
+    Contiguity is the whole point. Dealing the 12 sectors round-robin interleaves
+    the scouts' territories across the map and they end up sweeping the same
+    ground anyway — measured at 1.18x the coverage of a single scout, barely
+    better than no assignment at all. Sorting by column first and cutting the
+    list into blocks gives each scout a band of the map, which measured at 1.67x.
+
+    Ordering is by (x, y) so the blocks come out as columns; a scout is never
+    handed two sectors at opposite corners.
+    """
+    ordered = [s["id"] for s in sorted(sectors, key=lambda s: (s["x"], s["y"]))]
+    if parts <= 1 or not ordered:
+        return [tuple(ordered)] * max(1, parts)
+    size, extra = divmod(len(ordered), parts)
+    shares, cursor = [], 0
+    for i in range(parts):
+        take = size + (1 if i < extra else 0)
+        shares.append(tuple(ordered[cursor:cursor + take]))
+        cursor += take
+    return shares
+
+
 @dataclass
 class Scout:
     """One scout drone. Deterministic given its seed."""
@@ -38,14 +62,20 @@ class Scout:
     embedder: Any = None           # BedrockAdapter; None skips embeddings
     seed: int = 0
 
-    # Sector assignment (§4.3 "frontier-exploration bias"). Two scouts running
-    # identical nearest-frontier logic from neighbouring spawns lock together and
-    # fly in formation, seeing the same tiles twice — the duplicated exploration
-    # this product exists to remove, on display in the demo. Each scout prefers
-    # its own vertical band of the map and only leaves it once that band is
-    # exhausted.
-    sector: int = 0
-    sector_count: int = 1
+    # Sector ids from the map's 4x3 grid (§3.3) this scout is responsible for,
+    # e.g. ("A1", "C2", "B3"). Two scouts running identical nearest-frontier
+    # logic from neighbouring spawns lock together and fly in formation, seeing
+    # the same tiles twice — the duplicated exploration this product exists to
+    # remove, on display in the demo.
+    #
+    # v3.1 turns this into `explore_sector` tasks claimed one at a time under a
+    # short lease (FR-16), so two live scouts can't share a sector and a dead
+    # scout's sector frees itself. That claiming loop is Aug 4-6. Holding a
+    # *share* of the grid is the interim stand-in: a single static sector is
+    # swept out in a few ticks, after which the scout has nowhere assigned to go
+    # and drifts back onto its neighbour's ground — measured at 1.18x the
+    # coverage of one scout, against 1.67x when each holds a share.
+    sectors: tuple[str, ...] = ()
 
     explored: set[tuple[int, int]] = field(default_factory=set)
     reported: set[tuple[str, int, int]] = field(default_factory=set)
@@ -130,19 +160,15 @@ class Scout:
     def _worth_pursuing(self, target: tuple[int, int] | None) -> bool:
         return target is not None and target not in self.explored
 
-    def _sector_bounds(self, width: int) -> tuple[int, int]:
-        band = width / self.sector_count
-        return int(band * self.sector), int(band * (self.sector + 1))
-
     def _pick_frontier(self, world: World, here: tuple[int, int]) -> tuple[int, int] | None:
         """Nearest unexplored passable tile, preferring this scout's own sector.
 
         A full scan every tick is fine at 40x30 and keeps the skeleton honest:
         the scout genuinely heads for unseen ground rather than wandering. Tiles
         outside its sector are still reachable — they just carry a penalty, so a
-        scout finishing its band spills into a neighbour's rather than idling.
+        scout that finishes its sector spills into a neighbour's rather than
+        idling while ground goes unswept.
         """
-        low, high = self._sector_bounds(world.map.width)
         penalty = world.map.width + world.map.height   # never beats an in-sector tile
 
         best: tuple[int, int] | None = None
@@ -152,7 +178,7 @@ class Scout:
                 if (x, y) in self.explored or world.ground[y][x] == WALL:
                     continue
                 score = abs(x - here[0]) + abs(y - here[1])
-                if not (low <= x < high):
+                if self.sectors and world.map.sector_at(x, y) not in self.sectors:
                     score += penalty
                 if best_score is None or score < best_score:
                     best, best_score = (x, y), score

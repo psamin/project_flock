@@ -22,13 +22,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from agents.scout import Scout
+from agents.scout import Scout, split_sectors
 from bedrock.adapter import adapter_from_env
 from sim.world import World
 from world.map_format import load_map
 
 TICK_HZ = 4
 TICK_SECONDS = 1 / TICK_HZ
+# Shorter than a tick: a viewer that cannot absorb a frame within one tick is
+# already falling behind, and waiting longer would hold up the simulation.
+SEND_TIMEOUT = TICK_SECONDS
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
@@ -69,13 +72,16 @@ class Mission:
         embedder = adapter_from_env()
         self.agents: dict[str, Scout] = {}
         scouts = [r for r in self.world.robots.values() if r.role == "scout"]
+        # Contiguous shares of the map's sector grid, until scouts claim
+        # `explore_sector` tasks for themselves (FR-16, Aug 4-6).
+        shares = split_sectors(self.world.map.sectors, len(scouts))
         for i, robot in enumerate(scouts):
             # lifter and medic behaviours are Aug 4-6; only scouts think today.
             self.mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
             self.agents[robot.id] = Scout(
                 robot_id=robot.id, mission_id=self.mission_id,
                 mem=self.mem, embedder=embedder, seed=(seed or 0) + i,
-                sector=i, sector_count=len(scouts),
+                sectors=shares[i],
             )
         for robot in self.world.robots.values():
             if robot.role != "scout":
@@ -102,17 +108,29 @@ class Mission:
         self.running = False
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
+        """Fan out one frame. Concurrent, and bounded per viewer.
+
+        Sending sequentially without a timeout let a single viewer that stopped
+        reading fill its send buffer and block the await — which blocks the tick
+        loop, which stops the mission for everyone. A browser tab that cannot
+        keep up gets dropped instead; it reconnects and receives a fresh
+        snapshot.
+        """
         if not self.viewers:
             return
         payload = json.dumps(frame)
-        dead = []
-        for viewer in self.viewers:
+        viewers = list(self.viewers)
+
+        async def send(viewer: WebSocket) -> WebSocket | None:
             try:
-                await viewer.send_text(payload)
+                await asyncio.wait_for(viewer.send_text(payload), timeout=SEND_TIMEOUT)
             except Exception:                      # noqa: BLE001 - a dropped viewer is routine
-                dead.append(viewer)
-        for viewer in dead:
-            self.viewers.discard(viewer)
+                return viewer
+            return None
+
+        for dead in await asyncio.gather(*(send(v) for v in viewers)):
+            if dead is not None:
+                self.viewers.discard(dead)
 
 
 app = FastAPI(title="Colony sim")
@@ -150,8 +168,13 @@ async def health() -> dict[str, Any]:
 async def ws(socket: WebSocket) -> None:
     """A viewer gets the full world once, then diffs (§4.8)."""
     await socket.accept()
-    await socket.send_text(json.dumps(mission.world.snapshot().to_json()))
+    # Registered *before* the snapshot is sent: that send yields, and a tick
+    # broadcasting during the yield would skip this viewer entirely. Diff frames
+    # are cumulative for tiles, so one missed frame leaves the browser's grid
+    # permanently wrong. The client tolerates a diff arriving first by ignoring
+    # frames until it has a snapshot, and a snapshot always rebuilds the world.
     mission.viewers.add(socket)
+    await socket.send_text(json.dumps(mission.world.snapshot().to_json()))
     try:
         while True:
             await socket.receive_text()            # viewers are read-only for now

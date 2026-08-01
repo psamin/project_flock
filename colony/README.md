@@ -27,7 +27,7 @@ so a broken cluster can't masquerade as a green run.
 
 | Path | What it is |
 |---|---|
-| [`schema/v0.sql`](schema/v0.sql) | Schema v0 (§4.5), validated against live CockroachDB |
+| [`schema/v1_1.sql`](schema/v1_1.sql) | Schema v1.1 (§4.5), grouped by the four memories, validated against live CockroachDB |
 | [`fleetmem/client.py`](fleetmem/client.py) | The SDK — shared memory, claiming, reconcile gate |
 | [`fleetmem/fake.py`](fleetmem/fake.py) | In-memory implementation; no cluster needed |
 | [`bedrock/adapter.py`](bedrock/adapter.py) | Titan V2 embeddings + Claude planning, with offline mode |
@@ -46,7 +46,9 @@ rejects illegal ones as events rather than exceptions.
 
 ```python
 Action.move("n" | "s" | "e" | "w")     # advances up to the role's speed (§3.3)
-Action.act("clear_debris" | "stabilize" | "recharge" | "restock", (x, y))   # adjacent only
+Action.act("clear_debris" | "stabilize", (x, y))       # adjacent, in-bounds
+# "recharge" and "restock" parse but the server rejects them — battery and kit
+# logistics are lane 2's, not built yet. Don't build against them today.
 Action.idle()
 ```
 
@@ -103,9 +105,9 @@ to both or the build goes red.
 ```python
 report_observation(mission_id, robot_id, kind, pos, payload=None, embedding=None, confidence=1.0) -> UUID
 get_beliefs(mission_id, area=None, kind=None) -> list[Belief]
-claim_task(task_id, robot_id) -> bool
+claim_task(task_id, robot_id, lease_seconds=15) -> bool   # open OR expired lease
 complete_task(task_id, robot_id) -> list[UUID]   # ids of tasks this unblocked
-heartbeat(robot_id, pos=None, battery=None, status=None) -> None
+heartbeat(robot_id, pos=None, battery=None, status=None, lease_seconds=15) -> None  # renews leases
 log_event(mission_id, actor, verb, detail=None) -> None
 
 create_task(mission_id, kind, target=(None, None), priority=1, depends_on=()) -> UUID
@@ -114,6 +116,10 @@ find_similar(mission_id, kind, pos, embedding, limit=5) -> Match | None
 register_robot(robot_id, role, pos, battery) -> None
 stale_robots(seconds=10) -> list[str]
 events(mission_id) -> list[dict]
+renew_leases(robot_id, lease_seconds=15) -> int
+release_task(task_id) -> None                    # status -> open, lease cleared
+log_plan(mission_id, robot_id, trigger, chosen, rationale, based_on=()) -> UUID
+plans_for(mission_id, robot_id=None) -> list[Plan]
 ```
 
 ## AWS Bedrock

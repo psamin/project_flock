@@ -48,3 +48,24 @@ class Task:
     priority: int = 1
     depends_on: list[UUID] = field(default_factory=list)
     claimed_by: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+# Plan trigger vocabulary (§4.5 DDL comment).
+IDLE_TRIGGER, TASK_DONE, WORLD_CHANGED, AFTERSHOCK = (
+    "idle", "task_done", "world_changed", "aftershock",
+)
+
+
+@dataclass(frozen=True)
+class Plan:
+    """A decision plus the memories that caused it (FR-17, provenance memory)."""
+
+    id: UUID
+    mission_id: UUID
+    robot_id: str
+    trigger: str
+    chosen: dict[str, Any]
+    rationale: str
+    based_on: list[UUID] = field(default_factory=list)
+    at: datetime | None = None

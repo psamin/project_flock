@@ -46,16 +46,25 @@ const motion = new Map();   // robot id -> {fromX, fromY, toX, toY}
 let windowStart = 0;
 
 function boot(snapshot) {
+  // Called on EVERY snapshot, not just the first. `make sim` runs uvicorn with
+  // --reload, so a restart hands the client a different world with the tick
+  // counter back at 0. Keeping the old grid and replaying the new mission's
+  // diffs onto it leaves two grids that never reconverge.
   world = snapshot.world;
   tile = world.tile_size;
+  motion.clear();
+  robots = [];
+  victims = [];
 
-  canvas = document.createElement("canvas");
+  const stage = document.getElementById("stage");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    stage.appendChild(canvas);
+    ctx = canvas.getContext("2d");
+    requestAnimationFrame(draw);
+  }
   canvas.width = world.width * tile;
   canvas.height = world.height * tile;
-  document.getElementById("stage").appendChild(canvas);
-  ctx = canvas.getContext("2d");
-
-  requestAnimationFrame(draw);
 }
 
 function tileColor(ground, object) {
@@ -186,7 +195,12 @@ function connect() {
   socket.onmessage = (message) => {
     const frame = JSON.parse(message.data);
     try {
-      if (frame.kind === "snapshot" && !canvas) boot(frame);
+      if (frame.kind === "snapshot") boot(frame);
+      // A diff can arrive before the snapshot: the server registers a viewer
+      // before sending it, deliberately, so no frame is skipped. Without a
+      // world there is nothing to apply it to, and the next snapshot carries
+      // the full grid anyway.
+      if (!world) return;
       applyTileChanges(frame.tiles_changed);
       trackRobots(frame.robots || []);
       victims = frame.victims || victims;

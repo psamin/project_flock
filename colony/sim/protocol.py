@@ -24,7 +24,13 @@ DIRECTIONS: dict[str, tuple[int, int]] = {
 
 # Verbs a robot can perform on a target tile. Roles restrict these further
 # (§3.3): only a lifter clears debris, only a medic stabilizes.
-VERBS = {"clear_debris", "stabilize", "recharge", "restock"}
+#
+# `recharge` and `restock` are part of the vocabulary but the world rejects them
+# with "not implemented yet" — battery and kit logistics are lane 2's work. They
+# parse so the contract does not have to change when that lands; they are listed
+# as unimplemented in the README so nobody builds against a rejection.
+IMPLEMENTED_VERBS = {"clear_debris", "stabilize"}
+VERBS = IMPLEMENTED_VERBS | {"recharge", "restock"}
 
 
 class InvalidAction(ValueError):
