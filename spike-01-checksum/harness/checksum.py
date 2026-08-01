@@ -45,12 +45,54 @@ NUMERIC_CANONICAL = (
     " else {col}::text end"
 )
 
+# float8 is the hardest of the ten, and the fight is over digits, not notation.
+# At the default extra_float_digits=1 the engines disagree twice over: on when to
+# switch to exponent form (1000000.0 -> '1000000' on PG, '1e+06' on CRDB) and on
+# the shortest-round-trip digits themselves (2.4058303385923568e+16 on PG vs
+# 2.405830338592357e+16 on CRDB — the same double, spelled differently).
+# Hypothesis found both; M2's curated values missed both.
+#
+# Both engines honour extra_float_digits, and at 0 their renderings agree — but 0
+# means 15 significant digits, and a double carries up to 17. Two distinct
+# doubles can then render identically, which is a collision, which is a false
+# pass. Trading false alarms for false passes is the wrong direction for a
+# verifier, so 15-digit text alone is not enough.
+#
+# The residual restores exactness. `({col}::text)::float8` is the 15-digit value
+# parsed back; subtracting it from the original is exact (Sterbenz — the operands
+# are within a factor of two), and IEEE arithmetic is deterministic, so both
+# engines compute a bit-identical residual whose own 15-digit rendering exposes
+# the digits the first term dropped. Two doubles that agree on the first term but
+# differ at all must differ in the second.
+#
+# Requires extra_float_digits=0 on BOTH sessions — a load-bearing session
+# setting, not an incidental default (see db.py and RESULTS.md). Note the spike
+# brief assumed this knob was PG-only; CockroachDB honours it too.
+#
+# -0.0 and 0.0 canonicalize identically. They are equal under IEEE comparison,
+# and reporting that as data corruption would be a false alarm.
+#
+# The magnitude branch exists because rounding to 15 digits can round *up*: near
+# DBL_MAX, `{col}::text` yields 1.79769313486232e+308, which is larger than
+# DBL_MAX, so parsing it back raises "out of range" and takes down the whole
+# range check. Dividing by four first is exact (a power of two, and the branch
+# only applies to values far from underflow), keeps the round-trip in range, and
+# stays injective — so the extreme band is checked as precisely as the rest
+# rather than being quietly excused.
+_residual = "({v})::text || '|' || (({v}) - ((({v})::text)::float8))::text"
+FLOAT8_CANONICAL = (
+    "case when abs({col}) > 1e307::float8"
+    f" then {_residual.format(v='{col} / 4')}"
+    f" else {_residual.format(v='{col}')} end"
+)
+
 # data_type (as reported by information_schema, verified identical on both
 # engines) -> SQL expression template. Only types whose naive `::text` cast was
-# *measured* to diverge appear here; the other nine were proven equal as-is and
+# *measured* to diverge appear here; the other eight were proven equal as-is and
 # are documented in RESULTS.md rather than wrapped in ceremony.
 CANONICAL_CASTS: dict[str, str] = {
     "numeric": NUMERIC_CANONICAL,
+    "double precision": FLOAT8_CANONICAL,
 }
 
 
