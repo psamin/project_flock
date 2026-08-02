@@ -68,6 +68,12 @@ class Mission:
         self.mem, self.memory_kind = _make_memory()
         self.viewers: set[WebSocket] = set()
         self.running = False
+        # Held while a frame goes out, and while a joining viewer is snapshotted
+        # and registered. Without it those two interleave: registering first lets
+        # a diff reach the browser ahead of the snapshot that predates it, and
+        # registering last drops the diff entirely. Tile diffs are cumulative, so
+        # either way the browser's grid is permanently wrong for that tile.
+        self._broadcast_lock = asyncio.Lock()
 
         embedder = adapter_from_env()
         self.agents: dict[str, Scout] = {}
@@ -119,7 +125,6 @@ class Mission:
         if not self.viewers:
             return
         payload = json.dumps(frame)
-        viewers = list(self.viewers)
 
         async def send(viewer: WebSocket) -> WebSocket | None:
             try:
@@ -128,9 +133,22 @@ class Mission:
                 return viewer
             return None
 
-        for dead in await asyncio.gather(*(send(v) for v in viewers)):
-            if dead is not None:
-                self.viewers.discard(dead)
+        async with self._broadcast_lock:
+            viewers = list(self.viewers)
+            for dead in await asyncio.gather(*(send(v) for v in viewers)):
+                if dead is not None:
+                    self.viewers.discard(dead)
+
+    async def attach(self, socket: WebSocket) -> None:
+        """Register a viewer and send it the world, atomically w.r.t. broadcasts.
+
+        Snapshotting, sending and registering all happen under the broadcast
+        lock, so the first thing a browser sees is a snapshot and the next thing
+        is the very next tick's diff — no gap, no reordering.
+        """
+        async with self._broadcast_lock:
+            await socket.send_text(json.dumps(self.world.snapshot().to_json()))
+            self.viewers.add(socket)
 
 
 app = FastAPI(title="Colony sim")
@@ -168,13 +186,7 @@ async def health() -> dict[str, Any]:
 async def ws(socket: WebSocket) -> None:
     """A viewer gets the full world once, then diffs (§4.8)."""
     await socket.accept()
-    # Registered *before* the snapshot is sent: that send yields, and a tick
-    # broadcasting during the yield would skip this viewer entirely. Diff frames
-    # are cumulative for tiles, so one missed frame leaves the browser's grid
-    # permanently wrong. The client tolerates a diff arriving first by ignoring
-    # frames until it has a snapshot, and a snapshot always rebuilds the world.
-    mission.viewers.add(socket)
-    await socket.send_text(json.dumps(mission.world.snapshot().to_json()))
+    await mission.attach(socket)
     try:
         while True:
             await socket.receive_text()            # viewers are read-only for now

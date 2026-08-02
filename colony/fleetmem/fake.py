@@ -178,7 +178,10 @@ class FakeFleetMem:
         if task["status"] not in (CLAIMED, IN_PROGRESS):
             return False
         expires = task.get("lease_expires_at")
-        return expires is not None and expires < _now()
+        # A missing lease counts as expired, matching the client: rows claimed
+        # before the v1.1 migration carry no lease, and without this they would
+        # stay owned forever with nothing to repair them.
+        return expires is None or expires < _now()
 
     def renew_leases(self, robot_id: str, lease_seconds: int = LEASE_SECONDS) -> int:
         with self._lock:

@@ -327,3 +327,15 @@ def test_a_sector_outside_the_map_is_rejected():
 def test_a_map_without_sectors_still_loads():
     """Sectors are optional so small fixtures and older maps keep working."""
     assert parse_map(_minimal()).sectors == []
+
+
+def test_overlapping_sectors_are_rejected():
+    """Summed area cannot tell an overlap from a hole: these two sectors overlap
+    on 50 tiles and leave 50 uncovered, yet still total 20x10."""
+    data = _minimal(width=20, height=10)
+    data["sectors"] = [
+        {"id": "A1", "x": 0, "y": 0, "width": 10, "height": 10},
+        {"id": "B1", "x": 5, "y": 0, "width": 10, "height": 10},
+    ]
+    with pytest.raises(MapError, match="both cover"):
+        parse_map(data)

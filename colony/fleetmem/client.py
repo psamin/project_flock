@@ -217,7 +217,7 @@ class CockroachFleetMem:
             " WHERE id = %s"
             "   AND (status = 'open'"
             "        OR (status IN ('claimed', 'in_progress')"
-            "            AND lease_expires_at < now()))"
+            "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
             " RETURNING id",
             (robot_id, f"{lease_seconds} seconds", task_id),
         ).fetchone()
@@ -291,7 +291,7 @@ class CockroachFleetMem:
             " WHERE mission_id = %s"
             "   AND (status = %s"
             "        OR (status IN ('claimed', 'in_progress')"
-            "            AND lease_expires_at < now()))"
+            "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
             " ORDER BY priority DESC",
             (mission_id, OPEN),
         ).fetchall()
@@ -425,5 +425,5 @@ def _task(r: dict[str, Any]) -> Task:
         id=r["id"], mission_id=r["mission_id"], kind=r["kind"],
         target=(r["target_x"], r["target_y"]), status=r["status"],
         priority=r["priority"], depends_on=list(r["depends_on"] or []),
-        claimed_by=r["claimed_by"],
+        claimed_by=r["claimed_by"], lease_expires_at=r.get("lease_expires_at"),
     )

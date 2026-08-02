@@ -129,7 +129,13 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
 
     sectors = data.get("sectors", [])
     seen_ids: set[str] = set()
-    covered = 0
+    # Counted per tile rather than by summing areas. Summed area cannot tell an
+    # overlap from a hole: two sectors overlapping on 50 tiles while 50 others
+    # go uncovered still totals width*height and would pass. Both halves of that
+    # matter — uncovered ground is never assigned to anyone and stays unswept,
+    # and doubly-covered ground puts two scouts on the same tiles, which is the
+    # duplicated effort sector claims exist to prevent (FR-16).
+    owner: dict[tuple[int, int], str] = {}
     for sector in sectors:
         for key in ("id", "x", "y", "width", "height"):
             if key not in sector:
@@ -139,13 +145,21 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
         seen_ids.add(sector["id"])
         if sector["x"] + sector["width"] > width or sector["y"] + sector["height"] > height:
             raise MapError(f"sector {sector['id']!r} extends past the map bounds")
-        covered += sector["width"] * sector["height"]
-    # Sectors partition the map: a tile in no sector could never be assigned to a
-    # scout, so it would stay unexplored forever once exploration is driven by
-    # sector claims (FR-16).
-    if sectors and covered != width * height:
+        for y in range(sector["y"], sector["y"] + sector["height"]):
+            for x in range(sector["x"], sector["x"] + sector["width"]):
+                if (x, y) in owner:
+                    raise MapError(
+                        f"sectors {owner[(x, y)]!r} and {sector['id']!r} both cover"
+                        f" ({x},{y}); every tile must belong to exactly one sector"
+                    )
+                owner[(x, y)] = sector["id"]
+
+    if sectors and len(owner) != width * height:
+        missing = [
+            (x, y) for y in range(height) for x in range(width) if (x, y) not in owner
+        ]
         raise MapError(
-            f"sectors cover {covered} tiles but the map has {width * height};"
+            f"{len(missing)} tiles belong to no sector, e.g. {missing[:3]};"
             " every tile must belong to exactly one sector"
         )
 

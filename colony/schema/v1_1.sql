@@ -164,6 +164,16 @@ CREATE TABLE IF NOT EXISTS mission_memories (
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
 
+-- Rows claimed under v0 carry no lease. `lease_expires_at < now()` evaluates to
+-- NULL for them, so the takeover predicate would never match and that work would
+-- stay owned forever — the exact failure leases exist to remove. The claim query
+-- also treats a NULL lease as expired; this backfill makes the state explicit
+-- rather than relying on the predicate alone.
+UPDATE tasks
+   SET lease_expires_at = now()
+ WHERE lease_expires_at IS NULL
+   AND status IN ('claimed', 'in_progress');
+
 -- The v0 index was (mission_id, status). The allocation query now also filters
 -- on lease_expires_at; the old index stays harmless if present.
 CREATE INDEX IF NOT EXISTS tasks_mission_status_lease_idx

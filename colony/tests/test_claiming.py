@@ -182,14 +182,19 @@ def test_renewing_a_lease_keeps_the_task():
 @needs_db
 def test_heartbeat_renews_leases():
     """The agent loop calls heartbeat(), not renew_leases() — if heartbeat did
-    not renew, every robot would lose its work every 15 seconds."""
+    not renew, every robot would lose its work every 15 seconds.
+
+    Unique robot id: renewal and register_robot both key on the id alone, and
+    these tests share one database.
+    """
     mission = uuid.uuid4()
+    robot = f"l-{uuid.uuid4().hex[:8]}"
     mem = CockroachFleetMem()
-    mem.register_robot("l1", "lifter", (2, 4), battery=300)
+    mem.register_robot(robot, "lifter", (2, 4), battery=300)
     task = mem.create_task(mission, "clear_debris", (3, 3))
 
-    mem.claim_task(task, "l1", lease_seconds=-1)
-    mem.heartbeat("l1", lease_seconds=60)
+    mem.claim_task(task, robot, lease_seconds=-1)
+    mem.heartbeat(robot, lease_seconds=60)
     assert mem.claim_task(task, "l2") is False
     mem.close()
 
@@ -199,10 +204,11 @@ def test_a_completed_task_is_never_taken_over():
     """A finished task with a stale lease must not look like abandoned work."""
     mission = uuid.uuid4()
     mem = CockroachFleetMem()
+    robot = f"l-{uuid.uuid4().hex[:8]}"
     task = mem.create_task(mission, "clear_debris", (4, 4))
 
-    mem.claim_task(task, "l1", lease_seconds=-1)
-    mem.complete_task(task, "l1")
+    mem.claim_task(task, robot, lease_seconds=-1)
+    mem.complete_task(task, robot)
     assert mem.claim_task(task, "l2") is False
     mem.close()
 
@@ -268,3 +274,47 @@ def test_claiming_a_blocked_task_is_refused():
     deliver = mem.create_task(mission, "deliver_kit", depends_on=[clear])
     assert mem.claim_task(deliver, "m1") is False
     mem.close()
+
+
+@needs_db
+def test_work_claimed_before_the_migration_is_still_recoverable():
+    """Regression: rows claimed under v0 carry no lease, and `lease_expires_at <
+    now()` is NULL for them — so the takeover predicate never matched and that
+    work stayed owned forever, which is the exact failure leases remove."""
+    mission = uuid.uuid4()
+    mem = CockroachFleetMem()
+    task = mem.create_task(mission, "clear_debris", (6, 6))
+
+    # Exactly what a v0 row looks like after ALTER TABLE: claimed, no lease.
+    mem.conn.execute(
+        "UPDATE tasks SET status = 'claimed', claimed_by = 'v0-robot',"
+        "   claimed_at = now(), lease_expires_at = NULL WHERE id = %s",
+        (task,),
+    )
+
+    assert task in {t.id for t in mem.open_tasks(mission)}, "not offered to the allocator"
+    assert mem.claim_task(task, "l2") is True, "a pre-migration claim is unrecoverable"
+    mem.close()
+
+
+def test_the_fake_also_treats_a_missing_lease_as_expired():
+    mem = FakeFleetMem()
+    mission = uuid.uuid4()
+    task = mem.create_task(mission, "clear_debris")
+    mem.claim_task(task, "v0-robot")
+    mem._tasks[task]["lease_expires_at"] = None    # a v0-shaped row
+
+    assert mem.claim_task(task, "l2") is True
+
+
+@needs_db
+def test_both_backends_report_the_lease_on_a_task():
+    """Lanes 2 and 4 read Task.lease_expires_at against the fake; it must not be
+    None against the real client."""
+    mission = uuid.uuid4()
+    for mem in (CockroachFleetMem(), FakeFleetMem()):
+        task = mem.create_task(mission, "clear_debris")
+        mem.claim_task(task, f"l-{uuid.uuid4().hex[:8]}", lease_seconds=-1)
+        held = next(t for t in mem.open_tasks(mission) if t.id == task)
+        assert held.lease_expires_at is not None, f"{type(mem).__name__} dropped the lease"
+        mem.close()
