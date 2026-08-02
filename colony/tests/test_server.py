@@ -17,7 +17,7 @@ class StubSocket:
 
     async def send_text(self, payload: str) -> None:
         if self.hang:
-            await asyncio.Event().wait()      # never completes
+            await asyncio.Event().wait()  # never completes
         self.sent.append(payload)
 
 
@@ -45,22 +45,26 @@ def test_attach_does_not_wait_on_the_socket(mission):
     async def attach_with_deadline():
         return await asyncio.wait_for(mission.attach(hung), timeout=1.0)
 
-    viewer = asyncio.run(attach_with_deadline())     # would time out if it awaited
+    viewer = asyncio.run(attach_with_deadline())  # would time out if it awaited
     assert viewer.queue.qsize() == 1
     assert hung.sent == []
 
 
 def test_broadcast_does_not_wait_on_a_stalled_viewer(mission):
     """The tick loop hands frames to queues and moves on."""
+
     async def scenario():
         await mission.attach(StubSocket(hang=True))
-        await asyncio.wait_for(mission._broadcast({"tick": 1, "kind": "diff"}), timeout=1.0)
+        await asyncio.wait_for(
+            mission._broadcast({"tick": 1, "kind": "diff"}), timeout=1.0
+        )
 
     asyncio.run(scenario())
 
 
 def test_a_viewer_that_falls_too_far_behind_is_dropped(mission):
     """Bounded, not unbounded: a wedged tab must not grow the queue forever."""
+
     async def scenario():
         viewer = await mission.attach(StubSocket(hang=True))
         # The snapshot already occupies one slot.
@@ -81,7 +85,7 @@ def test_a_healthy_viewer_receives_every_frame_in_order(mission):
         pump = asyncio.create_task(viewer.pump())
         for tick in range(1, 5):
             await mission._broadcast({"tick": tick, "kind": "diff"})
-        await asyncio.sleep(0)                       # let the pump drain
+        await asyncio.sleep(0)  # let the pump drain
         pump.cancel()
         return socket
 

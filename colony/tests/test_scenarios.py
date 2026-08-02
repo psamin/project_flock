@@ -35,7 +35,7 @@ def make_scenario(
     medics: int = 1,
 ):
     """A random but solvable map: staging strip on the left, obstacles beyond."""
-    rng = random.Random(seed)   # noqa: S311 - reproducible maps are the point
+    rng = random.Random(seed)  # noqa: S311 - reproducible maps are the point
     ground = [["open"] * width for _ in range(height)]
     objects = [[EMPTY] * width for _ in range(height)]
 
@@ -67,8 +67,13 @@ def make_scenario(
         victim_rows.append({"id": f"v{i}", "x": x, "y": y, "vitals_deadline": 700})
 
     sectors = [
-        {"id": f"S{cx}-{cy}", "x": cx, "y": cy,
-         "width": min(sector_size, width - cx), "height": min(sector_size, height - cy)}
+        {
+            "id": f"S{cx}-{cy}",
+            "x": cx,
+            "y": cy,
+            "width": min(sector_size, width - cx),
+            "height": min(sector_size, height - cy),
+        }
         for cy in range(0, height, sector_size)
         for cx in range(0, width, sector_size)
     ]
@@ -81,13 +86,21 @@ def make_scenario(
     if medics:
         spawn["medic"] = [{"x": 3, "y": 1 + i} for i in range(medics)]
 
-    return parse_map({
-        "width": width, "height": height, "tile_size": 32,
-        "layers": {"ground": ground, "objects": objects},
-        "zones": [], "sectors": sectors, "spawn_points": spawn,
-        "victims": victim_rows, "escalations": [],
-        "mission_length_ticks": 1200, "seed": seed,
-    })
+    return parse_map(
+        {
+            "width": width,
+            "height": height,
+            "tile_size": 32,
+            "layers": {"ground": ground, "objects": objects},
+            "zones": [],
+            "sectors": sectors,
+            "spawn_points": spawn,
+            "victims": victim_rows,
+            "escalations": [],
+            "mission_length_ticks": 1200,
+            "seed": seed,
+        }
+    )
 
 
 def run_mission(world_map, seed=0, ticks=600):
@@ -98,13 +111,20 @@ def run_mission(world_map, seed=0, ticks=600):
     scouts = [r for r in world.robots.values() if r.role == "scout"]
     shares = split_sectors(world_map.sectors, max(1, len(scouts)))
     agents = [
-        Scout(robot_id=r.id, mission_id=mission, mem=mem, embedder=embedder,
-              seed=i, sectors=shares[i])
+        Scout(
+            robot_id=r.id,
+            mission_id=mission,
+            mem=mem,
+            embedder=embedder,
+            seed=i,
+            sectors=shares[i],
+        )
         for i, r in enumerate(scouts)
     ]
     agents += [
         Worker(robot_id=r.id, role=r.role, mission_id=mission, mem=mem)
-        for r in world.robots.values() if r.role in ("lifter", "medic")
+        for r in world.robots.values()
+        if r.role in ("lifter", "medic")
     ]
     for robot in world.robots.values():
         mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
@@ -157,12 +177,15 @@ def test_sector_granularity_is_a_tuning_knob_not_a_dependency(sector_size):
     assert world.metrics()["victims_stabilized"] >= 1
 
 
-@pytest.mark.parametrize("fleet", [
-    {"scouts": 1, "lifters": 1, "medics": 1},
-    {"scouts": 2, "lifters": 1, "medics": 1},
-    {"scouts": 1, "lifters": 0, "medics": 1},     # no lifter at all
-    {"scouts": 0, "lifters": 1, "medics": 1},     # nobody scouting
-])
+@pytest.mark.parametrize(
+    "fleet",
+    [
+        {"scouts": 1, "lifters": 1, "medics": 1},
+        {"scouts": 2, "lifters": 1, "medics": 1},
+        {"scouts": 1, "lifters": 0, "medics": 1},  # no lifter at all
+        {"scouts": 0, "lifters": 1, "medics": 1},  # nobody scouting
+    ],
+)
 def test_it_works_with_any_fleet_composition(fleet):
     """A missing role must degrade the mission, never break it — robots die
     mid-mission and the fleet has to keep going with whoever is left."""
@@ -177,7 +200,9 @@ def test_it_works_with_any_fleet_composition(fleet):
 def test_no_robot_ever_stands_on_an_impassable_tile(seed):
     world, _, _ = run_mission(make_scenario(seed))
     for robot in world.robots.values():
-        assert world.map.ground[robot.y][robot.x] != WALL, f"{robot.id} is inside a wall"
+        assert world.map.ground[robot.y][robot.x] != WALL, (
+            f"{robot.id} is inside a wall"
+        )
         if not robot.flying:
             assert world.objects[robot.y][robot.x] not in (DEBRIS, RUBBLE_HEAVY), (
                 f"{robot.id} is standing inside debris"
@@ -202,10 +227,14 @@ def test_no_task_is_ever_held_by_two_robots(seed):
 @pytest.mark.parametrize("seed", [41, 42])
 def test_a_mission_is_reproducible_from_its_seed(seed):
     """§4.8: same seed, same mission. The golden demo run depends on it."""
+
     def outcome():
         world, _, _ = run_mission(make_scenario(seed), seed=5)
-        return (world.tick, world.metrics(),
-                sorted((r.id, r.x, r.y) for r in world.robots.values()))
+        return (
+            world.tick,
+            world.metrics(),
+            sorted((r.id, r.x, r.y) for r in world.robots.values()),
+        )
 
     assert outcome() == outcome()
 
@@ -215,12 +244,18 @@ def test_a_victim_nobody_can_reach_does_not_hang_the_mission():
     not spin forever re-claiming an impossible task."""
     world_map = make_scenario(51, victims=2)
     data = {
-        "width": world_map.width, "height": world_map.height, "tile_size": 32,
-        "layers": {"ground": [r[:] for r in world_map.ground],
-                   "objects": [r[:] for r in world_map.objects]},
-        "zones": [], "sectors": world_map.sectors,
+        "width": world_map.width,
+        "height": world_map.height,
+        "tile_size": 32,
+        "layers": {
+            "ground": [r[:] for r in world_map.ground],
+            "objects": [r[:] for r in world_map.objects],
+        },
+        "zones": [],
+        "sectors": world_map.sectors,
         "spawn_points": world_map.spawn_points,
-        "victims": list(world_map.victims), "escalations": [],
+        "victims": list(world_map.victims),
+        "escalations": [],
         "mission_length_ticks": 300,
     }
     sealed = data["victims"][0]
@@ -231,4 +266,93 @@ def test_a_victim_nobody_can_reach_does_not_hang_the_mission():
 
     world, _, _ = run_mission(parse_map(data), ticks=300)
     assert world.tick <= 300
-    assert world.metrics()["victims_stabilized"] >= 1, "the reachable victim was abandoned"
+    assert world.metrics()["victims_stabilized"] >= 1, (
+        "the reachable victim was abandoned"
+    )
+
+
+# --- the MVP milestone, on the demo map (§5.3 Aug 7-8) -----------------------
+
+
+def _aftershock_mission(ticks=1200):
+    from agents.scout import seed_sector_tasks
+    from world.map_format import load_map
+    from tests.test_map import MAP_PATH
+
+    world_map = load_map(MAP_PATH)
+    world = World(world_map, seed=3)
+    mem, embedder, mission = FakeFleetMem(), BedrockAdapter(), uuid.uuid4()
+    seed_sector_tasks(mem, mission, world_map)
+
+    scouts = [r for r in world.robots.values() if r.role == "scout"]
+    shares = split_sectors(world_map.sectors, len(scouts))
+    agents = [
+        Scout(
+            robot_id=r.id,
+            mission_id=mission,
+            mem=mem,
+            embedder=embedder,
+            seed=i,
+            sectors=shares[i],
+        )
+        for i, r in enumerate(scouts)
+    ]
+    agents += [
+        Worker(robot_id=r.id, role=r.role, mission_id=mission, mem=mem)
+        for r in world.robots.values()
+        if r.role in ("lifter", "medic")
+    ]
+    for robot in world.robots.values():
+        mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
+
+    for _ in range(ticks):
+        world.step({a.robot_id: a.step(world) for a in agents})
+        if world.finished:
+            break
+    return world, mem, mission
+
+
+def test_the_demo_map_actually_needs_lifters():
+    """Regression: every victim's `access` said "behind debris" while only one
+    neighbouring tile was blocked, so every approach stayed open. Zero
+    clear_debris tasks were created in a whole mission and the lifter sat idle
+    from start to finish — the scout->lifter->medic chain the MVP names never
+    ran once, while the run still looked like a success at 8/8 rescued."""
+    _, mem, _ = _aftershock_mission()
+    clears = [t for t in mem._tasks.values() if t["kind"] == "clear_debris"]
+    assert clears, "no victim on the demo map requires a lifter"
+
+
+def test_the_full_chain_runs_on_the_demo_map():
+    """§5.3's Aug 7-8 milestone, as an assertion: scout finds, lifter clears,
+    medic delivers, on Aftershock rather than a fixture."""
+    _, mem, mission = _aftershock_mission()
+    events = mem.events(mission)
+    actors = {e["actor"] for e in events if e["verb"] == "task_completed"}
+
+    assert any(e["verb"] == "victim_reported" for e in events), "no scout sighting"
+    assert "l1" in actors, "the lifter never completed anything"
+    assert "m1" in actors, "the medic never completed anything"
+
+
+def test_the_demo_map_is_neither_trivial_nor_hopeless():
+    """A demo needs tension. Everyone rescued by tick 93 means the tick-300
+    aftershock never fires and the replanning beat never happens; nobody
+    rescued means there is no product to show."""
+    world, _, _ = _aftershock_mission()
+    metrics = world.metrics()
+
+    assert metrics["victims_stabilized"] >= 5, "too few rescues to be a demo"
+    assert world.tick > 300, "the mission ended before the aftershock could fire"
+
+
+def test_the_aftershock_fires_during_the_mission():
+    world, _, _ = _aftershock_mission()
+    assert "v9" in world.victims, "the aftershock never revealed its victim"
+
+
+def test_the_fleet_explores_the_whole_map():
+    """Coverage@500 (§4.7). Also guards the coverage metric itself, which once
+    reported 116% by counting revealed walls against a wall-free denominator."""
+    world, _, _ = _aftershock_mission()
+    assert 0.9 <= world.metrics()["coverage"] <= 1.0

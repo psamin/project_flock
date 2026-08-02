@@ -1,0 +1,69 @@
+# Three-node CockroachDB cluster — the chaos rig (PRD §6.5, FR-11).
+#
+# The Cloud free tier does not hand you nodes to kill, so the node-kill segment
+# runs against this: the same schema and the same software, self-hosted so a node
+# can be killed on camera mid-rescue. Primary fleet memory still lives on
+# CockroachDB Cloud; this exists to prove the survival property, which belongs to
+# the database rather than to the hosting tier.
+#
+#   make cluster-3        bring it up and initialise
+#   make cluster-3-kill   kill node 2, as the demo does
+#   make cluster-3-down   tear it down
+#
+# Every port binds to 127.0.0.1. These nodes run --insecure — no TLS, no
+# authentication — so publishing on all interfaces would hand any peer on the
+# network root access to fleet memory. The demo only ever connects from this
+# machine, so there is nothing to trade off.
+#
+# Pinned to the version §6.3 validated the VECTOR syntax against.
+services:
+  crdb-1:
+    image: cockroachdb/cockroach:v26.2.5
+    hostname: crdb-1
+    command: start --insecure --join=crdb-1,crdb-2,crdb-3 --advertise-addr=crdb-1
+    ports:
+      - "127.0.0.1:26257:26257"   # sql — the app connects here
+      - "127.0.0.1:8080:8080"     # admin ui
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  crdb-2:
+    image: cockroachdb/cockroach:v26.2.5
+    hostname: crdb-2
+    command: start --insecure --join=crdb-1,crdb-2,crdb-3 --advertise-addr=crdb-2
+    ports:
+      - "127.0.0.1:26258:26257"
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  crdb-3:
+    image: cockroachdb/cockroach:v26.2.5
+    hostname: crdb-3
+    command: start --insecure --join=crdb-1,crdb-2,crdb-3 --advertise-addr=crdb-3
+    ports:
+      - "127.0.0.1:26259:26257"
+      - "127.0.0.1:8082:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  # Runs once and exits. `init` is idempotent in practice: a second run against
+  # an initialised cluster fails harmlessly, which is why the script tolerates it.
+  init:
+    image: cockroachdb/cockroach:v26.2.5
+    depends_on: [crdb-1, crdb-2, crdb-3]
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "./cockroach init --insecure --host=crdb-1 || true;
+       ./cockroach sql --insecure --host=crdb-1
+         -e 'CREATE DATABASE IF NOT EXISTS colony'"
+    restart: on-failure

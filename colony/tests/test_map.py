@@ -7,7 +7,12 @@ import pytest
 
 from world.build_aftershock import build
 from world.map_format import (
-    DEBRIS, FIRE, MapError, WALL, load_map, parse_map,
+    DEBRIS,
+    FIRE,
+    MapError,
+    WALL,
+    load_map,
+    parse_map,
 )
 
 MAP_PATH = Path(__file__).resolve().parents[1] / "world" / "maps" / "aftershock.json"
@@ -71,7 +76,9 @@ def test_spawn_points_exist_for_every_role_in_the_stat_block(world):
 def test_robots_spawn_on_passable_tiles(world):
     for role, points in world.spawn_points.items():
         for p in points:
-            assert world.passable(p["x"], p["y"]), f"{role} spawns inside an obstacle at {p}"
+            assert world.passable(p["x"], p["y"]), (
+                f"{role} spawns inside an obstacle at {p}"
+            )
 
 
 def test_aftershock_fires_at_tick_300(world):
@@ -156,10 +163,17 @@ def test_zone_lookup(world):
 
 def _minimal(width: int = 2, height: int = 2) -> dict:
     return {
-        "width": width, "height": height, "tile_size": 32,
-        "layers": {"ground": [["open"] * width for _ in range(height)],
-                   "objects": [[""] * width for _ in range(height)]},
-        "zones": [], "spawn_points": {}, "victims": [], "escalations": [],
+        "width": width,
+        "height": height,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * width for _ in range(height)],
+            "objects": [[""] * width for _ in range(height)],
+        },
+        "zones": [],
+        "spawn_points": {},
+        "victims": [],
+        "escalations": [],
     }
 
 
@@ -167,8 +181,19 @@ def test_minimal_map_is_valid():
     parse_map(_minimal())
 
 
-@pytest.mark.parametrize("key", ["width", "height", "tile_size", "layers", "zones",
-                                 "spawn_points", "victims", "escalations"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "width",
+        "height",
+        "tile_size",
+        "layers",
+        "zones",
+        "spawn_points",
+        "victims",
+        "escalations",
+    ],
+)
 def test_missing_key_is_rejected(key):
     data = _minimal()
     del data[key]
@@ -231,7 +256,9 @@ def test_non_integer_escalation_tick_is_rejected(bad):
         parse_map(data)
 
 
-@pytest.mark.parametrize("field,bad", [("seed", "abc"), ("name", 7), ("description", [])])
+@pytest.mark.parametrize(
+    "field,bad", [("seed", "abc"), ("name", 7), ("description", [])]
+)
 def test_bad_metadata_types_are_rejected(field, bad):
     data = _minimal()
     data[field] = bad

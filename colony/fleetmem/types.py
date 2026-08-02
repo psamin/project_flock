@@ -12,7 +12,12 @@ from uuid import UUID
 
 # Task lifecycle (§4.4): blocked -> open -> claimed -> in_progress -> done | failed(->open)
 BLOCKED, OPEN, CLAIMED, IN_PROGRESS, DONE, FAILED = (
-    "blocked", "open", "claimed", "in_progress", "done", "failed",
+    "blocked",
+    "open",
+    "claimed",
+    "in_progress",
+    "done",
+    "failed",
 )
 
 
@@ -53,7 +58,10 @@ class Task:
 
 # Plan trigger vocabulary (§4.5 DDL comment).
 IDLE_TRIGGER, TASK_DONE, WORLD_CHANGED, AFTERSHOCK = (
-    "idle", "task_done", "world_changed", "aftershock",
+    "idle",
+    "task_done",
+    "world_changed",
+    "aftershock",
 )
 
 

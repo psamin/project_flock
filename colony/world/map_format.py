@@ -22,14 +22,21 @@ OBJECT_TILES = {DEBRIS, RUBBLE_HEAVY, FIRE}
 EMPTY = ""
 
 ROLES = {"scout", "lifter", "medic", "relay"}
-VICTIM_STATES = {"unknown", "located", "access_blocked", "reachable", "stabilized", "lost"}
+VICTIM_STATES = {
+    "unknown",
+    "located",
+    "access_blocked",
+    "reachable",
+    "stabilized",
+    "lost",
+}
 
 
 class MapError(ValueError):
     """A map that cannot be loaded, with the reason."""
 
 
-DEFAULT_MISSION_TICKS = 1200   # §3.3: the mission ends at tick 1200
+DEFAULT_MISSION_TICKS = 1200  # §3.3: the mission ends at tick 1200
 
 
 @dataclass(frozen=True)
@@ -37,8 +44,8 @@ class WorldMap:
     width: int
     height: int
     tile_size: int
-    ground: list[list[str]]      # [y][x]
-    objects: list[list[str]]     # [y][x], EMPTY where nothing sits
+    ground: list[list[str]]  # [y][x]
+    objects: list[list[str]]  # [y][x], EMPTY where nothing sits
     zones: list[dict[str, Any]]
     spawn_points: dict[str, list[dict[str, int]]]
     victims: list[dict[str, Any]]
@@ -79,15 +86,19 @@ class WorldMap:
 
     def zone_at(self, x: int, y: int) -> str | None:
         for zone in self.zones:
-            if (zone["x"] <= x < zone["x"] + zone["width"]
-                    and zone["y"] <= y < zone["y"] + zone["height"]):
+            if (
+                zone["x"] <= x < zone["x"] + zone["width"]
+                and zone["y"] <= y < zone["y"] + zone["height"]
+            ):
                 return zone["name"]
         return None
 
     def sector_at(self, x: int, y: int) -> str | None:
         for sector in self.sectors:
-            if (sector["x"] <= x < sector["x"] + sector["width"]
-                    and sector["y"] <= y < sector["y"] + sector["height"]):
+            if (
+                sector["x"] <= x < sector["x"] + sector["width"]
+                and sector["y"] <= y < sector["y"] + sector["height"]
+            ):
                 return sector["id"]
         return None
 
@@ -103,8 +114,16 @@ def load_map(path: str | Path) -> WorldMap:
 
 
 def parse_map(data: dict[str, Any]) -> WorldMap:
-    for key in ("width", "height", "tile_size", "layers", "zones",
-                "spawn_points", "victims", "escalations"):
+    for key in (
+        "width",
+        "height",
+        "tile_size",
+        "layers",
+        "zones",
+        "spawn_points",
+        "victims",
+        "escalations",
+    ):
         if key not in data:
             raise MapError(f"map is missing required key {key!r}")
 
@@ -143,7 +162,10 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
         if sector["id"] in seen_ids:
             raise MapError(f"duplicate sector id {sector['id']!r}")
         seen_ids.add(sector["id"])
-        if sector["x"] + sector["width"] > width or sector["y"] + sector["height"] > height:
+        if (
+            sector["x"] + sector["width"] > width
+            or sector["y"] + sector["height"] > height
+        ):
             raise MapError(f"sector {sector['id']!r} extends past the map bounds")
         for y in range(sector["y"], sector["y"] + sector["height"]):
             for x in range(sector["x"], sector["x"] + sector["width"]):
@@ -165,7 +187,9 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
 
     for role, points in data["spawn_points"].items():
         if role not in ROLES:
-            raise MapError(f"unknown spawn role {role!r}; expected one of {sorted(ROLES)}")
+            raise MapError(
+                f"unknown spawn role {role!r}; expected one of {sorted(ROLES)}"
+            )
         for point in points:
             _in_bounds(point["x"], point["y"], width, height, f"{role} spawn")
 
@@ -178,7 +202,9 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
             )
         state = victim.get("state", "unknown")
         if state not in VICTIM_STATES:
-            raise MapError(f"victim state {state!r} is not one of {sorted(VICTIM_STATES)}")
+            raise MapError(
+                f"victim state {state!r} is not one of {sorted(VICTIM_STATES)}"
+            )
 
     # Type-check before comparing: a JSON string or null here would raise
     # TypeError out of the validator, which defeats the point of having one —
@@ -215,15 +241,20 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
     # tick server will want plain dicts to work with, and frozen records
     # everywhere would be ceremony for a hazard this copy already removes.
     return WorldMap(
-        width=width, height=height, tile_size=data["tile_size"],
-        ground=ground, objects=objects,
+        width=width,
+        height=height,
+        tile_size=data["tile_size"],
+        ground=ground,
+        objects=objects,
         zones=deepcopy(data["zones"]),
         spawn_points=deepcopy(data["spawn_points"]),
         victims=deepcopy(data["victims"]),
         escalations=deepcopy(data["escalations"]),
         sectors=deepcopy(sectors),
-        name=data.get("name", ""), description=data.get("description", ""),
-        seed=seed, mission_length_ticks=mission_ticks,
+        name=data.get("name", ""),
+        description=data.get("description", ""),
+        seed=seed,
+        mission_length_ticks=mission_ticks,
     )
 
 
@@ -235,12 +266,16 @@ def _positive_int(value: Any, field: str) -> int:
     return value
 
 
-def _grid(rows: Any, width: int, height: int, name: str, allowed: set[str]) -> list[list[str]]:
+def _grid(
+    rows: Any, width: int, height: int, name: str, allowed: set[str]
+) -> list[list[str]]:
     if len(rows) != height:
         raise MapError(f"{name} layer has {len(rows)} rows, expected {height}")
     for y, row in enumerate(rows):
         if len(row) != width:
-            raise MapError(f"{name} layer row {y} has {len(row)} tiles, expected {width}")
+            raise MapError(
+                f"{name} layer row {y} has {len(row)} tiles, expected {width}"
+            )
         for x, tile in enumerate(row):
             if tile not in allowed:
                 raise MapError(

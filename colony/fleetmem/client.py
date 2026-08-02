@@ -104,7 +104,11 @@ class CockroachFleetMem:
                 " (mission_id, robot_id, kind, pos_x, pos_y, payload, embedding, confidence)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
-                    mission_id, robot_id, kind, pos[0], pos[1],
+                    mission_id,
+                    robot_id,
+                    kind,
+                    pos[0],
+                    pos[1],
                     json.dumps(payload or {}),
                     _vec(embedding),
                     confidence,
@@ -127,8 +131,12 @@ class CockroachFleetMem:
         mission so the index actually engages.
         """
         x, y = pos
-        box = (x - MERGE_RADIUS_TILES, y - MERGE_RADIUS_TILES,
-               x + MERGE_RADIUS_TILES, y + MERGE_RADIUS_TILES)
+        box = (
+            x - MERGE_RADIUS_TILES,
+            y - MERGE_RADIUS_TILES,
+            x + MERGE_RADIUS_TILES,
+            y + MERGE_RADIUS_TILES,
+        )
 
         if embedding is None:
             row = self.conn.execute(
@@ -155,9 +163,17 @@ class CockroachFleetMem:
             "   AND kind = %s"
             "   AND pos_x BETWEEN %s AND %s AND pos_y BETWEEN %s AND %s"
             " ORDER BY embedding <=> %s LIMIT %s",
-            (_vec(embedding), mission_id, kind,
-             box[0], box[2], box[1], box[3],
-             _vec(embedding), limit),
+            (
+                _vec(embedding),
+                mission_id,
+                kind,
+                box[0],
+                box[2],
+                box[1],
+                box[3],
+                _vec(embedding),
+                limit,
+            ),
         ).fetchall()
 
         for r in rows:
@@ -270,13 +286,21 @@ class CockroachFleetMem:
             "INSERT INTO tasks"
             " (mission_id, kind, target_x, target_y, priority, status, depends_on)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (mission_id, kind, target[0], target[1], priority,
-             BLOCKED if deps else OPEN, deps or None),
+            (
+                mission_id,
+                kind,
+                target[0],
+                target[1],
+                priority,
+                BLOCKED if deps else OPEN,
+                deps or None,
+            ),
         ).fetchone()
         return row["id"]
 
-    def claim_task(self, task_id: UUID, robot_id: str,
-                   lease_seconds: int = LEASE_SECONDS) -> bool:
+    def claim_task(
+        self, task_id: UUID, robot_id: str, lease_seconds: int = LEASE_SECONDS
+    ) -> bool:
         """Attempt to claim a task. True iff this robot won it.
 
         The judge-friendly SQL (§4.4). Under serializable isolation exactly one
@@ -407,8 +431,13 @@ class CockroachFleetMem:
             "   pos_x = coalesce(%s, pos_x), pos_y = coalesce(%s, pos_y),"
             "   battery = coalesce(%s, battery), status = coalesce(%s, status)"
             " WHERE id = %s",
-            (None if pos is None else pos[0], None if pos is None else pos[1],
-             battery, status, robot_id),
+            (
+                None if pos is None else pos[0],
+                None if pos is None else pos[1],
+                battery,
+                status,
+                robot_id,
+            ),
         )
         self.renew_leases(robot_id, lease_seconds)
 
@@ -455,8 +484,14 @@ class CockroachFleetMem:
         row = self.conn.execute(
             "INSERT INTO plans (mission_id, robot_id, trigger, chosen, rationale, based_on)"
             " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (mission_id, robot_id, trigger, json.dumps(chosen), rationale,
-             list(based_on) or None),
+            (
+                mission_id,
+                robot_id,
+                trigger,
+                json.dumps(chosen),
+                rationale,
+                list(based_on) or None,
+            ),
         ).fetchone()
         return row["id"]
 
@@ -471,7 +506,11 @@ class CockroachFleetMem:
         return [_plan(r) for r in rows]
 
     def log_event(
-        self, mission_id: UUID, actor: str, verb: str, detail: dict[str, Any] | None = None
+        self,
+        mission_id: UUID,
+        actor: str,
+        verb: str,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         """Append to the mission log. Every §4.7 metric is derived from these, so
         log the transition, not the intention."""
@@ -490,29 +529,48 @@ class CockroachFleetMem:
 
 def _vec(embedding: Sequence[float] | None) -> str | None:
     """CockroachDB takes VECTOR literals as '[a,b,c]' text."""
-    return None if embedding is None else "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+    return (
+        None
+        if embedding is None
+        else "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+    )
 
 
 def _belief(r: dict[str, Any]) -> Belief:
     return Belief(
-        id=r["id"], kind=r["kind"], pos=(r["pos_x"], r["pos_y"]),
-        payload=r["payload"] or {}, confidence=r["confidence"],
-        sightings=r["sightings"], robot_id=r["robot_id"], observed_at=r["observed_at"],
+        id=r["id"],
+        kind=r["kind"],
+        pos=(r["pos_x"], r["pos_y"]),
+        payload=r["payload"] or {},
+        confidence=r["confidence"],
+        sightings=r["sightings"],
+        robot_id=r["robot_id"],
+        observed_at=r["observed_at"],
     )
 
 
 def _plan(r: dict[str, Any]) -> Plan:
     return Plan(
-        id=r["id"], mission_id=r["mission_id"], robot_id=r["robot_id"],
-        trigger=r["trigger"], chosen=r["chosen"] or {}, rationale=r["rationale"] or "",
-        based_on=list(r["based_on"] or []), at=r["at"],
+        id=r["id"],
+        mission_id=r["mission_id"],
+        robot_id=r["robot_id"],
+        trigger=r["trigger"],
+        chosen=r["chosen"] or {},
+        rationale=r["rationale"] or "",
+        based_on=list(r["based_on"] or []),
+        at=r["at"],
     )
 
 
 def _task(r: dict[str, Any]) -> Task:
     return Task(
-        id=r["id"], mission_id=r["mission_id"], kind=r["kind"],
-        target=(r["target_x"], r["target_y"]), status=r["status"],
-        priority=r["priority"], depends_on=list(r["depends_on"] or []),
-        claimed_by=r["claimed_by"], lease_expires_at=r.get("lease_expires_at"),
+        id=r["id"],
+        mission_id=r["mission_id"],
+        kind=r["kind"],
+        target=(r["target_x"], r["target_y"]),
+        status=r["status"],
+        priority=r["priority"],
+        depends_on=list(r["depends_on"] or []),
+        claimed_by=r["claimed_by"],
+        lease_expires_at=r.get("lease_expires_at"),
     )

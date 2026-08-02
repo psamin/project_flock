@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from agents.pathing import find_path
+from agents.pathing import find_move_plan, find_path
 from sim.protocol import DIRECTIONS, Action
-from sim.world import Percept, World
-from world.map_format import DEBRIS, EMPTY, FIRE, RUBBLE_HEAVY, WALL
+from sim.world import ROLES, Percept, World
+from world.map_format import DEBRIS, FIRE, RUBBLE_HEAVY, WALL
 
 # Kinds the scout reports into shared memory.
 VICTIM, HAZARD = "victim", "hazard"
@@ -63,7 +63,7 @@ def split_sectors(sectors: list[dict[str, Any]], parts: int) -> list[tuple[str, 
     shares, cursor = [], 0
     for i in range(parts):
         take = size + (1 if i < extra else 0)
-        shares.append(tuple(ordered[cursor:cursor + take]))
+        shares.append(tuple(ordered[cursor : cursor + take]))
         cursor += take
     return shares
 
@@ -74,8 +74,8 @@ class Scout:
 
     robot_id: str
     mission_id: UUID
-    mem: Any                       # CockroachFleetMem or FakeFleetMem
-    embedder: Any = None           # BedrockAdapter; None skips embeddings
+    mem: Any  # CockroachFleetMem or FakeFleetMem
+    embedder: Any = None  # BedrockAdapter; None skips embeddings
     seed: int = 0
 
     # Static fallback share of the sector grid, used only when sector tasks are
@@ -104,14 +104,17 @@ class Scout:
         than after the action so a belief is never lost if the mission ends on
         this tick.
         """
-        percept = world.percept(self.robot_id)      # sense
-        self._sync(percept, world)                   # sync: local -> shared memory
-        action = self._think(world, percept)         # think
-        self.mem.heartbeat(self.robot_id,
-                           pos=(world.robots[self.robot_id].x, world.robots[self.robot_id].y),
-                           battery=world.robots[self.robot_id].battery,
-                           status="exploring", lease_seconds=SECTOR_LEASE_SECONDS)
-        return action                                # act (the sim applies it)
+        percept = world.percept(self.robot_id)  # sense
+        self._sync(percept, world)  # sync: local -> shared memory
+        action = self._think(world, percept)  # think
+        self.mem.heartbeat(
+            self.robot_id,
+            pos=(world.robots[self.robot_id].x, world.robots[self.robot_id].y),
+            battery=world.robots[self.robot_id].battery,
+            status="exploring",
+            lease_seconds=SECTOR_LEASE_SECONDS,
+        )
+        return action  # act (the sim applies it)
 
     # --- sync -------------------------------------------------------------
 
@@ -134,17 +137,20 @@ class Scout:
             return []
 
         route = find_path(
-            origin, pos,
+            origin,
+            pos,
             passable=lambda p: (
-                0 <= p[0] < world.map.width and 0 <= p[1] < world.map.height
+                0 <= p[0] < world.map.width
+                and 0 <= p[1] < world.map.height
                 and world.ground[p[1]][p[0]] != WALL
                 and world.objects[p[1]][p[0]] != FIRE
             ),
             # Debris is crossable only by clearing it, so it costs about what
             # clearing costs; the route then prefers going around when going
             # around is cheap and digs through when it is not.
-            cost=lambda p: DEBRIS_ROUTE_COST if world.objects[p[1]][p[0]] in
-            (DEBRIS, RUBBLE_HEAVY) else 1,
+            cost=lambda p: DEBRIS_ROUTE_COST
+            if world.objects[p[1]][p[0]] in (DEBRIS, RUBBLE_HEAVY)
+            else 1,
             goal_is_adjacent=True,
         )
         if route is None:
@@ -178,17 +184,24 @@ class Scout:
             self.explored.add((tile["x"], tile["y"]))
 
         for victim in percept.victims:
-            new = self._report(VICTIM, victim["x"], victim["y"], {
-                "victim_id": victim["id"], "state": victim["state"],
-                "note": "sighted by scout",
-            })
+            new = self._report(
+                VICTIM,
+                victim["x"],
+                victim["y"],
+                {
+                    "victim_id": victim["id"],
+                    "state": victim["state"],
+                    "note": "sighted by scout",
+                },
+            )
             if not new:
                 continue
             # §4.2 step 3: the sighting creates the work. Without this a scout
             # reports victims into shared memory that nobody is ever dispatched
             # to reach.
             self.mem.register_victim(
-                self.mission_id, (victim["x"], victim["y"]),
+                self.mission_id,
+                (victim["x"], victim["y"]),
                 reported_by=self.robot_id,
                 blocked_by=self._blockers(world, (victim["x"], victim["y"])),
                 vitals_deadline=victim.get("vitals_deadline"),
@@ -210,11 +223,19 @@ class Scout:
                 f"{kind} at ({x},{y}): {payload.get('note', payload.get('kind', ''))}"
             )
         self.mem.report_observation(
-            self.mission_id, self.robot_id, kind, (x, y),
-            payload=payload, embedding=embedding,
+            self.mission_id,
+            self.robot_id,
+            kind,
+            (x, y),
+            payload=payload,
+            embedding=embedding,
         )
-        self.mem.log_event(self.mission_id, self.robot_id, f"{kind}_reported",
-                           {"x": x, "y": y, **payload})
+        self.mem.log_event(
+            self.mission_id,
+            self.robot_id,
+            f"{kind}_reported",
+            {"x": x, "y": y, **payload},
+        )
         return True
 
     # --- think ------------------------------------------------------------
@@ -234,7 +255,35 @@ class Scout:
         tiles = self._sector_tiles(world, sector_id)
         if not tiles:
             return 1.0
-        return sum(1 for t in tiles if t in self.explored) / len(tiles)
+        known = self._known(world)
+        return sum(1 for t in tiles if t in known) / len(tiles)
+
+    def _known(self, world: World) -> set[tuple[int, int]]:
+        """Ground this scout may treat as explored.
+
+        Coordinated mode reads the fleet's shared set — any robot's vision
+        reveals for all, which is the whole product. Baseline reads only its own,
+        so the two runs diverge for exactly one reason (§3.3).
+        """
+        return self.explored | world.visible_to(self.robot_id)
+
+    def _sector_is_swept(self, world: World, sector_id: str) -> bool:
+        """Whether this scout is done with a sector.
+
+        Coverage alone is not a usable test. A sector holding walled interiors or
+        sealed rooms can never reach the threshold, and a scout waiting for it
+        sits there for the rest of the mission — measured on the demo map as
+        coverage stalling at 67% with six victims never found. So the real
+        criterion is "nothing left in here I can reach", with the coverage
+        threshold as an early exit for sectors that are mostly open.
+        """
+        if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
+            return True
+        known = self._known(world)
+        return not any(
+            tile not in known and world.passable(*tile, flying=True)
+            for tile in self._sector_tiles(world, sector_id)
+        )
 
     def _manage_sector(self, world: World) -> None:
         """Complete a swept sector and claim the next one.
@@ -245,10 +294,14 @@ class Scout:
         """
         if self.sector_task is not None:
             sector_id = self.sector_task.kind.split(":", 1)[1]
-            if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
+            if self._sector_is_swept(world, sector_id):
                 self.mem.complete_task(self.sector_task.id, self.robot_id)
-                self.mem.log_event(self.mission_id, self.robot_id, "sector_swept",
-                                   {"sector": sector_id})
+                self.mem.log_event(
+                    self.mission_id,
+                    self.robot_id,
+                    "sector_swept",
+                    {"sector": sector_id},
+                )
                 self.sector_task = None
             else:
                 return
@@ -258,17 +311,27 @@ class Scout:
         # scout takes whatever the query happens to return and can fly the width
         # of the map past unswept ground to reach it.
         candidates = sorted(
-            (t for t in self.mem.open_tasks(self.mission_id)
-             if t.kind.startswith("explore_sector:")),
-            key=lambda t: (abs((t.target[0] or 0) - robot.x)
-                           + abs((t.target[1] or 0) - robot.y), str(t.id)),
+            (
+                t
+                for t in self.mem.open_tasks(self.mission_id)
+                if t.kind.startswith("explore_sector:")
+            ),
+            key=lambda t: (
+                abs((t.target[0] or 0) - robot.x) + abs((t.target[1] or 0) - robot.y),
+                str(t.id),
+            ),
         )
         for task in candidates:
-            if self.mem.claim_task(task.id, self.robot_id,
-                                   lease_seconds=SECTOR_LEASE_SECONDS):
+            if self.mem.claim_task(
+                task.id, self.robot_id, lease_seconds=SECTOR_LEASE_SECONDS
+            ):
                 self.sector_task = task
-                self.mem.log_event(self.mission_id, self.robot_id, "sector_claimed",
-                                   {"sector": task.kind.split(":", 1)[1]})
+                self.mem.log_event(
+                    self.mission_id,
+                    self.robot_id,
+                    "sector_claimed",
+                    {"sector": task.kind.split(":", 1)[1]},
+                )
                 return
 
     @property
@@ -286,7 +349,9 @@ class Scout:
         robot = world.robots[self.robot_id]
         here = (robot.x, robot.y)
 
-        if self.frontier_target in (None, here) or not self._worth_pursuing(self.frontier_target):
+        if self.frontier_target in (None, here) or not self._worth_pursuing(
+            self.frontier_target
+        ):
             self.frontier_target = self._pick_frontier(world, here)
 
         if self.frontier_target is None:
@@ -296,7 +361,9 @@ class Scout:
     def _worth_pursuing(self, target: tuple[int, int] | None) -> bool:
         return target is not None and target not in self.explored
 
-    def _pick_frontier(self, world: World, here: tuple[int, int]) -> tuple[int, int] | None:
+    def _pick_frontier(
+        self, world: World, here: tuple[int, int]
+    ) -> tuple[int, int] | None:
         """Nearest unexplored passable tile, preferring this scout's own sector.
 
         A full scan every tick is fine at 40x30 and keeps the skeleton honest:
@@ -305,61 +372,67 @@ class Scout:
         scout that finishes its sector spills into a neighbour's rather than
         idling while ground goes unswept.
         """
-        penalty = world.map.width + world.map.height   # never beats an in-sector tile
+        penalty = world.map.width + world.map.height  # never beats an in-sector tile
 
         best: tuple[int, int] | None = None
         best_score = None
+        known = self._known(world)
         for y in range(world.map.height):
             for x in range(world.map.width):
-                if (x, y) in self.explored or world.ground[y][x] == WALL:
+                if (x, y) in known or world.ground[y][x] == WALL:
                     continue
                 score = abs(x - here[0]) + abs(y - here[1])
-                if (self._active_sectors
-                        and world.map.sector_at(x, y) not in self._active_sectors):
+                if (
+                    self._active_sectors
+                    and world.map.sector_at(x, y) not in self._active_sectors
+                ):
                     score += penalty
                 if best_score is None or score < best_score:
                     best, best_score = (x, y), score
         return best
 
-    def _step_toward(self, world: World, here: tuple[int, int],
-                     target: tuple[int, int]) -> Action:
-        """Greedy step that reduces distance, preferring the larger gap first.
+    def _step_toward(
+        self, world: World, here: tuple[int, int], target: tuple[int, int]
+    ) -> Action:
+        """Move along a plan searched over moves — the same planner the workers
+        use.
 
-        Not A* — that arrives with the rescue chain. A scout flies over debris,
-        so the only real obstacles are walls and fire, and greedy-with-fallback
-        covers the open map well enough to prove the slice.
+        Greedy stepping was good enough while a scout only drifted toward open
+        ground in its own half of the map. Sector claims changed that: a scout
+        assigned a sector across the staging wall has to route through a single
+        door, and greedy stepping pinned it against the wall for the whole
+        mission. Measured on the demo map: both scouts frozen by tick 150,
+        coverage stalled at 60%, six victims never found.
         """
-        robot = world.robots[self.robot_id]
-        dx, dy = target[0] - here[0], target[1] - here[1]
+        plan = find_move_plan(
+            here,
+            target,
+            landing=lambda p, d: self._landing(world, p, d),
+            speed=ROLES[world.robots[self.robot_id].role]["speed"],
+        )
+        if plan:
+            return Action.move(plan[0])
 
-        preferred: list[str] = []
-        if abs(dx) >= abs(dy):
-            preferred = [self._dir_x(dx), self._dir_y(dy)]
-        else:
-            preferred = [self._dir_y(dy), self._dir_x(dx)]
-        preferred = [d for d in preferred if d]
-
-        # Fall back to any legal direction so a blocked scout keeps exploring
-        # instead of standing still against a wall for the rest of the mission.
-        options = preferred + sorted(DIRECTIONS)
-        for direction in options:
-            ddx, ddy = DIRECTIONS[direction]
-            nx, ny = here[0] + ddx, here[1] + ddy
-            if world.passable(nx, ny, flying=robot.flying) and not world.occupied(
-                nx, ny, ignore=self.robot_id
-            ):
-                return Action.move(direction)
-
+        # Nothing reachable here: drop the target so the next tick picks another
+        # frontier rather than standing against a wall.
+        self.explored.add(target)
         self.frontier_target = None
         return Action.idle()
 
-    @staticmethod
-    def _dir_x(dx: int) -> str:
-        return "e" if dx > 0 else "w" if dx < 0 else ""
-
-    @staticmethod
-    def _dir_y(dy: int) -> str:
-        return "s" if dy > 0 else "n" if dy < 0 else ""
+    def _landing(
+        self, world: World, here: tuple[int, int], direction: str
+    ) -> tuple[int, int]:
+        """Where one `move` leaves this scout — the sim's rule, mirrored."""
+        dx, dy = DIRECTIONS[direction]
+        x, y = here
+        for _ in range(ROLES[world.robots[self.robot_id].role]["speed"]):
+            nx, ny = x + dx, y + dy
+            if not world.passable(nx, ny, flying=True):
+                break
+            if world.occupied(nx, ny, ignore=self.robot_id):
+                break
+            x, y = nx, ny
+        return (x, y)
 
 
 def seed_sector_tasks(mem, mission_id, world_map) -> list:
@@ -370,7 +443,11 @@ def seed_sector_tasks(mem, mission_id, world_map) -> list:
     an opaque uuid — legible to a judge watching the demo.
     """
     return [
-        mem.create_task(mission_id, f"explore_sector:{sector['id']}",
-                        (sector["x"], sector["y"]), priority=1)
+        mem.create_task(
+            mission_id,
+            f"explore_sector:{sector['id']}",
+            (sector["x"], sector["y"]),
+            priority=1,
+        )
         for sector in world_map.sectors
     ]

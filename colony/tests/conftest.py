@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from fleetmem.client import DEFAULT_DSN, CockroachFleetMem
+from fleetmem.client import CockroachFleetMem
 from fleetmem.fake import FakeFleetMem
 
 SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "v1_1.sql"
@@ -18,7 +18,9 @@ def _db_available() -> bool:
 
 
 DB_UP = _db_available()
-needs_db = pytest.mark.skipif(not DB_UP, reason="no CockroachDB at localhost:26257 (make dev)")
+needs_db = pytest.mark.skipif(
+    not DB_UP, reason="no CockroachDB at localhost:26257 (make dev)"
+)
 
 
 @pytest.fixture(scope="session")

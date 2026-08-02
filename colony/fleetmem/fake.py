@@ -18,12 +18,20 @@ from typing import Any, Sequence
 from uuid import UUID, uuid4
 
 from fleetmem.types import (
-    BLOCKED, CLAIMED, DONE, IN_PROGRESS, OPEN, Belief, Match, Plan, Task,
+    BLOCKED,
+    CLAIMED,
+    DONE,
+    IN_PROGRESS,
+    OPEN,
+    Belief,
+    Match,
+    Plan,
+    Task,
 )
 
 MERGE_DISTANCE = 0.18
 MERGE_RADIUS_TILES = 5
-LEASE_SECONDS = 15   # mirrors fleetmem.client (§4.4)
+LEASE_SECONDS = 15  # mirrors fleetmem.client (§4.4)
 
 
 class FakeFleetMem:
@@ -62,10 +70,17 @@ class FakeFleetMem:
 
             obs_id = uuid4()
             self._obs[obs_id] = {
-                "id": obs_id, "mission_id": mission_id, "robot_id": robot_id,
-                "kind": kind, "pos_x": pos[0], "pos_y": pos[1],
-                "payload": payload or {}, "embedding": None if embedding is None else list(embedding),
-                "confidence": confidence, "sightings": 1, "observed_at": _now(),
+                "id": obs_id,
+                "mission_id": mission_id,
+                "robot_id": robot_id,
+                "kind": kind,
+                "pos_x": pos[0],
+                "pos_y": pos[1],
+                "payload": payload or {},
+                "embedding": None if embedding is None else list(embedding),
+                "confidence": confidence,
+                "sightings": 1,
+                "observed_at": _now(),
             }
             return obs_id
 
@@ -89,8 +104,10 @@ class FakeFleetMem:
         limit: int = 5,
     ) -> Match | None:
         near = [
-            r for r in self._obs.values()
-            if r["mission_id"] == mission_id and r["kind"] == kind
+            r
+            for r in self._obs.values()
+            if r["mission_id"] == mission_id
+            and r["kind"] == kind
             and abs(r["pos_x"] - pos[0]) <= MERGE_RADIUS_TILES
             and abs(r["pos_y"] - pos[1]) <= MERGE_RADIUS_TILES
         ]
@@ -102,7 +119,8 @@ class FakeFleetMem:
 
         scored = [
             (_cosine_distance(embedding, r["embedding"]), r)
-            for r in near if r["embedding"] is not None
+            for r in near
+            if r["embedding"] is not None
         ]
         scored.sort(key=lambda pair: pair[0])
         for distance, row in scored[:limit]:
@@ -124,15 +142,22 @@ class FakeFleetMem:
                 if kind is not None and r["kind"] != kind:
                     continue
                 if area is not None and not (
-                    area[0] <= r["pos_x"] <= area[2] and area[1] <= r["pos_y"] <= area[3]
+                    area[0] <= r["pos_x"] <= area[2]
+                    and area[1] <= r["pos_y"] <= area[3]
                 ):
                     continue
-                out.append(Belief(
-                    id=r["id"], kind=r["kind"], pos=(r["pos_x"], r["pos_y"]),
-                    payload=r["payload"], confidence=r["confidence"],
-                    sightings=r["sightings"], robot_id=r["robot_id"],
-                    observed_at=r["observed_at"],
-                ))
+                out.append(
+                    Belief(
+                        id=r["id"],
+                        kind=r["kind"],
+                        pos=(r["pos_x"], r["pos_y"]),
+                        payload=r["payload"],
+                        confidence=r["confidence"],
+                        sightings=r["sightings"],
+                        robot_id=r["robot_id"],
+                        observed_at=r["observed_at"],
+                    )
+                )
             return out
 
     # --- tasks ------------------------------------------------------------
@@ -148,17 +173,24 @@ class FakeFleetMem:
     ) -> tuple[UUID, list[UUID]]:
         with self._lock:
             existing = next(
-                (v for v in self._victims.values()
-                 if v["mission_id"] == mission_id and (v["pos_x"], v["pos_y"]) == pos),
+                (
+                    v
+                    for v in self._victims.values()
+                    if v["mission_id"] == mission_id and (v["pos_x"], v["pos_y"]) == pos
+                ),
                 None,
             )
             if existing is not None:
                 # Via the delivery task and out through its dependencies; see
                 # the note in CockroachFleetMem.register_victim.
                 deliver = next(
-                    (t for t in self._tasks.values()
-                     if t["mission_id"] == mission_id and t["kind"] == "deliver_kit"
-                     and (t["target_x"], t["target_y"]) == pos),
+                    (
+                        t
+                        for t in self._tasks.values()
+                        if t["mission_id"] == mission_id
+                        and t["kind"] == "deliver_kit"
+                        and (t["target_x"], t["target_y"]) == pos
+                    ),
                     None,
                 )
                 if deliver is None:
@@ -167,9 +199,13 @@ class FakeFleetMem:
 
             victim_id = uuid4()
             self._victims[victim_id] = {
-                "id": victim_id, "mission_id": mission_id,
-                "pos_x": pos[0], "pos_y": pos[1], "state": "located",
-                "vitals_deadline": vitals_deadline, "reported_by": reported_by,
+                "id": victim_id,
+                "mission_id": mission_id,
+                "pos_x": pos[0],
+                "pos_y": pos[1],
+                "state": "located",
+                "vitals_deadline": vitals_deadline,
+                "reported_by": reported_by,
             }
             # The chain is built while the lock is still held. Releasing it here
             # opened a window where a concurrent sighting of the same victim saw
@@ -178,8 +214,9 @@ class FakeFleetMem:
             # needs no rescue at all. `_create_task_locked` exists because
             # threading.Lock is not reentrant and create_task would deadlock.
             clears = [
-                self._create_task_locked(mission_id, "clear_debris", tile,
-                                         priority=priority)
+                self._create_task_locked(
+                    mission_id, "clear_debris", tile, priority=priority
+                )
                 for tile in blocked_by
             ]
             deliver = self._create_task_locked(
@@ -196,7 +233,9 @@ class FakeFleetMem:
         depends_on: Sequence[UUID] = (),
     ) -> UUID:
         with self._lock:
-            return self._create_task_locked(mission_id, kind, target, priority, depends_on)
+            return self._create_task_locked(
+                mission_id, kind, target, priority, depends_on
+            )
 
     def _create_task_locked(
         self,
@@ -214,15 +253,22 @@ class FakeFleetMem:
             # Matches CockroachFleetMem: see the note on its create_task.
             raise ValueError(f"depends_on refers to unknown task ids: {unknown}")
         self._tasks[task_id] = {
-            "id": task_id, "mission_id": mission_id, "kind": kind,
-            "target_x": target[0], "target_y": target[1], "priority": priority,
-            "status": BLOCKED if deps else OPEN, "depends_on": deps,
-            "claimed_by": None, "lease_expires_at": None,
+            "id": task_id,
+            "mission_id": mission_id,
+            "kind": kind,
+            "target_x": target[0],
+            "target_y": target[1],
+            "priority": priority,
+            "status": BLOCKED if deps else OPEN,
+            "depends_on": deps,
+            "claimed_by": None,
+            "lease_expires_at": None,
         }
         return task_id
 
-    def claim_task(self, task_id: UUID, robot_id: str,
-                   lease_seconds: int = LEASE_SECONDS) -> bool:
+    def claim_task(
+        self, task_id: UUID, robot_id: str, lease_seconds: int = LEASE_SECONDS
+    ) -> bool:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None or not self._claimable(task):
@@ -249,7 +295,10 @@ class FakeFleetMem:
         with self._lock:
             renewed = 0
             for task in self._tasks.values():
-                if task["claimed_by"] == robot_id and task["status"] in (CLAIMED, IN_PROGRESS):
+                if task["claimed_by"] == robot_id and task["status"] in (
+                    CLAIMED,
+                    IN_PROGRESS,
+                ):
                     task["lease_expires_at"] = _now() + timedelta(seconds=lease_seconds)
                     renewed += 1
             return renewed
@@ -270,7 +319,7 @@ class FakeFleetMem:
             if task is None or task["claimed_by"] != robot_id or task["status"] == DONE:
                 return None
             task["status"] = DONE
-            task["lease_expires_at"] = None   # a finished task is not abandoned work
+            task["lease_expires_at"] = None  # a finished task is not abandoned work
 
             unblocked = []
             for other in self._tasks.values():
@@ -285,16 +334,22 @@ class FakeFleetMem:
         with self._lock:
             # Expired leases count as available — recovery needs no separate step.
             rows = [
-                t for t in self._tasks.values()
+                t
+                for t in self._tasks.values()
                 if t["mission_id"] == mission_id and self._claimable(t)
             ]
             rows.sort(key=lambda t: t["priority"], reverse=True)
             return [
                 Task(
-                    id=t["id"], mission_id=t["mission_id"], kind=t["kind"],
-                    target=(t["target_x"], t["target_y"]), status=t["status"],
-                    priority=t["priority"], depends_on=list(t["depends_on"]),
-                    claimed_by=t["claimed_by"], lease_expires_at=t["lease_expires_at"],
+                    id=t["id"],
+                    mission_id=t["mission_id"],
+                    kind=t["kind"],
+                    target=(t["target_x"], t["target_y"]),
+                    status=t["status"],
+                    priority=t["priority"],
+                    depends_on=list(t["depends_on"]),
+                    claimed_by=t["claimed_by"],
+                    lease_expires_at=t["lease_expires_at"],
                 )
                 for t in rows
             ]
@@ -329,8 +384,13 @@ class FakeFleetMem:
     ) -> None:
         with self._lock:
             self._robots[robot_id] = {
-                "id": robot_id, "role": role, "pos_x": pos[0], "pos_y": pos[1],
-                "battery": battery, "status": "idle", "heartbeat_at": _now(),
+                "id": robot_id,
+                "role": role,
+                "pos_x": pos[0],
+                "pos_y": pos[1],
+                "battery": battery,
+                "status": "idle",
+                "heartbeat_at": _now(),
             }
 
     def stale_robots(self, seconds: int = 10) -> list[str]:
@@ -338,7 +398,8 @@ class FakeFleetMem:
         with self._lock:
             cutoff = _now().timestamp() - seconds
             return [
-                r["id"] for r in self._robots.values()
+                r["id"]
+                for r in self._robots.values()
                 if r["heartbeat_at"].timestamp() < cutoff
             ]
 
@@ -353,20 +414,32 @@ class FakeFleetMem:
     ) -> UUID:
         with self._lock:
             plan_id = uuid4()
-            self._plans.append({
-                "id": plan_id, "mission_id": mission_id, "robot_id": robot_id,
-                "trigger": trigger, "chosen": chosen, "rationale": rationale,
-                "based_on": list(based_on), "at": _now(),
-            })
+            self._plans.append(
+                {
+                    "id": plan_id,
+                    "mission_id": mission_id,
+                    "robot_id": robot_id,
+                    "trigger": trigger,
+                    "chosen": chosen,
+                    "rationale": rationale,
+                    "based_on": list(based_on),
+                    "at": _now(),
+                }
+            )
             return plan_id
 
     def plans_for(self, mission_id: UUID, robot_id: str | None = None) -> list[Plan]:
         with self._lock:
             return [
                 Plan(
-                    id=p["id"], mission_id=p["mission_id"], robot_id=p["robot_id"],
-                    trigger=p["trigger"], chosen=p["chosen"], rationale=p["rationale"],
-                    based_on=list(p["based_on"]), at=p["at"],
+                    id=p["id"],
+                    mission_id=p["mission_id"],
+                    robot_id=p["robot_id"],
+                    trigger=p["trigger"],
+                    chosen=p["chosen"],
+                    rationale=p["rationale"],
+                    based_on=list(p["based_on"]),
+                    at=p["at"],
                 )
                 for p in self._plans
                 if p["mission_id"] == mission_id
@@ -374,19 +447,29 @@ class FakeFleetMem:
             ]
 
     def log_event(
-        self, mission_id: UUID, actor: str, verb: str, detail: dict[str, Any] | None = None
+        self,
+        mission_id: UUID,
+        actor: str,
+        verb: str,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
-            self._events.append({
-                "mission_id": mission_id, "actor": actor, "verb": verb,
-                "detail": detail or {}, "at": _now(),
-            })
+            self._events.append(
+                {
+                    "mission_id": mission_id,
+                    "actor": actor,
+                    "verb": verb,
+                    "detail": detail or {},
+                    "at": _now(),
+                }
+            )
 
     def events(self, mission_id: UUID) -> list[dict[str, Any]]:
         with self._lock:
             return [
                 {k: v for k, v in e.items() if k != "mission_id"}
-                for e in self._events if e["mission_id"] == mission_id
+                for e in self._events
+                if e["mission_id"] == mission_id
             ]
 
 

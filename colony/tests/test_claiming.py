@@ -15,14 +15,17 @@ from fleetmem.fake import FakeFleetMem
 from tests.conftest import DB_UP, needs_db
 
 RACES = 250
-ROBOTS_PER_RACE = 4          # 1,000 claim attempts total
+ROBOTS_PER_RACE = 4  # 1,000 claim attempts total
 
 
 @needs_db
 def test_thousand_races_produce_zero_double_claims():
     mission = uuid.uuid4()
     setup = CockroachFleetMem()
-    tasks = [setup.create_task(mission, "clear_debris", (i % 40, i % 30)) for i in range(RACES)]
+    tasks = [
+        setup.create_task(mission, "clear_debris", (i % 40, i % 30))
+        for i in range(RACES)
+    ]
 
     # One connection per robot — threads sharing a connection would serialize in
     # the driver and prove nothing about the database.
@@ -43,8 +46,12 @@ def test_thousand_races_produce_zero_double_claims():
             winners.setdefault(task_id, []).append(robot)
 
     doubles = {t: w for t, w in winners.items() if len(w) > 1}
-    assert not doubles, f"{len(doubles)} tasks were claimed more than once: {list(doubles)[:3]}"
-    assert len(winners) == RACES, f"only {len(winners)}/{RACES} tasks were claimed at all"
+    assert not doubles, (
+        f"{len(doubles)} tasks were claimed more than once: {list(doubles)[:3]}"
+    )
+    assert len(winners) == RACES, (
+        f"only {len(winners)}/{RACES} tasks were claimed at all"
+    )
 
     for conn in conns.values():
         conn.close()
@@ -67,7 +74,9 @@ def test_the_winner_is_the_robot_recorded_on_the_task():
     claimants = [r for r, ok in won if ok]
     assert len(claimants) == 1
 
-    row = mem.conn.execute("SELECT claimed_by, status FROM tasks WHERE id = %s", (task,)).fetchone()
+    row = mem.conn.execute(
+        "SELECT claimed_by, status FROM tasks WHERE id = %s", (task,)
+    ).fetchone()
     assert row["claimed_by"] == claimants[0]
     assert row["status"] == "claimed"
 
@@ -85,10 +94,12 @@ def test_the_fake_also_admits_exactly_one_winner():
     robots = [f"l{i}" for i in range(4)]
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(
-            lambda pair: (pair[0], mem.claim_task(pair[0], pair[1])),
-            [(t, r) for t in tasks for r in robots],
-        ))
+        results = list(
+            pool.map(
+                lambda pair: (pair[0], mem.claim_task(pair[0], pair[1])),
+                [(t, r) for t in tasks for r in robots],
+            )
+        )
 
     winners: dict = {}
     for task_id, won in results:
@@ -108,7 +119,10 @@ def test_thousand_expired_lease_takeover_races_produce_zero_double_claims():
     """
     mission = uuid.uuid4()
     setup = CockroachFleetMem()
-    tasks = [setup.create_task(mission, "clear_debris", (i % 40, i % 30)) for i in range(RACES)]
+    tasks = [
+        setup.create_task(mission, "clear_debris", (i % 40, i % 30))
+        for i in range(RACES)
+    ]
 
     # Claim every task with an already-dead lease, standing in for a fleet of
     # robots that died mid-task.
@@ -149,7 +163,7 @@ def test_a_live_lease_cannot_be_stolen():
     mem = CockroachFleetMem()
     task = mem.create_task(mission, "clear_debris", (1, 1))
 
-    assert mem.claim_task(task, "l1") is True          # 15s lease
+    assert mem.claim_task(task, "l1") is True  # 15s lease
     assert mem.claim_task(task, "l2") is False, "a live lease was stolen"
 
     row = mem.conn.execute(
@@ -173,7 +187,7 @@ def test_renewing_a_lease_keeps_the_task():
     mem = CockroachFleetMem()
     task = mem.create_task(mission, "clear_debris", (2, 2))
 
-    mem.claim_task(task, robot, lease_seconds=-1)      # already expired
+    mem.claim_task(task, robot, lease_seconds=-1)  # already expired
     assert mem.renew_leases(robot, lease_seconds=60) == 1
     assert mem.claim_task(task, "l2") is False, "a renewed lease was still stolen"
     mem.close()
@@ -235,9 +249,9 @@ def test_the_fake_enforces_lease_takeover_identically():
     task = mem.create_task(mission, "clear_debris")
 
     assert mem.claim_task(task, "l1") is True
-    assert mem.claim_task(task, "l2") is False          # live lease
+    assert mem.claim_task(task, "l2") is False  # live lease
 
-    mem.renew_leases("l1", lease_seconds=-1)            # l1 goes silent; lease lapses
+    mem.renew_leases("l1", lease_seconds=-1)  # l1 goes silent; lease lapses
     assert mem.claim_task(task, "l2") is True, "the fake ignored an expired lease"
 
     mem.renew_leases("l2", lease_seconds=60)
@@ -253,10 +267,12 @@ def test_the_fake_admits_one_winner_on_an_expired_lease_under_contention():
 
     robots = [f"l{i}" for i in range(4)]
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(
-            lambda pair: (pair[0], mem.claim_task(pair[0], pair[1])),
-            [(t, r) for t in tasks for r in robots],
-        ))
+        results = list(
+            pool.map(
+                lambda pair: (pair[0], mem.claim_task(pair[0], pair[1])),
+                [(t, r) for t in tasks for r in robots],
+            )
+        )
 
     winners: dict = {}
     for task_id, won in results:
@@ -292,7 +308,9 @@ def test_work_claimed_before_the_migration_is_still_recoverable():
         (task,),
     )
 
-    assert task in {t.id for t in mem.open_tasks(mission)}, "not offered to the allocator"
+    assert task in {t.id for t in mem.open_tasks(mission)}, (
+        "not offered to the allocator"
+    )
     assert mem.claim_task(task, "l2") is True, "a pre-migration claim is unrecoverable"
     mem.close()
 
@@ -302,7 +320,7 @@ def test_the_fake_also_treats_a_missing_lease_as_expired():
     mission = uuid.uuid4()
     task = mem.create_task(mission, "clear_debris")
     mem.claim_task(task, "v0-robot")
-    mem._tasks[task]["lease_expires_at"] = None    # a v0-shaped row
+    mem._tasks[task]["lease_expires_at"] = None  # a v0-shaped row
 
     assert mem.claim_task(task, "l2") is True
 
@@ -316,5 +334,7 @@ def test_both_backends_report_the_lease_on_a_task():
         task = mem.create_task(mission, "clear_debris")
         mem.claim_task(task, f"l-{uuid.uuid4().hex[:8]}", lease_seconds=-1)
         held = next(t for t in mem.open_tasks(mission) if t.id == task)
-        assert held.lease_expires_at is not None, f"{type(mem).__name__} dropped the lease"
+        assert held.lease_expires_at is not None, (
+            f"{type(mem).__name__} dropped the lease"
+        )
         mem.close()
