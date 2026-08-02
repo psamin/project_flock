@@ -131,13 +131,23 @@ def demo_comparison():
 
 def test_coordination_rescues_more_people(demo_comparison):
     """The claim the whole product rests on, measured rather than asserted.
-    Coordinated 7 of 9; baseline 1 of 9."""
+    Coordinated 7 of 9; baseline 4 of 9, and the baseline's four arrive so late
+    that its censored median sits at the horizon.
+
+    The margin was 2x when the baseline scored 1 of 9 — but that 1 was a bug,
+    not a result: an uncoordinated robot never recorded a completion, so it
+    re-picked finished work forever. A baseline that actually finishes tasks
+    rescues four, and the honest separation moved from count into time.
+    """
     assert demo_comparison.coordinated.victims_stabilized > (
-        demo_comparison.baseline.victims_stabilized * 2
+        demo_comparison.baseline.victims_stabilized * 1.5
     )
     assert (
         demo_comparison.coordinated.rescue_rate > demo_comparison.baseline.rescue_rate
     )
+    assert demo_comparison.coordinated.median_time_to_stabilize < (
+        demo_comparison.baseline.median_time_to_stabilize / 2
+    ), "coordination has to rescue people sooner, not merely eventually"
 
 
 def test_the_coordination_gain_is_positive_and_large(demo_comparison):

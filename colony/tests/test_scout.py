@@ -133,8 +133,15 @@ def _shares(count):
     return split_sectors(load_map(MAP_PATH).sectors, count)
 
 
-def _explore(mem, mission, embedder, count, ticks, sectored=True):
-    """Run `count` scouts and return (their explored union, the world)."""
+def _explore(mem, _mission, embedder, count, ticks, sectored=True):
+    """Run `count` scouts and return (their explored union, the world).
+
+    Each run gets a fresh mission id. The runs share one `mem` — comparing a
+    solo run against a two-scout run only means something if the second does
+    not start out already knowing what the first found, and every belief read
+    is mission-scoped.
+    """
+    mission = uuid.uuid4()
     world = World(load_map(MAP_PATH), seed=3)
     scouts = [
         Scout(
@@ -218,13 +225,26 @@ def test_two_uncoordinated_scouts_cover_less_than_one_coordinated_scout(mem, mis
     world = World(load_map(MAP_PATH), seed=3)
     world.shared_vision = False  # coordination OFF
     scouts = [
-        Scout(robot_id=rid, mission_id=mission, mem=mem, embedder=embedder, seed=i)
+        Scout(
+            robot_id=rid,
+            mission_id=uuid.uuid4(),
+            mem=mem,
+            embedder=embedder,
+            seed=i,
+        )
         for i, rid in enumerate(["s1", "s2"])
     ]
     for _ in range(PRE_SATURATION_TICKS):
         world.step({s.robot_id: s.step(world) for s in scouts})
 
-    assert len(world.explored) < len(solo), (
+    # Both sides measured the same way — the union of what the scouts
+    # themselves recorded. `world.explored` is the other quantity: the sim
+    # reveals tiles after the last action, and no scout ever perceives that
+    # final reveal, so comparing it against `_explore`'s agent-side union put a
+    # tick of slack into the one number this test exists to bound.
+    uncoordinated = set().union(*[s.explored for s in scouts])
+
+    assert len(uncoordinated) < len(solo), (
         "two uncoordinated scouts covered more than one coordinated scout — "
         "the baseline is not actually uncoordinated"
     )

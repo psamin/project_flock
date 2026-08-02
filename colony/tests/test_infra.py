@@ -33,7 +33,11 @@ def _three_node_cluster_is_up() -> bool:
     result = subprocess.run(
         [str(CLUSTER_SCRIPT), "nodes"], capture_output=True, text=True, timeout=60
     )
-    return result.returncode == 0 and result.stdout.strip().isdigit()
+    # Exactly three. `.isdigit()` accepted "2", so a cluster mid-join — or one
+    # with crdb-2 still killed from the last chaos run — ran the three-node
+    # tests instead of skipping them, and failed for a reason that had nothing
+    # to do with the code under test.
+    return result.returncode == 0 and result.stdout.strip() == "3"
 
 
 needs_3node = pytest.mark.skipif(
@@ -82,14 +86,34 @@ def test_every_chaos_node_is_reachable_on_its_own_port():
     """Each node needs a distinct host port, or the demo cannot point the app at
     a surviving node after killing one."""
     services = _compose(COMPOSE_3NODE)["services"]
+    # "127.0.0.1:26258:26257" — host port is second from the right, whether or
+    # not a bind address is present.
     sql_ports = [
-        mapping.split(":")[0]
+        mapping.split(":")[-2]
         for name, svc in services.items()
         if name.startswith("crdb-")
         for mapping in svc["ports"]
         if mapping.endswith(":26257")
     ]
     assert sorted(sql_ports) == ["26257", "26258", "26259"]
+
+
+def test_no_chaos_node_is_published_beyond_this_machine():
+    """These nodes run --insecure: no TLS, no password, root on connect. Bound
+    to 0.0.0.0 that is unauthenticated database access for anyone on the
+    network, so the loopback bind is the only thing keeping the rig private."""
+    services = _compose(COMPOSE_3NODE)["services"]
+    published = [
+        mapping
+        for name, svc in services.items()
+        if name.startswith("crdb-")
+        for mapping in svc.get("ports", [])
+    ]
+    assert published, "no ports parsed — the check would pass vacuously"
+    for mapping in published:
+        assert mapping.startswith("127.0.0.1:"), (
+            f"{mapping} publishes an insecure node on every interface"
+        )
 
 
 def test_the_chaos_rig_runs_the_same_schema_as_the_dev_cluster():

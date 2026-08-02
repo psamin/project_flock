@@ -16,15 +16,20 @@ SCHEMA="$ROOT/colony/schema/v1_1.sql"
 case "${1:-}" in
   up)
     $COMPOSE up -d
-    # Wait on the cluster rather than the containers: a node answers /health
-    # before it has joined, and applying the schema too early fails confusingly.
-    for _ in $(seq 1 60); do
-      if $COMPOSE exec -T crdb-1 ./cockroach sql --insecure \
-           -e "SELECT 1" >/dev/null 2>&1; then
-        break
-      fi
+    # Wait for all three nodes, not just for crdb-1 to answer. A node responds
+    # before the cluster has formed, so a one-node check let the schema apply to
+    # a partly-joined cluster and left the rig quietly running on fewer nodes
+    # than the node-kill segment assumes.
+    for _ in $(seq 1 90); do
+      live=$($COMPOSE exec -T crdb-1 ./cockroach node status --insecure \
+        --format=csv 2>/dev/null | awk -F, 'NR > 1 && $NF == "true" { n++ } END { print n + 0 }')
+      [ "$live" = "3" ] && break
       sleep 2
     done
+    if [ "${live:-0}" != "3" ]; then
+      echo "only ${live:-0}/3 nodes joined — not applying the schema" >&2
+      exit 1
+    fi
     $COMPOSE exec -T crdb-1 ./cockroach sql --insecure \
       -e "CREATE DATABASE IF NOT EXISTS colony"
     $COMPOSE exec -T crdb-1 ./cockroach sql --insecure -d colony \

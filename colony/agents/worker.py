@@ -66,6 +66,10 @@ class Worker:
     idle_ticks: int = 0
     # task id -> tick when this robot last failed to reach it
     unreachable: dict = field(default_factory=dict)
+    # Baseline only: tasks this robot considers done. Without claiming there is
+    # no shared record of completion, so it keeps its own and stops re-picking.
+    finished: set = field(default_factory=set)
+    last_tick: int = 0
 
     # --- the loop ---------------------------------------------------------
 
@@ -81,6 +85,7 @@ class Worker:
             self.robot_id, pos=here, battery=robot.battery, status=robot.status
         )
 
+        self.last_tick = world.tick
         if self.task is None:
             self._find_work(world, here)
         if self.task is None:
@@ -121,6 +126,7 @@ class Worker:
             task
             for task in self.mem.open_tasks(self.mission_id)
             if task.kind in ROLE_TASKS.get(self.role, set())
+            and task.id not in self.finished
             and not self._cooling_off(task.id, world.tick)
         ]
         candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
@@ -295,9 +301,28 @@ class Worker:
         and returns None. Logging `task_completed` anyway would inflate the §4.7
         metrics, which are derived entirely from this event stream, and would
         credit a robot for work another one did.
+
+        Baseline mode (§3.3) never claims, so ownership was never stamped and
+        that check can never pass. Left as-is, a baseline robot finished the work
+        in the world, failed to record it, re-picked the same open task next
+        tick, and logged claimed/lost forever — 54 pairs in 60 ticks, with the
+        task ledger showing nothing completed. Every completion-derived baseline
+        metric was computed off that. It records the completion directly instead,
+        and deliberately does *not* unblock dependents: §3.3's baseline has "no
+        handoff triggers", so an unblock would be the coordination layer leaking
+        into the run it is supposed to be compared against.
         """
-        unblocked = self.mem.complete_task(self.task.id, self.robot_id)
+        if self.coordinated:
+            unblocked = self.mem.complete_task(self.task.id, self.robot_id)
+        else:
+            unblocked = []
+            self.finished.add(self.task.id)
+
         if unblocked is None:
+            # Another robot owns it now and will finish it. Cool off rather than
+            # re-picking it next tick, which is what produced the claimed/lost
+            # loop in the first place.
+            self.unreachable[self.task.id] = self.last_tick
             self.mem.log_event(
                 self.mission_id,
                 self.robot_id,

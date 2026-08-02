@@ -18,6 +18,7 @@ TABLES = [
     "victims",
     "hazards",
     "events",
+    "plans",
     "mission_memories",
 ]
 
