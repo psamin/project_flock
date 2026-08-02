@@ -115,6 +115,7 @@ class World:
         # visibly rather than only in the metrics.
         self.explored: set[tuple[int, int]] = set()
         self.explored_by: dict[str, set[tuple[int, int]]] = {}
+        self._visited: dict[str, set[tuple[int, int]]] = {}
         self.shared_vision = True
         self._explored_delta: list[tuple[int, int]] = []
         self._tiles_changed: list[dict[str, Any]] = []
@@ -364,6 +365,16 @@ class World:
                                min(self.map.width, robot.x + radius + 1)):
                     self._reveal(robot_id, (x, y))
 
+            # Duplicate-effort (§4.7) is about redundant *visits* — ground a
+            # robot travelled over that another had already covered — not about
+            # overlapping vision cones. Counting what robots saw rather than
+            # where they went made the metric measure the wrong thing entirely,
+            # and reported coordinated runs as slightly worse than baseline.
+            here = (robot.x, robot.y)
+            if here not in self._visited.setdefault(robot_id, set()):
+                self._visited[robot_id].add(here)
+                self._event(robot_id, "tile_visited", {"x": here[0], "y": here[1]})
+
             for victim in self.victims.values():
                 if (abs(victim.x - robot.x) <= radius
                         and abs(victim.y - robot.y) <= radius
@@ -402,6 +413,18 @@ class World:
                 seen.victims.append(victim.to_json())
         return seen
 
+    def visible_to(self, robot_id: str) -> set[tuple[int, int]]:
+        """What this robot may act on.
+
+        Coordinated mode hands back the fleet's shared knowledge; baseline hands
+        back only what this robot saw itself (§3.3). Every difference between the
+        two runs traces back to this one method, which is what makes the ON/OFF
+        delta attributable to sharing rather than to a pile of mode flags.
+        """
+        if self.shared_vision:
+            return self.explored
+        return self.explored_by.setdefault(robot_id, set())
+
     def _reveal(self, robot_id: str, tile: tuple[int, int]) -> None:
         """Record that a robot can see this tile.
 
@@ -410,8 +433,7 @@ class World:
         tiles go into the frame — the set grows to the whole map, and resending
         it four times a second would swamp every other field.
         """
-        seen_by_robot = self.explored_by.setdefault(robot_id, set())
-        seen_by_robot.add(tile)
+        self.explored_by.setdefault(robot_id, set()).add(tile)
         if tile not in self.explored:
             self.explored.add(tile)
             self._explored_delta.append(tile)
@@ -503,7 +525,14 @@ class World:
         })
 
     def _event(self, actor: str, verb: str, detail: dict[str, Any]) -> None:
-        self.events.append({"tick": self.tick, "actor": actor, "verb": verb, "detail": detail})
+        # The tick rides in the detail as well as alongside it: fleet memory
+        # stores only actor/verb/detail, and §4.7's median time-to-stabilize is
+        # computed from the event log after the fact, when the frame is long
+        # gone.
+        self.events.append({
+            "tick": self.tick, "actor": actor, "verb": verb,
+            "detail": {**detail, "tick": self.tick},
+        })
 
     def _reject(self, robot: Robot, reason: str) -> None:
         robot.status = "blocked"

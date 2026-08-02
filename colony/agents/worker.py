@@ -56,6 +56,12 @@ class Worker:
     mem: Any
     seed: int = 0
 
+    # Coordination OFF (§3.3 baseline mode): the robot still picks the best
+    # task it can see, but does not claim it. Two robots then converge on the
+    # same victim and one of them wastes the trip — the duplicated effort the
+    # ON/OFF toggle exists to show.
+    coordinated: bool = True
+
     task: Task | None = field(default=None)
     idle_ticks: int = 0
     # task id -> tick when this robot last failed to reach it
@@ -118,13 +124,39 @@ class Worker:
         candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
 
         for task in candidates:
-            if self.mem.claim_task(task.id, self.robot_id):
-                self.task = task
-                self.idle_ticks = 0
-                self.mem.log_event(self.mission_id, self.robot_id, "task_claimed",
-                                   {"task": str(task.id), "kind": task.kind,
-                                    "target": list(task.target)})
-                return
+            if self.coordinated and not self.mem.claim_task(task.id, self.robot_id):
+                continue                    # someone else got there first
+            self.task = task
+            self.idle_ticks = 0
+            self.mem.log_event(self.mission_id, self.robot_id, "task_claimed",
+                               {"task": str(task.id), "kind": task.kind,
+                                "target": list(task.target)})
+            self._log_choice(task, candidates)
+            return
+
+    def _log_choice(self, chosen: Task, considered: list[Task]) -> None:
+        """Record the decision and the memories behind it (FR-17, §4.0).
+
+        There is no Bedrock call in this loop yet, but the provenance question a
+        judge asks — "why did L1 go there?" — has an answer either way, and the
+        commander console needs the rows to join against. `based_on` carries the
+        beliefs near the chosen target, which is exactly what the allocation
+        score weighed.
+        """
+        nearby = self.mem.get_beliefs(
+            self.mission_id,
+            area=(chosen.target[0] - 3, chosen.target[1] - 3,
+                  chosen.target[0] + 3, chosen.target[1] + 3),
+        ) if chosen.target[0] is not None else []
+        self.mem.log_plan(
+            self.mission_id, self.robot_id,
+            trigger="idle",
+            chosen={"action": "claim_task", "task_id": str(chosen.id),
+                    "kind": chosen.kind, "target": list(chosen.target)},
+            rationale=(f"best of {len(considered)} open {chosen.kind} tasks by "
+                       f"role match, priority and distance"),
+            based_on=[b.id for b in nearby],
+        )
 
     def _cooling_off(self, task_id, tick: int) -> bool:
         failed_at = self.unreachable.get(task_id)

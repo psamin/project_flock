@@ -428,3 +428,30 @@ def test_completion_reports_whether_it_applied(mem, mission):
     mem.claim_task(taken, "l1", lease_seconds=-1)
     assert mem.claim_task(taken, "l2") is True          # lease lapsed, taken over
     assert mem.complete_task(taken, "l1") is None, "the old owner completed it anyway"
+
+
+def test_a_worker_records_why_it_chose_a_task(mem, mission):
+    """FR-17 provenance through the real agent path: the commander console's
+    "why did L1 go there?" has to have rows to join against."""
+    from agents.worker import Worker
+    from sim.world import World
+    from world.map_format import EMPTY, parse_map
+
+    data = {
+        "width": 20, "height": 20, "tile_size": 32,
+        "layers": {"ground": [["open"] * 20 for _ in range(20)],
+                   "objects": [[EMPTY] * 20 for _ in range(20)]},
+        "zones": [], "spawn_points": {"medic": [{"x": 2, "y": 10}]},
+        "victims": [], "escalations": [],
+    }
+    world = World(parse_map(data), seed=0)
+    mem.report_observation(mission, "s1", "victim", (10, 10))
+    mem.create_task(mission, "deliver_kit", (10, 10))
+
+    Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem).step(world)
+
+    plans = mem.plans_for(mission, "m1")
+    assert plans, "the medic chose a task without recording why"
+    assert plans[0].chosen["kind"] == "deliver_kit"
+    assert plans[0].rationale
+    assert plans[0].based_on, "no memories recorded as the basis for the choice"

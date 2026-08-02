@@ -234,7 +234,17 @@ class Scout:
         tiles = self._sector_tiles(world, sector_id)
         if not tiles:
             return 1.0
-        return sum(1 for t in tiles if t in self.explored) / len(tiles)
+        known = self._known(world)
+        return sum(1 for t in tiles if t in known) / len(tiles)
+
+    def _known(self, world: World) -> set[tuple[int, int]]:
+        """Ground this scout may treat as explored.
+
+        Coordinated mode reads the fleet's shared set — any robot's vision
+        reveals for all, which is the whole product. Baseline reads only its own,
+        so the two runs diverge for exactly one reason (§3.3).
+        """
+        return self.explored | world.visible_to(self.robot_id)
 
     def _sector_is_swept(self, world: World, sector_id: str) -> bool:
         """Whether this scout is done with a sector.
@@ -248,8 +258,9 @@ class Scout:
         """
         if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
             return True
+        known = self._known(world)
         return not any(
-            tile not in self.explored and world.passable(*tile, flying=True)
+            tile not in known and world.passable(*tile, flying=True)
             for tile in self._sector_tiles(world, sector_id)
         )
 
@@ -326,9 +337,10 @@ class Scout:
 
         best: tuple[int, int] | None = None
         best_score = None
+        known = self._known(world)
         for y in range(world.map.height):
             for x in range(world.map.width):
-                if (x, y) in self.explored or world.ground[y][x] == WALL:
+                if (x, y) in known or world.ground[y][x] == WALL:
                     continue
                 score = abs(x - here[0]) + abs(y - here[1])
                 if (self._active_sectors

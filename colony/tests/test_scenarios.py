@@ -274,7 +274,7 @@ def test_the_demo_map_actually_needs_lifters():
     clear_debris tasks were created in a whole mission and the lifter sat idle
     from start to finish — the scout->lifter->medic chain the MVP names never
     ran once, while the run still looked like a success at 8/8 rescued."""
-    _, mem, mission = _aftershock_mission()
+    _, mem, _ = _aftershock_mission()
     clears = [t for t in mem._tasks.values() if t["kind"] == "clear_debris"]
     assert clears, "no victim on the demo map requires a lifter"
 

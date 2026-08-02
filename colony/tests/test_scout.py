@@ -157,13 +157,46 @@ def test_a_second_scout_nearly_doubles_coverage(mem, mission):
     ), "the scouts converged onto one tile"
 
 
-def test_sector_bias_is_what_produces_the_gain(mem, mission):
-    """Guards against the gain coming from somewhere incidental: with sectoring
-    switched off, the same two scouts collapse back onto one path."""
+def test_sector_claims_add_to_what_shared_memory_already_gives(mem, mission):
+    """Two mechanisms, measured apart.
+
+    Shared vision alone already stops two scouts re-covering each other's
+    ground, because a tile either of them saw is explored for both. Sector
+    claims add to that by deciding *where each goes next*. Attributing the whole
+    gain to sectors would have been wrong — measured on the demo map at 30
+    ticks: 807 tiles with shared vision alone, 1,007 with sector claims on top.
+    """
     embedder = BedrockAdapter()
     _, sectored, _ = _explore(mem, mission, embedder, 2, PRE_SATURATION_TICKS)
-    _, flat, _ = _explore(mem, mission, embedder, 2, PRE_SATURATION_TICKS, sectored=False)
-    assert len(sectored) > len(flat) * 1.3
+    _, shared_only, _ = _explore(mem, mission, embedder, 2, PRE_SATURATION_TICKS,
+                                 sectored=False)
+    assert len(sectored) > len(shared_only) * 1.15
+
+
+def test_two_uncoordinated_scouts_cover_less_than_one_coordinated_scout(mem, mission):
+    """The ON/OFF delta the demo is built on (§3.3 baseline mode).
+
+    With shared memory disabled each scout keeps a private world model, so both
+    sweep the same ground and the second robot buys almost nothing. Measured at
+    30 ticks: 664 tiles for two uncoordinated scouts against 705 for a single
+    coordinated one — a fleet that is worse than useless without the layer.
+    """
+    embedder = BedrockAdapter()
+    _, solo, _ = _explore(mem, mission, embedder, 1, PRE_SATURATION_TICKS)
+
+    world = World(load_map(MAP_PATH), seed=3)
+    world.shared_vision = False                      # coordination OFF
+    scouts = [
+        Scout(robot_id=rid, mission_id=mission, mem=mem, embedder=embedder, seed=i)
+        for i, rid in enumerate(["s1", "s2"])
+    ]
+    for _ in range(PRE_SATURATION_TICKS):
+        world.step({s.robot_id: s.step(world) for s in scouts})
+
+    assert len(world.explored) < len(solo), (
+        "two uncoordinated scouts covered more than one coordinated scout — "
+        "the baseline is not actually uncoordinated"
+    )
 
 
 def test_a_scout_boxed_in_by_walls_idles_rather_than_crashing(mem, mission):
