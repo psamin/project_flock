@@ -19,7 +19,10 @@ MOVE, ACT, IDLE = "move", "act", "idle"
 
 # Screen convention: +y is down, matching map.json row order and the renderer.
 DIRECTIONS: dict[str, tuple[int, int]] = {
-    "n": (0, -1), "s": (0, 1), "e": (1, 0), "w": (-1, 0),
+    "n": (0, -1),
+    "s": (0, 1),
+    "e": (1, 0),
+    "w": (-1, 0),
 }
 
 # Verbs a robot can perform on a target tile. Roles restrict these further
@@ -71,11 +74,20 @@ class Action:
         if kind == ACT:
             verb = data.get("verb")
             if verb not in VERBS:
-                raise InvalidAction(f"unknown verb {verb!r}; expected one of {sorted(VERBS)}")
+                raise InvalidAction(
+                    f"unknown verb {verb!r}; expected one of {sorted(VERBS)}"
+                )
             target = data.get("target")
-            if (not isinstance(target, (list, tuple)) or len(target) != 2
-                    or not all(isinstance(v, int) and not isinstance(v, bool) for v in target)):
-                raise InvalidAction(f"act needs an integer [x, y] target, got {target!r}")
+            if (
+                not isinstance(target, (list, tuple))
+                or len(target) != 2
+                or not all(
+                    isinstance(v, int) and not isinstance(v, bool) for v in target
+                )
+            ):
+                raise InvalidAction(
+                    f"act needs an integer [x, y] target, got {target!r}"
+                )
             return cls.act(verb, (target[0], target[1]))
         if kind == IDLE:
             return cls.idle()

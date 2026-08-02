@@ -53,10 +53,12 @@ def _make_memory():
         from fleetmem.client import CockroachFleetMem
 
         return CockroachFleetMem(), "cockroach"
-    except Exception as exc:                       # noqa: BLE001 - any failure means no cluster
+    except Exception as exc:  # noqa: BLE001 - any failure means no cluster
         from fleetmem.fake import FakeFleetMem
 
-        print(f"[sim] no CockroachDB ({type(exc).__name__}); using in-memory fleet memory")
+        print(
+            f"[sim] no CockroachDB ({type(exc).__name__}); using in-memory fleet memory"
+        )
         return FakeFleetMem(), "fake"
 
 
@@ -121,19 +123,27 @@ class Mission:
         seed_sector_tasks(self.mem, self.mission_id, self.world.map)
         shares = split_sectors(self.world.map.sectors, len(scouts))
         for i, robot in enumerate(scouts):
-            self.mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
+            self.mem.register_robot(
+                robot.id, robot.role, (robot.x, robot.y), robot.battery
+            )
             self.agents[robot.id] = Scout(
-                robot_id=robot.id, mission_id=self.mission_id,
-                mem=self.mem, embedder=embedder, seed=(seed or 0) + i,
+                robot_id=robot.id,
+                mission_id=self.mission_id,
+                mem=self.mem,
+                embedder=embedder,
+                seed=(seed or 0) + i,
                 sectors=shares[i],
             )
         for robot in self.world.robots.values():
             if robot.role in ("lifter", "medic"):
-                self.mem.register_robot(robot.id, robot.role, (robot.x, robot.y),
-                                        robot.battery)
+                self.mem.register_robot(
+                    robot.id, robot.role, (robot.x, robot.y), robot.battery
+                )
                 self.agents[robot.id] = Worker(
-                    robot_id=robot.id, role=robot.role,
-                    mission_id=self.mission_id, mem=self.mem,
+                    robot_id=robot.id,
+                    role=robot.role,
+                    mission_id=self.mission_id,
+                    mem=self.mem,
                 )
 
     def tick_once(self) -> dict[str, Any]:
@@ -144,7 +154,9 @@ class Mission:
         }
         frame = self.world.step(actions)
         for event in frame.events:
-            self.mem.log_event(self.mission_id, event["actor"], event["verb"], event["detail"])
+            self.mem.log_event(
+                self.mission_id, event["actor"], event["verb"], event["detail"]
+            )
         return frame.to_json()
 
     async def run(self) -> None:
@@ -200,8 +212,10 @@ mission = Mission()
 async def lifespan(_: FastAPI):
     """Start the tick loop with the app and stop it cleanly on shutdown."""
     task = asyncio.create_task(mission.run())
-    print(f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-          f"({mission.memory_kind} memory, {len(mission.agents)} scouts)")
+    print(
+        f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
+        f"({mission.memory_kind} memory, {len(mission.agents)} scouts)"
+    )
     try:
         yield
     finally:
@@ -217,8 +231,10 @@ app = FastAPI(title="Colony sim", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
-        "ok": True, "tick": mission.world.tick,
-        "memory": mission.memory_kind, "agents": sorted(mission.agents),
+        "ok": True,
+        "tick": mission.world.tick,
+        "memory": mission.memory_kind,
+        "agents": sorted(mission.agents),
         "metrics": mission.world.metrics(),
     }
 
@@ -231,18 +247,22 @@ async def ws(socket: WebSocket) -> None:
 
     async def watch_for_disconnect() -> None:
         while True:
-            await socket.receive_text()            # viewers are read-only for now
+            await socket.receive_text()  # viewers are read-only for now
 
     # Whichever finishes first ends the connection: the pump raises when the
     # socket dies, the watcher raises when the client disconnects.
-    tasks = [asyncio.create_task(viewer.pump()),
-             asyncio.create_task(watch_for_disconnect())]
+    tasks = [
+        asyncio.create_task(viewer.pump()),
+        asyncio.create_task(watch_for_disconnect()),
+    ]
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         for task in done:
-            with contextlib.suppress(WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+            with contextlib.suppress(
+                WebSocketDisconnect, RuntimeError, asyncio.CancelledError
+            ):
                 task.result()
     finally:
         mission.detach(viewer)

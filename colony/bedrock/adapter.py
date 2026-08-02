@@ -50,14 +50,16 @@ _BOTO_ERRORS = _boto_errors()
 
 # Service-side failures a robot should ride out. Everything else is a bug in our
 # configuration, not weather.
-_TRANSIENT_CODES = frozenset({
-    "ThrottlingException",
-    "ServiceQuotaExceededException",
-    "InternalServerException",
-    "ServiceUnavailableException",
-    "ModelTimeoutException",
-    "ModelNotReadyException",
-})
+_TRANSIENT_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "ServiceQuotaExceededException",
+        "InternalServerException",
+        "ServiceUnavailableException",
+        "ModelTimeoutException",
+        "ModelNotReadyException",
+    }
+)
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -82,10 +84,10 @@ def _is_transient(exc: BaseException) -> bool:
 class Plan:
     """Strict-JSON plan output (§4.3): {task_id | explore(sector) | return_to_base, rationale}."""
 
-    action: str                      # "claim_task" | "explore" | "return_to_base"
+    action: str  # "claim_task" | "explore" | "return_to_base"
     task_id: str | None = None
     sector: str | None = None
-    rationale: str = ""              # surfaced in the UI as the thought bubble
+    rationale: str = ""  # surfaced in the UI as the thought bubble
 
     @classmethod
     def parse(cls, raw: str) -> "Plan":
@@ -137,11 +139,13 @@ class BedrockAdapter:
             cached = self._cassette.get(key)
             return cached if cached is not None else _offline_embedding(text)
 
-        body = json.dumps({
-            "inputText": text,
-            "dimensions": EMBED_DIMS,
-            "normalize": True,
-        })
+        body = json.dumps(
+            {
+                "inputText": text,
+                "dimensions": EMBED_DIMS,
+                "normalize": True,
+            }
+        )
         try:
             response = self._client.invoke_model(modelId=EMBED_MODEL, body=body)
         except _BOTO_ERRORS as exc:
@@ -158,7 +162,9 @@ class BedrockAdapter:
 
     # --- planning ---------------------------------------------------------
 
-    def plan(self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]) -> Plan:
+    def plan(
+        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+    ) -> Plan:
         """Ask for one decision. Prompt stays under ~1.5k tokens by design (§4.3)."""
         # Sorted before the prompt is built, because the prompt text is the
         # cassette key. `open_tasks()` orders by priority alone, so two equal
@@ -175,12 +181,14 @@ class BedrockAdapter:
                 return Plan.parse(cached)
             return _offline_plan(tasks)
 
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 300,
-            "temperature": 0,          # determinism matters more than flair here
-            "messages": [{"role": "user", "content": prompt}],
-        })
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 300,
+                "temperature": 0,  # determinism matters more than flair here
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        )
         try:
             response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
         except _BOTO_ERRORS as exc:
@@ -206,12 +214,17 @@ def _key(kind: str, payload: str) -> str:
     return f"{kind}:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
 
-def _plan_prompt(role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]) -> str:
-    tasks = "\n".join(
-        f"- {t['id']} {t['kind']} at ({t.get('target_x')},{t.get('target_y')})"
-        f" priority={t.get('priority', 1)}"
-        for t in open_tasks
-    ) or "- (none)"
+def _plan_prompt(
+    role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+) -> str:
+    tasks = (
+        "\n".join(
+            f"- {t['id']} {t['kind']} at ({t.get('target_x')},{t.get('target_y')})"
+            f" priority={t.get('priority', 1)}"
+            for t in open_tasks
+        )
+        or "- (none)"
+    )
     return (
         f"{role_card}\n\n"
         f"Shared beliefs:\n{beliefs_digest}\n\n"
@@ -250,8 +263,11 @@ def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:
     """Highest-priority open task, else explore. This is the rule-based path the
     agent falls back to whenever Bedrock is unavailable or rate-capped."""
     if not open_tasks:
-        return Plan(action="explore", sector="nearest-unexplored",
-                    rationale="no open tasks; expanding the frontier")
+        return Plan(
+            action="explore",
+            sector="nearest-unexplored",
+            rationale="no open tasks; expanding the frontier",
+        )
     best = max(open_tasks, key=lambda t: t.get("priority", 1))
     return Plan(
         action="claim_task",

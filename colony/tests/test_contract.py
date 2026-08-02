@@ -14,13 +14,26 @@ from fleetmem.fake import FakeFleetMem
 
 # The published SDK surface (§5.1 lane 1).
 SDK_METHODS = [
-    "report_observation", "get_beliefs", "claim_task", "complete_task",
-    "heartbeat", "log_plan", "log_event",
+    "report_observation",
+    "get_beliefs",
+    "claim_task",
+    "complete_task",
+    "heartbeat",
+    "log_plan",
+    "log_event",
     # lease mechanics (§4.4) — recovery lives here, so the fake must match
-    "renew_leases", "release_task",
+    "renew_leases",
+    "release_task",
     # supporting methods the orchestrator and tests rely on
-    "create_task", "open_tasks", "find_similar", "register_robot", "register_victim",
-    "stale_robots", "events", "plans_for", "close",
+    "create_task",
+    "open_tasks",
+    "find_similar",
+    "register_robot",
+    "register_victim",
+    "stale_robots",
+    "events",
+    "plans_for",
+    "close",
 ]
 
 
@@ -41,7 +54,10 @@ def test_no_undocumented_public_methods_on_the_client():
     """Anything public on the client is something another lane may call, so it
     belongs in the published list above — or it should be private."""
     public = {
-        name for name, _ in inspect.getmembers(CockroachFleetMem, inspect.isfunction)
+        name
+        for name, _ in inspect.getmembers(CockroachFleetMem, inspect.isfunction)
         if not name.startswith("_")
     }
-    assert public <= set(SDK_METHODS), f"undeclared public API: {public - set(SDK_METHODS)}"
+    assert public <= set(SDK_METHODS), (
+        f"undeclared public API: {public - set(SDK_METHODS)}"
+    )

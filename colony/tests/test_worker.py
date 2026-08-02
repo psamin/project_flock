@@ -9,7 +9,6 @@ import uuid
 
 import pytest
 
-from agents.pathing import find_path
 from agents.scout import Scout
 from agents.worker import ROLE_TASKS, SELF_CLAIM_AFTER_TICKS, Worker, allocation_score
 from bedrock.adapter import BedrockAdapter
@@ -20,12 +19,16 @@ from world.map_format import DEBRIS, EMPTY, WALL, parse_map
 
 def _world(width=20, height=20, spawn=None, victims=(), debris=(), walls=()):
     data = {
-        "width": width, "height": height, "tile_size": 32,
+        "width": width,
+        "height": height,
+        "tile_size": 32,
         "layers": {
             "ground": [["open"] * width for _ in range(height)],
             "objects": [[EMPTY] * width for _ in range(height)],
         },
-        "zones": [], "spawn_points": spawn or {}, "victims": list(victims),
+        "zones": [],
+        "spawn_points": spawn or {},
+        "victims": list(victims),
         "escalations": [],
     }
     for x, y in debris:
@@ -97,8 +100,10 @@ def test_a_reachable_victim_needs_no_lifter(mem, mission):
 def test_two_victims_are_both_rescued(mem, mission):
     world = _world(
         spawn={"medic": [{"x": 2, "y": 10}]},
-        victims=[{"id": "v1", "x": 8, "y": 10, "vitals_deadline": 700},
-                 {"id": "v2", "x": 14, "y": 10, "vitals_deadline": 700}],
+        victims=[
+            {"id": "v1", "x": 8, "y": 10, "vitals_deadline": 700},
+            {"id": "v2", "x": 14, "y": 10, "vitals_deadline": 700},
+        ],
     )
     mem.register_victim(mission, (8, 10), reported_by="s1")
     mem.register_victim(mission, (14, 10), reported_by="s1")
@@ -123,7 +128,9 @@ def test_a_role_only_claims_its_own_work(mem, mission):
     assert len(mem.open_tasks(mission)) == 1, "the medic took work it cannot do"
 
 
-@pytest.mark.parametrize("role,kind", [("lifter", "clear_debris"), ("medic", "deliver_kit")])
+@pytest.mark.parametrize(
+    "role,kind", [("lifter", "clear_debris"), ("medic", "deliver_kit")]
+)
 def test_role_task_mapping_matches_the_stat_blocks(role, kind):
     assert kind in ROLE_TASKS[role]
 
@@ -139,7 +146,7 @@ def test_two_lifters_never_hold_the_same_task(mem, mission):
 
     a = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
     b = Worker(robot_id="l2", role="lifter", mission_id=mission, mem=mem)
-    _run(world, [a, b], 2)          # claimed on the first tick; still en route
+    _run(world, [a, b], 2)  # claimed on the first tick; still en route
 
     holders = [w.robot_id for w in (a, b) if w.task is not None]
     assert len(holders) == 1, f"both lifters hold the task: {holders}"
@@ -168,7 +175,7 @@ def test_an_unreachable_task_is_released_rather_than_held(mem, mission):
 def test_work_already_done_is_completed_not_repeated(mem, mission):
     """The aftershock, or another robot, can finish a task out from under its
     owner. Re-attempting forever would deadlock the chain behind it."""
-    world = _world(spawn={"lifter": [{"x": 8, "y": 10}]})   # no debris at all
+    world = _world(spawn={"lifter": [{"x": 8, "y": 10}]})  # no debris at all
     task = mem.create_task(mission, "clear_debris", (9, 10))
 
     lifter = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
@@ -201,7 +208,7 @@ def test_a_held_task_keeps_its_lease_alive(mem, mission):
     task = mem.create_task(mission, "clear_debris", (9, 10))
     lifter = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
 
-    _run(world, [lifter], 2)        # claimed, walking to the debris
+    _run(world, [lifter], 2)  # claimed, walking to the debris
     assert lifter.task is not None
 
     # Another robot must not be able to take live work.
@@ -212,15 +219,24 @@ def test_a_held_task_keeps_its_lease_alive(mem, mission):
 
 
 def _task(kind="clear_debris", target=(5, 5), priority=1):
-    return Task(id=uuid.uuid4(), mission_id=uuid.uuid4(), kind=kind,
-                target=target, status="open", priority=priority)
+    return Task(
+        id=uuid.uuid4(),
+        mission_id=uuid.uuid4(),
+        kind=kind,
+        target=target,
+        status="open",
+        priority=priority,
+    )
 
 
 def test_role_match_dominates_the_score():
     """2.0·role_match is the largest single term for a reason: a distant lifter
     should still beat a nearby medic for clearing debris."""
-    world = _world(width=40, height=30,
-                   spawn={"lifter": [{"x": 30, "y": 10}], "medic": [{"x": 5, "y": 5}]})
+    world = _world(
+        width=40,
+        height=30,
+        spawn={"lifter": [{"x": 30, "y": 10}], "medic": [{"x": 5, "y": 5}]},
+    )
     far_lifter = world.robots["l1"]
     near_medic = world.robots["m1"]
     task = _task("clear_debris", (5, 5))
@@ -252,7 +268,9 @@ def test_priority_outranks_distance():
 
 def test_a_task_with_no_target_scores_without_crashing():
     world = _world(spawn={"lifter": [{"x": 5, "y": 5}]})
-    assert allocation_score("lifter", world.robots["l1"], _task(target=(None, None))) > 0
+    assert (
+        allocation_score("lifter", world.robots["l1"], _task(target=(None, None))) > 0
+    )
 
 
 # --- scout hand-off into the chain ------------------------------------------
@@ -285,4 +303,4 @@ def test_with_no_orchestrator_a_robot_claims_immediately(mem, mission):
     lifter.step(world)
 
     assert lifter.task is not None, "the fleet sat idle with work available"
-    assert SELF_CLAIM_AFTER_TICKS > 0                 # kept for when one exists
+    assert SELF_CLAIM_AFTER_TICKS > 0  # kept for when one exists

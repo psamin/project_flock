@@ -11,7 +11,15 @@ from tests.conftest import needs_db
 
 pytestmark = needs_db
 
-TABLES = ["robots", "tasks", "observations", "victims", "hazards", "events", "mission_memories"]
+TABLES = [
+    "robots",
+    "tasks",
+    "observations",
+    "victims",
+    "hazards",
+    "events",
+    "mission_memories",
+]
 
 
 def test_all_tables_exist(db):
@@ -37,9 +45,12 @@ def test_vector_index_exists_and_uses_cosine(db):
     names = {r["index_name"] for r in rows}
     assert "obs_embedding_idx" in names, names
 
-    create = db.conn.execute("SHOW CREATE TABLE observations").fetchone()["create_statement"]
+    create = db.conn.execute("SHOW CREATE TABLE observations").fetchone()[
+        "create_statement"
+    ]
     assert "vector_cosine_ops" in create, (
-        "vector index is not built for cosine; the <=> reconcile gate will full-scan\n" + create
+        "vector index is not built for cosine; the <=> reconcile gate will full-scan\n"
+        + create
     )
 
 
@@ -54,13 +65,16 @@ def test_cosine_query_actually_uses_the_index(db, mission):
             (mission, i, i, vec),
         )
     plan = "\n".join(
-        r["info"] for r in db.conn.execute(
+        r["info"]
+        for r in db.conn.execute(
             "EXPLAIN SELECT id FROM observations WHERE mission_id = %s"
             " ORDER BY embedding <=> %s LIMIT 5",
             (mission, vec),
         ).fetchall()
     )
-    assert "vector search" in plan, f"cosine query is not using the vector index:\n{plan}"
+    assert "vector search" in plan, (
+        f"cosine query is not using the vector index:\n{plan}"
+    )
     assert "obs_embedding_idx" in plan, plan
 
 

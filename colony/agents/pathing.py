@@ -125,6 +125,7 @@ def find_move_plan(
     executable by construction rather than by luck. Speed is a parameter, not an
     assumption, so this works unchanged for a speed-1 lifter and a speed-3 scout.
     """
+
     def reached(point: Point) -> bool:
         if goal_is_adjacent:
             return abs(point[0] - goal[0]) + abs(point[1] - goal[1]) <= 1
@@ -137,7 +138,9 @@ def find_move_plan(
         # Manhattan distance divided by the furthest one move can carry us:
         # admissible, so the search stays optimal.
         gap = abs(point[0] - goal[0]) + abs(point[1] - goal[1])
-        return (max(0, gap - (1 if goal_is_adjacent else 0)) + speed - 1) // max(1, speed)
+        return (max(0, gap - (1 if goal_is_adjacent else 0)) + speed - 1) // max(
+            1, speed
+        )
 
     counter = 0
     frontier: list[tuple[int, int, Point]] = [(heuristic(start), counter, start)]
@@ -154,10 +157,10 @@ def find_move_plan(
         if expansions > max_expansions:
             return None
 
-        for direction in sorted(DIRECTIONS):     # sorted: deterministic ties
+        for direction in sorted(DIRECTIONS):  # sorted: deterministic ties
             nxt = landing(current, direction)
             if nxt == current:
-                continue                          # this move goes nowhere
+                continue  # this move goes nowhere
             steps = best[current] + 1
             if steps >= best.get(nxt, 1 << 30):
                 continue
@@ -185,7 +188,7 @@ def _rebuild(came_from: dict[Point, Point], start: Point, end: Point) -> list[Po
     while route[-1] != start:
         route.append(came_from[route[-1]])
     route.reverse()
-    return route[1:]        # drop the tile we are standing on
+    return route[1:]  # drop the tile we are standing on
 
 
 def direction_towards(here: Point, there: Point) -> str | None:

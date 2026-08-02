@@ -10,12 +10,17 @@ from tests.test_map import MAP_PATH
 
 def _grid(width=10, height=10, walls=(), debris=()):
     data = {
-        "width": width, "height": height, "tile_size": 32,
+        "width": width,
+        "height": height,
+        "tile_size": 32,
         "layers": {
             "ground": [["open"] * width for _ in range(height)],
             "objects": [[EMPTY] * width for _ in range(height)],
         },
-        "zones": [], "spawn_points": {}, "victims": [], "escalations": [],
+        "zones": [],
+        "spawn_points": {},
+        "victims": [],
+        "escalations": [],
     }
     for x, y in walls:
         data["layers"]["ground"][y][x] = WALL
@@ -106,6 +111,15 @@ def test_debris_ringed_by_walls_is_unreachable():
 # --- costs -------------------------------------------------------------------
 
 
+def _unstable_costs_double(world):
+    """§3.3 halves speed on unstable ground, so crossing it costs twice."""
+
+    def cost(point):
+        return 2 if world.ground[point[1]][point[0]] == "unstable" else 1
+
+    return cost
+
+
 def test_unstable_ground_is_avoided_when_a_cheaper_way_exists():
     """§3.3 halves speed on unstable tiles, so crossing one costs double — but
     it stays passable, since a short unstable route can still beat a long
@@ -114,8 +128,7 @@ def test_unstable_ground_is_avoided_when_a_cheaper_way_exists():
     for x in range(6):
         world.ground[1][x] = "unstable"
 
-    cost = lambda p: 2 if world.ground[p[1]][p[0]] == "unstable" else 1
-    route = find_path((0, 0), (5, 0), _walkable(world), cost=cost)
+    route = find_path((0, 0), (5, 0), _walkable(world), cost=_unstable_costs_double(world))
 
     assert all(world.ground[y][x] != "unstable" for x, y in route)
 
@@ -127,8 +140,7 @@ def test_a_short_unstable_route_still_beats_a_long_detour():
         world.ground[y][x] = WALL
     world.ground[4][4] = "unstable"
 
-    cost = lambda p: 2 if world.ground[p[1]][p[0]] == "unstable" else 1
-    route = find_path((0, 4), (8, 4), _walkable(world), cost=cost)
+    route = find_path((0, 4), (8, 4), _walkable(world), cost=_unstable_costs_double(world))
 
     assert route is not None and (4, 4) in route
 
@@ -154,7 +166,9 @@ def test_routes_are_deterministic():
 def test_it_routes_on_the_real_map():
     """The demo map, not a fixture: staging to the far side of the office."""
     world = World(load_map(MAP_PATH), seed=0)
-    route = find_path((2, 2), (35, 20), lambda p: world.passable(p[0], p[1], flying=True))
+    route = find_path(
+        (2, 2), (35, 20), lambda p: world.passable(p[0], p[1], flying=True)
+    )
     assert route is not None and route[-1] == (35, 20)
 
 
@@ -167,9 +181,15 @@ def test_off_map_tiles_are_never_entered():
 # --- direction helper --------------------------------------------------------
 
 
-@pytest.mark.parametrize("there,expected", [
-    ((1, 0), "e"), ((-1, 0), "w"), ((0, 1), "s"), ((0, -1), "n"),
-])
+@pytest.mark.parametrize(
+    "there,expected",
+    [
+        ((1, 0), "e"),
+        ((-1, 0), "w"),
+        ((0, 1), "s"),
+        ((0, -1), "n"),
+    ],
+)
 def test_direction_towards_an_adjacent_tile(there, expected):
     assert direction_towards((0, 0), there) == expected
 

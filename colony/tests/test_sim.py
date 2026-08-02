@@ -2,7 +2,7 @@
 
 import pytest
 
-from sim.protocol import DIRECTIONS, Action, InvalidAction, StateFrame
+from sim.protocol import Action, InvalidAction
 from sim.world import FIRE_SPREAD_TICKS, ROLES, World
 from world.map_format import DEBRIS, EMPTY, FIRE, WALL, load_map, parse_map
 from tests.test_map import MAP_PATH
@@ -16,12 +16,17 @@ def world():
 def _flat(width=10, height=10, **extra):
     """A featureless map, so a test failure means the thing under test broke."""
     data = {
-        "width": width, "height": height, "tile_size": 32,
+        "width": width,
+        "height": height,
+        "tile_size": 32,
         "layers": {
             "ground": [["open"] * width for _ in range(height)],
             "objects": [[EMPTY] * width for _ in range(height)],
         },
-        "zones": [], "spawn_points": {}, "victims": [], "escalations": [],
+        "zones": [],
+        "spawn_points": {},
+        "victims": [],
+        "escalations": [],
         "mission_length_ticks": 1200,
     }
     data.update(extra)
@@ -40,15 +45,18 @@ def test_act_parses():
     assert action.verb == "clear_debris" and action.target == (3, 4)
 
 
-@pytest.mark.parametrize("payload", [
-    {"kind": "fly"},
-    {"kind": "move", "direction": "up"},
-    {"kind": "move"},
-    {"kind": "act", "verb": "teleport", "target": [1, 1]},
-    {"kind": "act", "verb": "clear_debris"},
-    {"kind": "act", "verb": "clear_debris", "target": [1]},
-    {"kind": "act", "verb": "clear_debris", "target": ["a", "b"]},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "fly"},
+        {"kind": "move", "direction": "up"},
+        {"kind": "move"},
+        {"kind": "act", "verb": "teleport", "target": [1, 1]},
+        {"kind": "act", "verb": "clear_debris"},
+        {"kind": "act", "verb": "clear_debris", "target": [1]},
+        {"kind": "act", "verb": "clear_debris", "target": ["a", "b"]},
+    ],
+)
 def test_malformed_actions_are_refused(payload):
     """A confused agent gets a rejection with a reason, not a traceback in the
     tick loop."""
@@ -96,7 +104,9 @@ def test_a_robot_cannot_walk_through_a_wall():
 
 
 def test_a_scout_flies_over_debris_but_a_lifter_does_not():
-    data = _flat(spawn_points={"scout": [{"x": 5, "y": 5}], "lifter": [{"x": 5, "y": 7}]})
+    data = _flat(
+        spawn_points={"scout": [{"x": 5, "y": 5}], "lifter": [{"x": 5, "y": 7}]}
+    )
     data["layers"]["objects"][5][6] = DEBRIS
     data["layers"]["objects"][7][6] = DEBRIS
     world = World(parse_map(data), seed=0)
@@ -104,7 +114,9 @@ def test_a_scout_flies_over_debris_but_a_lifter_does_not():
     world.step({"s1": Action.move("e"), "l1": Action.move("e")})
 
     assert world.robots["s1"].x > 5, "scout should fly over debris"
-    assert (world.robots["l1"].x, world.robots["l1"].y) == (5, 7), "lifter should be blocked"
+    assert (world.robots["l1"].x, world.robots["l1"].y) == (5, 7), (
+        "lifter should be blocked"
+    )
 
 
 def test_fire_blocks_everyone():
@@ -116,9 +128,11 @@ def test_fire_blocks_everyone():
 
 
 def test_two_ground_robots_cannot_share_a_tile():
-    data = _flat(spawn_points={"lifter": [{"x": 5, "y": 5}], "medic": [{"x": 7, "y": 5}]})
+    data = _flat(
+        spawn_points={"lifter": [{"x": 5, "y": 5}], "medic": [{"x": 7, "y": 5}]}
+    )
     world = World(parse_map(data), seed=0)
-    world.step({"l1": Action.move("e")})       # -> (6,5)
+    world.step({"l1": Action.move("e")})  # -> (6,5)
     frame = world.step({"m1": Action.move("w")})  # would also be (6,5)
     assert (world.robots["m1"].x, world.robots["m1"].y) == (7, 5)
     assert any(e["verb"] == "action_rejected" for e in frame.events)
@@ -134,12 +148,16 @@ def test_moving_off_the_map_is_refused():
 
 
 def test_clearing_debris_takes_three_ticks_and_only_a_lifter_can_do_it():
-    data = _flat(spawn_points={"lifter": [{"x": 5, "y": 5}], "scout": [{"x": 1, "y": 1}]})
+    data = _flat(
+        spawn_points={"lifter": [{"x": 5, "y": 5}], "scout": [{"x": 1, "y": 1}]}
+    )
     data["layers"]["objects"][5][6] = DEBRIS
     world = World(parse_map(data), seed=0)
 
     world.step({"l1": Action.act("clear_debris", (6, 5))})
-    assert world.objects[5][6] == DEBRIS, "cleared instantly — the work timer did nothing"
+    assert world.objects[5][6] == DEBRIS, (
+        "cleared instantly — the work timer did nothing"
+    )
     world.step({})
     world.step({})
     assert world.objects[5][6] == EMPTY
@@ -226,7 +244,7 @@ def test_the_aftershock_fires_once_and_changes_the_world(world):
         world.step({})
     blocked_before = world.passable(6, 19)
 
-    frame = world.step({})   # tick 300
+    frame = world.step({})  # tick 300
 
     assert any(e["verb"] == "aftershock" for e in frame.events)
     assert blocked_before and not world.passable(6, 19), "corridor was not re-blocked"
@@ -246,17 +264,21 @@ def test_a_scout_sees_only_within_its_vision_radius():
     world = World(parse_map(data), seed=0)
     percept = world.percept("s1")
     radius = ROLES["scout"]["vision"]
-    assert all(abs(t["x"] - 20) <= radius and abs(t["y"] - 15) <= radius
-               for t in percept.tiles)
+    assert all(
+        abs(t["x"] - 20) <= radius and abs(t["y"] - 15) <= radius for t in percept.tiles
+    )
     assert len(percept.tiles) == (2 * radius + 1) ** 2
 
 
 def test_seeing_a_victim_marks_it_located_and_logs_it():
     data = _flat(
         spawn_points={"scout": [{"x": 5, "y": 5}]},
-        victims=[{"id": "v1", "x": 7, "y": 5, "vitals_deadline": 700},
-                 {"id": "v2", "x": 39, "y": 29, "vitals_deadline": 700}],
-        width=40, height=30,
+        victims=[
+            {"id": "v1", "x": 7, "y": 5, "vitals_deadline": 700},
+            {"id": "v2", "x": 39, "y": 29, "vitals_deadline": 700},
+        ],
+        width=40,
+        height=30,
     )
     world = World(parse_map(data), seed=0)
     world.tick = 1
@@ -291,6 +313,7 @@ def test_a_quiet_tick_produces_no_tile_diff(world):
 
 def test_same_seed_and_actions_give_the_same_mission():
     """The property the golden demo run depends on."""
+
     def run():
         world = World(load_map(MAP_PATH), seed=42)
         frames = []
@@ -304,6 +327,7 @@ def test_same_seed_and_actions_give_the_same_mission():
 
 def test_different_seeds_diverge():
     """If the seed did nothing, the determinism test above would be vacuous."""
+
     def run(seed):
         data = _flat(spawn_points={})
         data["layers"]["objects"][5][5] = FIRE
@@ -334,13 +358,14 @@ def test_percept_events_survive_the_tick_that_follows():
     shown in the ticker. The old tests missed it by calling percept() without a
     following step()."""
     data = _flat(
-        width=20, height=20,
+        width=20,
+        height=20,
         spawn_points={"scout": [{"x": 10, "y": 10}]},
         victims=[{"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700}],
     )
     world = World(parse_map(data), seed=0)
 
-    world.percept("s1")                       # sees the victim
+    world.percept("s1")  # sees the victim
     frame = world.step({"s1": Action.idle()})  # the tick that follows
 
     assert any(e["verb"] == "victim_found" for e in frame.events), (
@@ -351,7 +376,8 @@ def test_percept_events_survive_the_tick_that_follows():
 def test_events_are_not_delivered_twice():
     """The other half: draining on emit rather than never clearing."""
     data = _flat(
-        width=20, height=20,
+        width=20,
+        height=20,
         spawn_points={"scout": [{"x": 10, "y": 10}]},
         victims=[{"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700}],
     )
@@ -413,8 +439,11 @@ def test_a_tile_is_explored_once_a_robot_sees_it():
 def test_exploration_is_shared_across_the_fleet():
     """The coordinated-mode promise (§4.8): any robot's vision reveals for all,
     which is the visible difference the ON/OFF toggle demonstrates."""
-    data = _flat(width=30, height=20,
-                 spawn_points={"scout": [{"x": 5, "y": 5}], "medic": [{"x": 25, "y": 15}]})
+    data = _flat(
+        width=30,
+        height=20,
+        spawn_points={"scout": [{"x": 5, "y": 5}], "medic": [{"x": 25, "y": 15}]},
+    )
     world = World(parse_map(data), seed=0)
 
     world.percept("s1")

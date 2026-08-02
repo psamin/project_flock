@@ -13,7 +13,6 @@ import pytest
 
 from bedrock.adapter import EMBED_DIMS, BedrockAdapter
 from tests.conftest import needs_db
-from fleetmem.types import BLOCKED, CLAIMED, DONE, OPEN
 
 
 # --- reconcile gate (§4.2 step 3) -------------------------------------------
@@ -36,9 +35,13 @@ def test_two_robots_seeing_the_same_thing_produce_one_belief(mem, mission):
 
 def test_confidence_rises_with_corroboration(mem, mission):
     vec = BedrockAdapter().embed("hazard: fire spreading")
-    mem.report_observation(mission, "s1", "hazard", (5, 5), embedding=vec, confidence=0.5)
+    mem.report_observation(
+        mission, "s1", "hazard", (5, 5), embedding=vec, confidence=0.5
+    )
     before = mem.get_beliefs(mission, kind="hazard")[0].confidence
-    mem.report_observation(mission, "s2", "hazard", (5, 5), embedding=vec, confidence=0.5)
+    mem.report_observation(
+        mission, "s2", "hazard", (5, 5), embedding=vec, confidence=0.5
+    )
     after = mem.get_beliefs(mission, kind="hazard")[0].confidence
     assert after > before
 
@@ -107,7 +110,10 @@ def test_merge_survives_nearer_but_ineligible_beliefs(mem, mission):
     mem.report_observation(mission, "s1", "victim", (14, 9), embedding=stored)
     for i, pos in enumerate(DECOY_POSITIONS):
         mem.report_observation(
-            mission, "s2", "victim", pos,
+            mission,
+            "s2",
+            "victim",
+            pos,
             embedding=_blend(second_sighting, _unit(f"decoy{i}"), 0.004),
         )
 
@@ -183,10 +189,14 @@ def test_a_task_waits_for_every_dependency(mem, mission):
     depends on two clears. One finishing must not open it."""
     first = mem.create_task(mission, "clear_debris", (3, 27))
     second = mem.create_task(mission, "clear_debris", (4, 27))
-    deliver = mem.create_task(mission, "deliver_kit", (3, 27), depends_on=[first, second])
+    deliver = mem.create_task(
+        mission, "deliver_kit", (3, 27), depends_on=[first, second]
+    )
 
     mem.claim_task(first, "l1")
-    assert mem.complete_task(first, "l1") == [], "opened before all dependencies were done"
+    assert mem.complete_task(first, "l1") == [], (
+        "opened before all dependencies were done"
+    )
 
     mem.claim_task(second, "l1")
     assert mem.complete_task(second, "l1") == [deliver]
@@ -248,7 +258,9 @@ def test_a_plan_records_the_memories_that_drove_it(mem, mission):
     b = mem.report_observation(mission, "s1", "hazard", (20, 9))
 
     plan_id = mem.log_plan(
-        mission, "l1", trigger="task_done",
+        mission,
+        "l1",
+        trigger="task_done",
         chosen={"action": "claim_task", "task_id": "t1"},
         rationale="closest reachable victim, route avoids the fire",
         based_on=[a, b],
@@ -426,7 +438,7 @@ def test_completion_reports_whether_it_applied(mem, mission):
 
     taken = mem.create_task(mission, "clear_debris", (2, 2))
     mem.claim_task(taken, "l1", lease_seconds=-1)
-    assert mem.claim_task(taken, "l2") is True          # lease lapsed, taken over
+    assert mem.claim_task(taken, "l2") is True  # lease lapsed, taken over
     assert mem.complete_task(taken, "l1") is None, "the old owner completed it anyway"
 
 
@@ -438,11 +450,17 @@ def test_a_worker_records_why_it_chose_a_task(mem, mission):
     from world.map_format import EMPTY, parse_map
 
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
-        "zones": [], "spawn_points": {"medic": [{"x": 2, "y": 10}]},
-        "victims": [], "escalations": [],
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
+        "zones": [],
+        "spawn_points": {"medic": [{"x": 2, "y": 10}]},
+        "victims": [],
+        "escalations": [],
     }
     world = World(parse_map(data), seed=0)
     mem.report_observation(mission, "s1", "victim", (10, 10))

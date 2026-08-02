@@ -9,7 +9,13 @@ import json
 import pytest
 
 from bedrock.adapter import (
-    EMBED_DIMS, LIVE, RECORD, REPLAY, BedrockAdapter, Plan, adapter_from_env,
+    EMBED_DIMS,
+    LIVE,
+    RECORD,
+    REPLAY,
+    BedrockAdapter,
+    Plan,
+    adapter_from_env,
 )
 
 
@@ -48,13 +54,19 @@ def test_replay_mode_makes_no_network_calls():
 
 def test_parses_strict_json():
     plan = Plan.parse('{"action":"claim_task","task_id":"abc","rationale":"closest"}')
-    assert (plan.action, plan.task_id, plan.rationale) == ("claim_task", "abc", "closest")
+    assert (plan.action, plan.task_id, plan.rationale) == (
+        "claim_task",
+        "abc",
+        "closest",
+    )
 
 
 def test_parses_json_wrapped_in_prose_or_fences():
     """Models add preambles. A plan that fails to parse would stall a robot
     mid-mission, so the parser is deliberately forgiving."""
-    plan = Plan.parse('Sure!\n```json\n{"action":"explore","sector":"C"}\n```\nHope that helps.')
+    plan = Plan.parse(
+        'Sure!\n```json\n{"action":"explore","sector":"C"}\n```\nHope that helps.'
+    )
     assert plan.action == "explore"
     assert plan.sector == "C"
 
@@ -91,7 +103,9 @@ def test_equal_priority_tasks_plan_identically_regardless_of_input_order():
         {"id": "bbb", "kind": "clear_debris", "priority": 5},
     ]
     forward = BedrockAdapter().plan("lifter", "debris everywhere", tasks)
-    reversed_ = BedrockAdapter().plan("lifter", "debris everywhere", list(reversed(tasks)))
+    reversed_ = BedrockAdapter().plan(
+        "lifter", "debris everywhere", list(reversed(tasks))
+    )
     assert forward.task_id == reversed_.task_id
 
 
@@ -99,8 +113,20 @@ def test_cassette_key_is_order_independent(tmp_path):
     from bedrock.adapter import _key, _plan_prompt
 
     tasks = [
-        {"id": "aaa", "kind": "clear_debris", "priority": 5, "target_x": 1, "target_y": 1},
-        {"id": "bbb", "kind": "clear_debris", "priority": 5, "target_x": 2, "target_y": 2},
+        {
+            "id": "aaa",
+            "kind": "clear_debris",
+            "priority": 5,
+            "target_x": 1,
+            "target_y": 1,
+        },
+        {
+            "id": "bbb",
+            "kind": "clear_debris",
+            "priority": 5,
+            "target_x": 2,
+            "target_y": 2,
+        },
     ]
     ordered = sorted(tasks, key=lambda t: (-t["priority"], str(t["id"])))
     ordered_reversed = sorted(
@@ -130,14 +156,17 @@ def test_a_throttled_bedrock_call_falls_back_instead_of_stalling_a_robot(monkeyp
     monkeypatch.setattr("boto3.client", lambda *a, **k: Throttled())
     adapter = BedrockAdapter(mode=LIVE)
 
-    plan = adapter.plan("lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}])
+    plan = adapter.plan(
+        "lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}]
+    )
     assert plan.action == "claim_task" and plan.task_id == "t1"
 
     assert len(adapter.embed("victim under rubble")) == EMBED_DIMS
 
 
 @pytest.mark.parametrize(
-    "code", ["AccessDeniedException", "ValidationException", "ResourceNotFoundException"]
+    "code",
+    ["AccessDeniedException", "ValidationException", "ResourceNotFoundException"],
 )
 def test_a_misconfiguration_surfaces_instead_of_falling_back(monkeypatch, code):
     """Bedrock raises ClientError for a broken IAM policy, a revoked model-access
@@ -149,13 +178,17 @@ def test_a_misconfiguration_surfaces_instead_of_falling_back(monkeypatch, code):
 
     class Broken:
         def invoke_model(self, **kwargs):
-            raise ClientError({"Error": {"Code": code, "Message": "nope"}}, "InvokeModel")
+            raise ClientError(
+                {"Error": {"Code": code, "Message": "nope"}}, "InvokeModel"
+            )
 
     monkeypatch.setattr("boto3.client", lambda *a, **k: Broken())
     adapter = BedrockAdapter(mode=LIVE)
 
     with pytest.raises(ClientError):
-        adapter.plan("lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}])
+        adapter.plan(
+            "lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}]
+        )
     with pytest.raises(ClientError):
         adapter.embed("victim under rubble")
 
@@ -167,7 +200,9 @@ def test_a_transport_failure_still_falls_back(monkeypatch):
 
     class Timeout:
         def invoke_model(self, **kwargs):
-            raise ConnectTimeoutError(endpoint_url="https://bedrock-runtime.amazonaws.com")
+            raise ConnectTimeoutError(
+                endpoint_url="https://bedrock-runtime.amazonaws.com"
+            )
 
     monkeypatch.setattr("boto3.client", lambda *a, **k: Timeout())
     adapter = BedrockAdapter(mode=LIVE)
@@ -178,9 +213,11 @@ def test_plan_always_carries_a_rationale():
     """Rationales are surfaced as thought bubbles (§3.6) — an empty one is a
     blank bubble in the demo video."""
     assert BedrockAdapter().plan("scout", "nothing", []).rationale
-    assert BedrockAdapter().plan(
-        "lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}]
-    ).rationale
+    assert (
+        BedrockAdapter()
+        .plan("lifter", "debris", [{"id": "t1", "kind": "clear_debris", "priority": 5}])
+        .rationale
+    )
 
 
 # --- cassettes ---------------------------------------------------------------

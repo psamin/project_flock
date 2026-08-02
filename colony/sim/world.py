@@ -20,7 +20,7 @@ from typing import Any
 from sim.protocol import ACT, DIRECTIONS, IDLE, MOVE, Action, StateFrame
 from world.map_format import DEBRIS, EMPTY, FIRE, RUBBLE_HEAVY, UNSTABLE, WorldMap
 
-FIRE_SPREAD_TICKS = 25          # §3.3: fire spreads every 25 ticks
+FIRE_SPREAD_TICKS = 25  # §3.3: fire spreads every 25 ticks
 CLEAR_TICKS = {DEBRIS: 3, RUBBLE_HEAVY: 6}
 STABILIZE_TICKS = 2
 
@@ -29,9 +29,9 @@ STABILIZE_TICKS = 2
 # Keeping it one action per tick leaves contract 2 simple — an agent that had to
 # submit a list would have to know each role's speed to fill it.
 ROLES: dict[str, dict[str, int]] = {
-    "scout":  {"speed": 3, "vision": 6, "battery": 120},
+    "scout": {"speed": 3, "vision": 6, "battery": 120},
     "lifter": {"speed": 1, "vision": 2, "battery": 300},
-    "medic":  {"speed": 2, "vision": 3, "battery": 200},
+    "medic": {"speed": 2, "vision": 3, "battery": 200},
 }
 
 
@@ -45,7 +45,7 @@ class Robot:
     status: str = "idle"
     battery: int = 0
     bubble: str = ""
-    work_left: int = 0            # ticks remaining on the current act()
+    work_left: int = 0  # ticks remaining on the current act()
     work_target: tuple[int, int] | None = None
 
     @property
@@ -54,13 +54,18 @@ class Robot:
 
     @property
     def flying(self) -> bool:
-        return self.role == "scout"    # §3.3: the scout drone flies over debris
+        return self.role == "scout"  # §3.3: the scout drone flies over debris
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "id": self.id, "role": self.role, "x": self.x, "y": self.y,
-            "facing": self.facing, "status": self.status,
-            "battery": self.battery, "bubble": self.bubble,
+            "id": self.id,
+            "role": self.role,
+            "x": self.x,
+            "y": self.y,
+            "facing": self.facing,
+            "status": self.status,
+            "battery": self.battery,
+            "bubble": self.bubble,
         }
 
 
@@ -75,8 +80,12 @@ class Victim:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "id": self.id, "x": self.x, "y": self.y, "state": self.state,
-            "vitals_deadline": self.vitals_deadline, "found_at": self.found_at,
+            "id": self.id,
+            "x": self.x,
+            "y": self.y,
+            "state": self.state,
+            "vitals_deadline": self.vitals_deadline,
+            "found_at": self.found_at,
         }
 
 
@@ -102,8 +111,11 @@ class World:
         self.robots: dict[str, Robot] = {}
         self.victims: dict[str, Victim] = {
             v["id"]: Victim(
-                id=v["id"], x=v["x"], y=v["y"],
-                vitals_deadline=v["vitals_deadline"], state=v.get("state", "unknown"),
+                id=v["id"],
+                x=v["x"],
+                y=v["y"],
+                vitals_deadline=v["vitals_deadline"],
+                state=v.get("state", "unknown"),
             )
             for v in world_map.victims
         }
@@ -129,7 +141,10 @@ class World:
             for i, point in enumerate(points, start=1):
                 robot_id = f"{role[0]}{i}"
                 self.robots[robot_id] = Robot(
-                    id=robot_id, role=role, x=point["x"], y=point["y"],
+                    id=robot_id,
+                    role=role,
+                    x=point["x"],
+                    y=point["y"],
                     battery=ROLES[role]["battery"],
                 )
 
@@ -174,7 +189,7 @@ class World:
         # quiet agent silently froze the job it had already started.
         for robot_id, robot in self.robots.items():
             if robot.work_left > 0:
-                self._advance_work(robot)      # committed until the job finishes
+                self._advance_work(robot)  # committed until the job finishes
                 continue
             action = submitted.get(robot_id)
             if action is not None:
@@ -253,8 +268,9 @@ class World:
 
         self._reject(robot, f"verb {action.verb!r} is not implemented yet")
 
-    def _start_work(self, robot: Robot, status: str, target: tuple[int, int],
-                    ticks: int) -> None:
+    def _start_work(
+        self, robot: Robot, status: str, target: tuple[int, int], ticks: int
+    ) -> None:
         """Begin a timed job. The tick that starts the work counts as the first
         tick of it, so `clear_debris` costs the 3 ticks §3.3 specifies rather
         than 4."""
@@ -302,7 +318,8 @@ class World:
             for x in range(self.map.width)
             if self.objects[y][x] == FIRE
             for dx, dy in DIRECTIONS.values()
-            if 0 <= x + dx < self.map.width and 0 <= y + dy < self.map.height
+            if 0 <= x + dx < self.map.width
+            and 0 <= y + dy < self.map.height
             and self.ground[y + dy][x + dx] != "wall"
             and self.objects[y + dy][x + dx] != FIRE
         ]
@@ -336,15 +353,21 @@ class World:
                 self._tile_changed(tile["x"], tile["y"])
             for victim in esc.get("reveal_victims", []):
                 self.victims[victim["id"]] = Victim(
-                    id=victim["id"], x=victim["x"], y=victim["y"],
+                    id=victim["id"],
+                    x=victim["x"],
+                    y=victim["y"],
                     vitals_deadline=victim["vitals_deadline"],
                     state=victim.get("state", "unknown"),
                 )
-            self._event("world", esc["kind"], {
-                "screen_shake": esc.get("screen_shake", False),
-                "blocked": len(esc.get("block_tiles", [])),
-                "revealed": [v["id"] for v in esc.get("reveal_victims", [])],
-            })
+            self._event(
+                "world",
+                esc["kind"],
+                {
+                    "screen_shake": esc.get("screen_shake", False),
+                    "blocked": len(esc.get("block_tiles", [])),
+                    "revealed": [v["id"] for v in esc.get("reveal_victims", [])],
+                },
+            )
 
     # --- percepts ---------------------------------------------------------
 
@@ -359,10 +382,12 @@ class World:
         """
         for robot_id, robot in self.robots.items():
             radius = robot.vision
-            for y in range(max(0, robot.y - radius),
-                           min(self.map.height, robot.y + radius + 1)):
-                for x in range(max(0, robot.x - radius),
-                               min(self.map.width, robot.x + radius + 1)):
+            for y in range(
+                max(0, robot.y - radius), min(self.map.height, robot.y + radius + 1)
+            ):
+                for x in range(
+                    max(0, robot.x - radius), min(self.map.width, robot.x + radius + 1)
+                ):
                     self._reveal(robot_id, (x, y))
 
             # Duplicate-effort (§4.7) is about redundant *visits* — ground a
@@ -376,13 +401,18 @@ class World:
                 self._event(robot_id, "tile_visited", {"x": here[0], "y": here[1]})
 
             for victim in self.victims.values():
-                if (abs(victim.x - robot.x) <= radius
-                        and abs(victim.y - robot.y) <= radius
-                        and victim.state == "unknown"):
+                if (
+                    abs(victim.x - robot.x) <= radius
+                    and abs(victim.y - robot.y) <= radius
+                    and victim.state == "unknown"
+                ):
                     victim.state = "located"
                     victim.found_at = self.tick
-                    self._event(robot_id, "victim_found",
-                                {"victim": victim.id, "x": victim.x, "y": victim.y})
+                    self._event(
+                        robot_id,
+                        "victim_found",
+                        {"victim": victim.id, "x": victim.x, "y": victim.y},
+                    )
 
     def percept(self, robot_id: str) -> Percept:
         """Local vision only — the shared map comes from fleetmem, not from here.
@@ -399,12 +429,20 @@ class World:
         if not self.explored:
             self._update_vision()
 
-        for y in range(max(0, robot.y - radius), min(self.map.height, robot.y + radius + 1)):
-            for x in range(max(0, robot.x - radius), min(self.map.width, robot.x + radius + 1)):
-                seen.tiles.append({
-                    "x": x, "y": y,
-                    "ground": self.ground[y][x], "object": self.objects[y][x],
-                })
+        for y in range(
+            max(0, robot.y - radius), min(self.map.height, robot.y + radius + 1)
+        ):
+            for x in range(
+                max(0, robot.x - radius), min(self.map.width, robot.x + radius + 1)
+            ):
+                seen.tiles.append(
+                    {
+                        "x": x,
+                        "y": y,
+                        "ground": self.ground[y][x],
+                        "object": self.objects[y][x],
+                    }
+                )
                 if self.objects[y][x] == FIRE:
                     seen.hazards.append({"kind": "fire", "x": x, "y": y})
 
@@ -461,17 +499,20 @@ class World:
     def snapshot(self) -> StateFrame:
         """The full world, sent once when a browser connects."""
         return StateFrame(
-            tick=self.tick, kind="snapshot",
+            tick=self.tick,
+            kind="snapshot",
             robots=[r.to_json() for r in self.robots.values()],
             victims=[v.to_json() for v in self.victims.values()],
             metrics=self.metrics(),
             explored=[list(t) for t in sorted(self.explored)],
             world={
-                "width": self.map.width, "height": self.map.height,
+                "width": self.map.width,
+                "height": self.map.height,
                 "tile_size": self.map.tile_size,
                 "name": self.map.name,
                 "mission_length_ticks": self.map.mission_length_ticks,
-                "ground": self.ground, "objects": self.objects,
+                "ground": self.ground,
+                "objects": self.objects,
                 "zones": self.map.zones,
                 "shared_vision": self.shared_vision,
                 "sectors": self.map.sectors,
@@ -480,7 +521,8 @@ class World:
 
     def _frame(self) -> StateFrame:
         frame = StateFrame(
-            tick=self.tick, kind="diff",
+            tick=self.tick,
+            kind="diff",
             robots=[r.to_json() for r in self.robots.values()],
             victims=[v.to_json() for v in self.victims.values()],
             tiles_changed=list(self._tiles_changed),
@@ -488,7 +530,7 @@ class World:
             events=list(self.events),
             metrics=self.metrics(),
         )
-        self.events = []   # drained on emit, so nothing is lost or sent twice
+        self.events = []  # drained on emit, so nothing is lost or sent twice
         return frame
 
     def metrics(self) -> dict[str, Any]:
@@ -520,19 +562,28 @@ class World:
         return next((v for v in self.victims.values() if v.x == x and v.y == y), None)
 
     def _tile_changed(self, x: int, y: int) -> None:
-        self._tiles_changed.append({
-            "x": x, "y": y, "ground": self.ground[y][x], "object": self.objects[y][x],
-        })
+        self._tiles_changed.append(
+            {
+                "x": x,
+                "y": y,
+                "ground": self.ground[y][x],
+                "object": self.objects[y][x],
+            }
+        )
 
     def _event(self, actor: str, verb: str, detail: dict[str, Any]) -> None:
         # The tick rides in the detail as well as alongside it: fleet memory
         # stores only actor/verb/detail, and §4.7's median time-to-stabilize is
         # computed from the event log after the fact, when the frame is long
         # gone.
-        self.events.append({
-            "tick": self.tick, "actor": actor, "verb": verb,
-            "detail": {**detail, "tick": self.tick},
-        })
+        self.events.append(
+            {
+                "tick": self.tick,
+                "actor": actor,
+                "verb": verb,
+                "detail": {**detail, "tick": self.tick},
+            }
+        )
 
     def _reject(self, robot: Robot, reason: str) -> None:
         robot.status = "blocked"

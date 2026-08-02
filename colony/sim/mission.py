@@ -59,14 +59,26 @@ def run_mission(
     scouts = [r for r in world.robots.values() if r.role == "scout"]
     shares = split_sectors(world_map.sectors, max(1, len(scouts)))
     agents: list[Any] = [
-        Scout(robot_id=robot.id, mission_id=mission_id, mem=mem, embedder=embedder,
-              seed=(seed or 0) + i, sectors=shares[i] if coordinated else ())
+        Scout(
+            robot_id=robot.id,
+            mission_id=mission_id,
+            mem=mem,
+            embedder=embedder,
+            seed=(seed or 0) + i,
+            sectors=shares[i] if coordinated else (),
+        )
         for i, robot in enumerate(scouts)
     ]
     agents += [
-        Worker(robot_id=robot.id, role=robot.role, mission_id=mission_id, mem=mem,
-               coordinated=coordinated)
-        for robot in world.robots.values() if robot.role in ("lifter", "medic")
+        Worker(
+            robot_id=robot.id,
+            role=robot.role,
+            mission_id=mission_id,
+            mem=mem,
+            coordinated=coordinated,
+        )
+        for robot in world.robots.values()
+        if robot.role in ("lifter", "medic")
     ]
     for robot in world.robots.values():
         mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
@@ -88,7 +100,9 @@ def run_mission(
         coverage_at_500 = world.coverage()
 
     return MissionRun(
-        world=world, mem=mem, mission_id=mission_id,
+        world=world,
+        mem=mem,
+        mission_id=mission_id,
         metrics=metrics_mod.compute(
             mem.events(mission_id),
             victims_total=len(world.victims),
@@ -99,16 +113,23 @@ def run_mission(
     )
 
 
-def compare_modes(world_map: WorldMap, make_memory, *, seed: int | None = None,
-                  max_ticks: int | None = None) -> Comparison:
+def compare_modes(
+    world_map: WorldMap,
+    make_memory,
+    *,
+    seed: int | None = None,
+    max_ticks: int | None = None,
+) -> Comparison:
     """Run the same mission with coordination on and off (§4.7).
 
     `make_memory` is a factory rather than an instance: the two runs must not
     share fleet memory, or the baseline inherits the coordinated run's beliefs
     and stops being a baseline.
     """
-    coordinated = run_mission(world_map, make_memory(), coordinated=True,
-                              seed=seed, max_ticks=max_ticks)
-    baseline = run_mission(world_map, make_memory(), coordinated=False,
-                           seed=seed, max_ticks=max_ticks)
+    coordinated = run_mission(
+        world_map, make_memory(), coordinated=True, seed=seed, max_ticks=max_ticks
+    )
+    baseline = run_mission(
+        world_map, make_memory(), coordinated=False, seed=seed, max_ticks=max_ticks
+    )
     return Comparison(coordinated=coordinated.metrics, baseline=baseline.metrics)

@@ -6,7 +6,7 @@ import pytest
 
 from agents.scout import Scout, split_sectors
 from bedrock.adapter import BedrockAdapter
-from sim.protocol import IDLE, MOVE
+from sim.protocol import IDLE
 from sim.world import World
 from world.map_format import EMPTY, WALL, load_map, parse_map
 from tests.test_map import MAP_PATH
@@ -18,18 +18,29 @@ def scout_world():
 
 
 def _scout(mem, mission, seed=0, sectors=()):
-    return Scout(robot_id="s1", mission_id=mission, mem=mem,
-                 embedder=BedrockAdapter(), seed=seed, sectors=sectors)
+    return Scout(
+        robot_id="s1",
+        mission_id=mission,
+        mem=mem,
+        embedder=BedrockAdapter(),
+        seed=seed,
+        sectors=sectors,
+    )
 
 
 def test_a_scout_reports_what_it_sees_into_shared_memory(mem, mission):
     """The walking skeleton's whole point: a sighting has to leave the agent and
     land in shared memory, not sit in a local variable."""
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
-        "zones": [], "spawn_points": {"scout": [{"x": 10, "y": 10}]},
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
+        "zones": [],
+        "spawn_points": {"scout": [{"x": 10, "y": 10}]},
         "victims": [{"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700}],
         "escalations": [],
     }
@@ -48,10 +59,15 @@ def test_a_scout_does_not_re_report_the_same_sighting_every_tick(mem, mission):
     """Without local dedup the gate is hammered with the same observation four
     times a second, and the sighting count becomes meaningless."""
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
-        "zones": [], "spawn_points": {"scout": [{"x": 10, "y": 10}]},
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
+        "zones": [],
+        "spawn_points": {"scout": [{"x": 10, "y": 10}]},
         "victims": [{"id": "v1", "x": 10, "y": 11, "vitals_deadline": 700}],
         "escalations": [],
     }
@@ -71,10 +87,15 @@ def test_two_scouts_seeing_one_victim_produce_one_belief(mem, mission):
     """The reconcile gate, exercised through the real agent path rather than by
     calling report_observation directly."""
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
-        "zones": [], "spawn_points": {"scout": [{"x": 10, "y": 10}, {"x": 12, "y": 10}]},
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
+        "zones": [],
+        "spawn_points": {"scout": [{"x": 10, "y": 10}, {"x": 12, "y": 10}]},
         "victims": [{"id": "v1", "x": 11, "y": 10, "vitals_deadline": 700}],
         "escalations": [],
     }
@@ -102,7 +123,9 @@ def test_a_scout_actually_covers_ground(mem, mission, scout_world):
 
     end = (scout_world.robots["s1"].x, scout_world.robots["s1"].y)
     assert end != start
-    assert len(scout.explored) > 200, f"only saw {len(scout.explored)} tiles in 60 ticks"
+    assert len(scout.explored) > 200, (
+        f"only saw {len(scout.explored)} tiles in 60 ticks"
+    )
 
 
 def _shares(count):
@@ -114,8 +137,14 @@ def _explore(mem, mission, embedder, count, ticks, sectored=True):
     """Run `count` scouts and return (their explored union, the world)."""
     world = World(load_map(MAP_PATH), seed=3)
     scouts = [
-        Scout(robot_id=rid, mission_id=mission, mem=mem, embedder=embedder, seed=i,
-              sectors=_shares(count)[i] if sectored else ())
+        Scout(
+            robot_id=rid,
+            mission_id=mission,
+            mem=mem,
+            embedder=embedder,
+            seed=i,
+            sectors=_shares(count)[i] if sectored else (),
+        )
         for i, rid in enumerate(["s1", "s2"][:count])
     ]
     for _ in range(ticks):
@@ -153,7 +182,8 @@ def test_a_second_scout_nearly_doubles_coverage(mem, mission):
     assert overlap < 0.6, f"{overlap:.0%} of explored ground was covered twice"
 
     assert (world.robots["s1"].x, world.robots["s1"].y) != (
-        world.robots["s2"].x, world.robots["s2"].y
+        world.robots["s2"].x,
+        world.robots["s2"].y,
     ), "the scouts converged onto one tile"
 
 
@@ -168,8 +198,9 @@ def test_sector_claims_add_to_what_shared_memory_already_gives(mem, mission):
     """
     embedder = BedrockAdapter()
     _, sectored, _ = _explore(mem, mission, embedder, 2, PRE_SATURATION_TICKS)
-    _, shared_only, _ = _explore(mem, mission, embedder, 2, PRE_SATURATION_TICKS,
-                                 sectored=False)
+    _, shared_only, _ = _explore(
+        mem, mission, embedder, 2, PRE_SATURATION_TICKS, sectored=False
+    )
     assert len(sectored) > len(shared_only) * 1.15
 
 
@@ -185,7 +216,7 @@ def test_two_uncoordinated_scouts_cover_less_than_one_coordinated_scout(mem, mis
     _, solo, _ = _explore(mem, mission, embedder, 1, PRE_SATURATION_TICKS)
 
     world = World(load_map(MAP_PATH), seed=3)
-    world.shared_vision = False                      # coordination OFF
+    world.shared_vision = False  # coordination OFF
     scouts = [
         Scout(robot_id=rid, mission_id=mission, mem=mem, embedder=embedder, seed=i)
         for i, rid in enumerate(["s1", "s2"])
@@ -201,21 +232,32 @@ def test_two_uncoordinated_scouts_cover_less_than_one_coordinated_scout(mem, mis
 
 def test_a_scout_boxed_in_by_walls_idles_rather_than_crashing(mem, mission):
     data = {
-        "width": 5, "height": 5, "tile_size": 32,
+        "width": 5,
+        "height": 5,
+        "tile_size": 32,
         "layers": {
-            "ground": [[WALL] * 5, [WALL] * 5, [WALL, WALL, "open", WALL, WALL],
-                       [WALL] * 5, [WALL] * 5],
+            "ground": [
+                [WALL] * 5,
+                [WALL] * 5,
+                [WALL, WALL, "open", WALL, WALL],
+                [WALL] * 5,
+                [WALL] * 5,
+            ],
             "objects": [[EMPTY] * 5 for _ in range(5)],
         },
-        "zones": [], "spawn_points": {"scout": [{"x": 2, "y": 2}]},
-        "victims": [], "escalations": [],
+        "zones": [],
+        "spawn_points": {"scout": [{"x": 2, "y": 2}]},
+        "victims": [],
+        "escalations": [],
     }
     world = World(parse_map(data), seed=0)
     scout = _scout(mem, mission)
     assert scout.step(world).kind == IDLE
 
 
-def test_the_scout_heartbeats_so_it_is_never_mistaken_for_dead(mem, mission, scout_world):
+def test_the_scout_heartbeats_so_it_is_never_mistaken_for_dead(
+    mem, mission, scout_world
+):
     mem.register_robot("s1", "scout", (2, 2), battery=120)
     scout = _scout(mem, mission)
     scout.step(scout_world)
@@ -224,10 +266,16 @@ def test_the_scout_heartbeats_so_it_is_never_mistaken_for_dead(mem, mission, sco
 
 def test_the_agent_loop_is_deterministic(mem, mission):
     """Same seed, same world, same action sequence — required for the golden run."""
+
     def run():
         world = World(load_map(MAP_PATH), seed=11)
-        scout = Scout(robot_id="s1", mission_id=uuid.uuid4(), mem=mem,
-                      embedder=BedrockAdapter(), seed=5)
+        scout = Scout(
+            robot_id="s1",
+            mission_id=uuid.uuid4(),
+            mem=mem,
+            embedder=BedrockAdapter(),
+            seed=5,
+        )
         actions = []
         for _ in range(40):
             action = scout.step(world)
@@ -240,11 +288,17 @@ def test_the_agent_loop_is_deterministic(mem, mission):
 
 def test_a_scout_reports_fire_as_a_hazard(mem, mission):
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
-        "zones": [], "spawn_points": {"scout": [{"x": 10, "y": 10}]},
-        "victims": [], "escalations": [],
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
+        "zones": [],
+        "spawn_points": {"scout": [{"x": 10, "y": 10}]},
+        "victims": [],
+        "escalations": [],
     }
     data["layers"]["objects"][10][12] = "fire"
     world = World(parse_map(data), seed=0)
@@ -261,9 +315,13 @@ def test_a_scout_reports_fire_as_a_hazard(mem, mission):
 def _sector_world():
     """A 20x20 map split into four 10x10 sectors."""
     data = {
-        "width": 20, "height": 20, "tile_size": 32,
-        "layers": {"ground": [["open"] * 20 for _ in range(20)],
-                   "objects": [[EMPTY] * 20 for _ in range(20)]},
+        "width": 20,
+        "height": 20,
+        "tile_size": 32,
+        "layers": {
+            "ground": [["open"] * 20 for _ in range(20)],
+            "objects": [[EMPTY] * 20 for _ in range(20)],
+        },
         "zones": [],
         "sectors": [
             {"id": "A1", "x": 0, "y": 0, "width": 10, "height": 10},
@@ -272,7 +330,8 @@ def _sector_world():
             {"id": "B2", "x": 10, "y": 10, "width": 10, "height": 10},
         ],
         "spawn_points": {"scout": [{"x": 2, "y": 2}, {"x": 4, "y": 2}]},
-        "victims": [], "escalations": [],
+        "victims": [],
+        "escalations": [],
     }
     return World(parse_map(data), seed=0)
 
@@ -299,7 +358,9 @@ def test_two_scouts_never_hold_the_same_sector(mem, mission):
     world = _sector_world()
     seed_sector_tasks(mem, mission, world.map)
     a = Scout(robot_id="s1", mission_id=mission, mem=mem, embedder=BedrockAdapter())
-    b = Scout(robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter(), seed=1)
+    b = Scout(
+        robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter(), seed=1
+    )
 
     a.step(world)
     b.step(world)
@@ -315,7 +376,7 @@ def test_a_scout_claims_the_nearest_sector(mem, mission):
 
     world = _sector_world()
     seed_sector_tasks(mem, mission, world.map)
-    scout = _scout(mem, mission)          # spawns at (2, 2), inside A1
+    scout = _scout(mem, mission)  # spawns at (2, 2), inside A1
     scout.step(world)
 
     assert scout.sector_task.kind == "explore_sector:A1"
@@ -356,10 +417,14 @@ def test_a_dead_scouts_sector_frees_itself(mem, mission):
         assert mem.claim_task(task, "s1", lease_seconds=-1) is True
     assert mem.open_tasks(mission), "no sector came back to the pool"
 
-    survivor = Scout(robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter())
+    survivor = Scout(
+        robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter()
+    )
     survivor.step(world)
 
-    assert survivor.sector_task is not None, "the dead scout's sectors were not reclaimed"
+    assert survivor.sector_task is not None, (
+        "the dead scout's sectors were not reclaimed"
+    )
     assert survivor.sector_task.id in tasks
 
 
@@ -367,8 +432,13 @@ def test_a_scout_falls_back_to_static_shares_without_sector_tasks(mem, mission):
     """Baseline mode seeds no sector tasks (§3.3), and small fixtures have no
     sector grid at all. Exploration must still work."""
     world = _sector_world()
-    scout = Scout(robot_id="s1", mission_id=mission, mem=mem,
-                  embedder=BedrockAdapter(), sectors=("A1",))
+    scout = Scout(
+        robot_id="s1",
+        mission_id=mission,
+        mem=mem,
+        embedder=BedrockAdapter(),
+        sectors=("A1",),
+    )
     action = scout.step(world)
 
     assert scout.sector_task is None

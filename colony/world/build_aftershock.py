@@ -16,21 +16,29 @@ import random
 from pathlib import Path
 
 from world.map_format import (
-    DEBRIS, DOOR, EMPTY, FIRE, OPEN, RUBBLE_HEAVY, UNSTABLE, WALL, parse_map,
+    DEBRIS,
+    DOOR,
+    EMPTY,
+    FIRE,
+    OPEN,
+    RUBBLE_HEAVY,
+    UNSTABLE,
+    WALL,
+    parse_map,
 )
 
 WIDTH, HEIGHT, TILE = 40, 30, 32
-SECTOR_W, SECTOR_H = 10, 10      # §3.3: a 4x3 grid of 10x10-tile sectors
+SECTOR_W, SECTOR_H = 10, 10  # §3.3: a 4x3 grid of 10x10-tile sectors
 SEED = 20260801
 OUT = Path(__file__).resolve().parents[1] / "world" / "maps" / "aftershock.json"
 
 # Four zones plus the courtyard that connects them (§3.3).
 ZONES = [
-    {"name": "staging",     "x": 0,  "y": 0,  "width": 10, "height": 8},
-    {"name": "street",      "x": 0,  "y": 8,  "width": 40, "height": 6},
-    {"name": "residential", "x": 0,  "y": 14, "width": 22, "height": 16},
-    {"name": "office",      "x": 24, "y": 14, "width": 16, "height": 16},
-    {"name": "courtyard",   "x": 22, "y": 14, "width": 2,  "height": 16},
+    {"name": "staging", "x": 0, "y": 0, "width": 10, "height": 8},
+    {"name": "street", "x": 0, "y": 8, "width": 40, "height": 6},
+    {"name": "residential", "x": 0, "y": 14, "width": 22, "height": 16},
+    {"name": "office", "x": 24, "y": 14, "width": 16, "height": 16},
+    {"name": "courtyard", "x": 22, "y": 14, "width": 2, "height": 16},
 ]
 
 
@@ -89,22 +97,24 @@ def build() -> dict:
     world = {
         "name": "Aftershock",
         "description": "Post-earthquake city block: collapsed residential, office interior, "
-                       "spreading fire, aftershock at tick 300.",
-        "width": WIDTH, "height": HEIGHT, "tile_size": TILE,
+        "spreading fire, aftershock at tick 300.",
+        "width": WIDTH,
+        "height": HEIGHT,
+        "tile_size": TILE,
         "seed": SEED,
         "mission_length_ticks": 1200,
         "layers": {"ground": ground, "objects": objects},
         "zones": ZONES,
         "sectors": _sectors(),
         "spawn_points": {
-            "scout":  [{"x": 2, "y": 2}, {"x": 4, "y": 2}],
+            "scout": [{"x": 2, "y": 2}, {"x": 4, "y": 2}],
             "lifter": [{"x": 2, "y": 4}],
-            "medic":  [{"x": 4, "y": 4}],
+            "medic": [{"x": 4, "y": 4}],
         },
         "victims": victims,
         "escalations": _escalations(),
     }
-    parse_map(world)   # never write a map that would not load
+    parse_map(world)  # never write a map that would not load
     return world
 
 
@@ -118,8 +128,10 @@ def _sectors() -> list[dict]:
     return [
         {
             "id": f"{chr(ord('A') + col)}{row + 1}",
-            "x": col * SECTOR_W, "y": row * SECTOR_H,
-            "width": SECTOR_W, "height": SECTOR_H,
+            "x": col * SECTOR_W,
+            "y": row * SECTOR_H,
+            "width": SECTOR_W,
+            "height": SECTOR_H,
         }
         for row in range(HEIGHT // SECTOR_H)
         for col in range(WIDTH // SECTOR_W)
@@ -130,22 +142,70 @@ def _victims() -> list[dict]:
     """8 victims in the §3.3 access mix: 3 reachable, 4 behind one debris wall,
     1 behind two — the last forces a scout->lifter->lifter->medic chain."""
     return [
-        {"id": "v1", "x": 12, "y": 10, "vitals_deadline": 700, "access": "open",
-         "state": "unknown"},
-        {"id": "v2", "x": 26, "y": 10, "vitals_deadline": 650, "access": "open",
-         "state": "unknown"},
-        {"id": "v3", "x": 34, "y": 16, "vitals_deadline": 620, "access": "open",
-         "state": "unknown"},
-        {"id": "v4", "x": 4,  "y": 20, "vitals_deadline": 560, "access": "one_debris",
-         "state": "unknown"},
-        {"id": "v5", "x": 10, "y": 24, "vitals_deadline": 540, "access": "one_debris",
-         "state": "unknown"},
-        {"id": "v6", "x": 17, "y": 18, "vitals_deadline": 520, "access": "one_debris",
-         "state": "unknown"},
-        {"id": "v7", "x": 19, "y": 26, "vitals_deadline": 500, "access": "one_debris",
-         "state": "unknown"},
-        {"id": "v8", "x": 3,  "y": 27, "vitals_deadline": 470, "access": "two_debris",
-         "state": "unknown"},
+        {
+            "id": "v1",
+            "x": 12,
+            "y": 10,
+            "vitals_deadline": 700,
+            "access": "open",
+            "state": "unknown",
+        },
+        {
+            "id": "v2",
+            "x": 26,
+            "y": 10,
+            "vitals_deadline": 650,
+            "access": "open",
+            "state": "unknown",
+        },
+        {
+            "id": "v3",
+            "x": 34,
+            "y": 16,
+            "vitals_deadline": 620,
+            "access": "open",
+            "state": "unknown",
+        },
+        {
+            "id": "v4",
+            "x": 4,
+            "y": 20,
+            "vitals_deadline": 560,
+            "access": "one_debris",
+            "state": "unknown",
+        },
+        {
+            "id": "v5",
+            "x": 10,
+            "y": 24,
+            "vitals_deadline": 540,
+            "access": "one_debris",
+            "state": "unknown",
+        },
+        {
+            "id": "v6",
+            "x": 17,
+            "y": 18,
+            "vitals_deadline": 520,
+            "access": "one_debris",
+            "state": "unknown",
+        },
+        {
+            "id": "v7",
+            "x": 19,
+            "y": 26,
+            "vitals_deadline": 500,
+            "access": "one_debris",
+            "state": "unknown",
+        },
+        {
+            "id": "v8",
+            "x": 3,
+            "y": 27,
+            "vitals_deadline": 470,
+            "access": "two_debris",
+            "state": "unknown",
+        },
     ]
 
 
@@ -156,7 +216,8 @@ def _ring(x: int, y: int, distance: int) -> list[tuple[int, int]]:
         for nx in range(x - distance, x + distance + 1)
         for ny in range(y - distance, y + distance + 1)
         if abs(nx - x) + abs(ny - y) == distance
-        and 0 < nx < WIDTH - 1 and 0 < ny < HEIGHT - 1
+        and 0 < nx < WIDTH - 1
+        and 0 < ny < HEIGHT - 1
     ]
 
 
@@ -206,7 +267,13 @@ def _escalations() -> list[dict]:
                 + [{"x": 15, "y": y, "tile": DEBRIS} for y in range(22, 26)]
             ),
             "reveal_victims": [
-                {"id": "v9", "x": 28, "y": 26, "vitals_deadline": 400, "state": "unknown"}
+                {
+                    "id": "v9",
+                    "x": 28,
+                    "y": 26,
+                    "vitals_deadline": 400,
+                    "state": "unknown",
+                }
             ],
             "unstable_tiles": [{"x": x, "y": 9} for x in range(14, 20)],
         },
@@ -217,9 +284,11 @@ def main() -> None:
     world = build()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(world, indent=1))
-    print(f"wrote {OUT.relative_to(Path.cwd())} "
-          f"({world['width']}x{world['height']}, {len(world['victims'])} victims, "
-          f"{len(world['zones'])} zones)")
+    print(
+        f"wrote {OUT.relative_to(Path.cwd())} "
+        f"({world['width']}x{world['height']}, {len(world['victims'])} victims, "
+        f"{len(world['zones'])} zones)"
+    )
 
 
 if __name__ == "__main__":

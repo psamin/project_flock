@@ -72,7 +72,9 @@ def test_the_chaos_rig_defines_three_joined_nodes():
 
     assert len(nodes) == 3, f"expected 3 cockroach nodes, got {sorted(nodes)}"
     for name, svc in nodes.items():
-        assert "--join=crdb-1,crdb-2,crdb-3" in svc["command"], f"{name} joins no cluster"
+        assert "--join=crdb-1,crdb-2,crdb-3" in svc["command"], (
+            f"{name} joins no cluster"
+        )
         assert f"--advertise-addr={name}" in svc["command"], f"{name} misadvertises"
 
 
@@ -82,14 +84,16 @@ def test_every_chaos_node_is_reachable_on_its_own_port():
     services = _compose(COMPOSE_3NODE)["services"]
     sql_ports = [
         mapping.split(":")[0]
-        for name, svc in services.items() if name.startswith("crdb-")
-        for mapping in svc["ports"] if mapping.endswith(":26257")
+        for name, svc in services.items()
+        if name.startswith("crdb-")
+        for mapping in svc["ports"]
+        if mapping.endswith(":26257")
     ]
     assert sorted(sql_ports) == ["26257", "26258", "26259"]
 
 
 def test_the_chaos_rig_runs_the_same_schema_as_the_dev_cluster():
-    """"Same software, self-hosted" (§6.5) only holds if it is also the same
+    """ "Same software, self-hosted" (§6.5) only holds if it is also the same
     schema — a rig with drifted DDL proves nothing about the real system."""
     assert SCHEMA.name in CLUSTER_SCRIPT.read_text()
 
@@ -124,11 +128,28 @@ def test_the_schema_applies_to_the_chaos_rig():
     """A rig without the schema cannot run a mission, so the node-kill segment
     would have nothing to survive."""
     result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_3NODE), "-p", "colony3",
-         "exec", "-T", "crdb-1", "./cockroach", "sql", "--insecure", "-d", "colony",
-         "--format=csv", "-e",
-         "SELECT count(*) FROM [SHOW TABLES]"],
-        capture_output=True, text=True, timeout=120,
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE_3NODE),
+            "-p",
+            "colony3",
+            "exec",
+            "-T",
+            "crdb-1",
+            "./cockroach",
+            "sql",
+            "--insecure",
+            "-d",
+            "colony",
+            "--format=csv",
+            "-e",
+            "SELECT count(*) FROM [SHOW TABLES]",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
     assert int(result.stdout.strip().splitlines()[-1]) >= 8, result.stdout

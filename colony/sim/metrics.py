@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Iterable
 
-COVERAGE_AT_TICK = 500      # §4.7: Coverage@500
+COVERAGE_AT_TICK = 500  # §4.7: Coverage@500
 
 
 @dataclass
@@ -45,9 +45,13 @@ class Metrics:
         }
 
 
-def compute(events: Iterable[dict[str, Any]], victims_total: int,
-            coverage_at_500: float = 0.0, ticks: int = 0,
-            horizon: int | None = None) -> Metrics:
+def compute(
+    events: Iterable[dict[str, Any]],
+    victims_total: int,
+    coverage_at_500: float = 0.0,
+    ticks: int = 0,
+    horizon: int | None = None,
+) -> Metrics:
     """Derive §4.7's metrics from a mission's event stream.
 
     `horizon` is the mission length, used to censor victims who were never
