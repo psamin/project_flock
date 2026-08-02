@@ -422,15 +422,17 @@ class World:
         Walls are excluded: counting them would cap coverage below 100% forever
         and make Coverage@500 (§4.7) unreadable.
         """
-        reachable = sum(
-            1
+        reachable = {
+            (x, y)
             for y in range(self.map.height)
             for x in range(self.map.width)
             if self.ground[y][x] != "wall"
-        )
+        }
         if not reachable:
             return 1.0
-        return len(self.explored) / reachable
+        # Intersected, not just divided: vision reveals walls too, and counting
+        # them against a wall-free denominator reported 116% coverage.
+        return len(self.explored & reachable) / len(reachable)
 
     # --- frames -----------------------------------------------------------
 

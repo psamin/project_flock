@@ -149,22 +149,47 @@ def _victims() -> list[dict]:
     ]
 
 
+def _ring(x: int, y: int, distance: int) -> list[tuple[int, int]]:
+    """Tiles exactly `distance` steps away, inside the map border."""
+    return [
+        (nx, ny)
+        for nx in range(x - distance, x + distance + 1)
+        for ny in range(y - distance, y + distance + 1)
+        if abs(nx - x) + abs(ny - y) == distance
+        and 0 < nx < WIDTH - 1 and 0 < ny < HEIGHT - 1
+    ]
+
+
 def _clear_victim_tiles(objects: list[list[str]], victims: list[dict]) -> None:
-    """A victim's own tile is never rubble — the medic has to be able to stand
-    adjacent and work. Access difficulty comes from the surrounding tiles, which
-    the generator sets per the victim's `access` field."""
+    """Make each victim's `access` field actually true of the map.
+
+    Blocking a single neighbour left every other approach open, so no victim
+    ever needed a lifter: measured on the demo map as zero clear_debris tasks in
+    a whole mission and the lifter idle from start to finish — with the
+    scout->lifter->medic chain the MVP milestone names never once running.
+
+    A victim's own tile stays clear; a medic has to be able to stand on or
+    beside it. Difficulty comes from the ring around them, per §3.3.
+    """
     for victim in victims:
         x, y = victim["x"], victim["y"]
         objects[y][x] = EMPTY
-        if victim["access"] == "open":
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                if 0 < x + dx < WIDTH - 1 and 0 < y + dy < HEIGHT - 1:
-                    objects[y + dy][x + dx] = EMPTY
-        elif victim["access"] == "one_debris":
-            objects[y][min(x + 1, WIDTH - 2)] = DEBRIS
-        elif victim["access"] == "two_debris":
-            objects[y][min(x + 1, WIDTH - 2)] = DEBRIS
-            objects[y][min(x + 2, WIDTH - 2)] = RUBBLE_HEAVY
+        access = victim["access"]
+
+        if access == "open":
+            for nx, ny in _ring(x, y, 1):
+                objects[ny][nx] = EMPTY
+            continue
+
+        # Every approach blocked, so exactly one clear opens a way in.
+        for nx, ny in _ring(x, y, 1):
+            objects[ny][nx] = DEBRIS
+
+        if access == "two_debris":
+            # And a second ring behind it, so one clear is not enough: this is
+            # §3.3's scout -> lifter -> lifter -> medic victim.
+            for nx, ny in _ring(x, y, 2):
+                objects[ny][nx] = RUBBLE_HEAVY
 
 
 def _escalations() -> list[dict]:

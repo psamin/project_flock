@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from agents.pathing import find_path
+from agents.pathing import find_move_plan, find_path
 from sim.protocol import DIRECTIONS, Action
-from sim.world import Percept, World
+from sim.world import ROLES, Percept, World
 from world.map_format import DEBRIS, EMPTY, FIRE, RUBBLE_HEAVY, WALL
 
 # Kinds the scout reports into shared memory.
@@ -236,6 +236,23 @@ class Scout:
             return 1.0
         return sum(1 for t in tiles if t in self.explored) / len(tiles)
 
+    def _sector_is_swept(self, world: World, sector_id: str) -> bool:
+        """Whether this scout is done with a sector.
+
+        Coverage alone is not a usable test. A sector holding walled interiors or
+        sealed rooms can never reach the threshold, and a scout waiting for it
+        sits there for the rest of the mission — measured on the demo map as
+        coverage stalling at 67% with six victims never found. So the real
+        criterion is "nothing left in here I can reach", with the coverage
+        threshold as an early exit for sectors that are mostly open.
+        """
+        if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
+            return True
+        return not any(
+            tile not in self.explored and world.passable(*tile, flying=True)
+            for tile in self._sector_tiles(world, sector_id)
+        )
+
     def _manage_sector(self, world: World) -> None:
         """Complete a swept sector and claim the next one.
 
@@ -245,7 +262,7 @@ class Scout:
         """
         if self.sector_task is not None:
             sector_id = self.sector_task.kind.split(":", 1)[1]
-            if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
+            if self._sector_is_swept(world, sector_id):
                 self.mem.complete_task(self.sector_task.id, self.robot_id)
                 self.mem.log_event(self.mission_id, self.robot_id, "sector_swept",
                                    {"sector": sector_id})
@@ -323,43 +340,42 @@ class Scout:
 
     def _step_toward(self, world: World, here: tuple[int, int],
                      target: tuple[int, int]) -> Action:
-        """Greedy step that reduces distance, preferring the larger gap first.
+        """Move along a plan searched over moves — the same planner the workers
+        use.
 
-        Not A* — that arrives with the rescue chain. A scout flies over debris,
-        so the only real obstacles are walls and fire, and greedy-with-fallback
-        covers the open map well enough to prove the slice.
+        Greedy stepping was good enough while a scout only drifted toward open
+        ground in its own half of the map. Sector claims changed that: a scout
+        assigned a sector across the staging wall has to route through a single
+        door, and greedy stepping pinned it against the wall for the whole
+        mission. Measured on the demo map: both scouts frozen by tick 150,
+        coverage stalled at 60%, six victims never found.
         """
-        robot = world.robots[self.robot_id]
-        dx, dy = target[0] - here[0], target[1] - here[1]
+        plan = find_move_plan(
+            here, target,
+            landing=lambda p, d: self._landing(world, p, d),
+            speed=ROLES[world.robots[self.robot_id].role]["speed"],
+        )
+        if plan:
+            return Action.move(plan[0])
 
-        preferred: list[str] = []
-        if abs(dx) >= abs(dy):
-            preferred = [self._dir_x(dx), self._dir_y(dy)]
-        else:
-            preferred = [self._dir_y(dy), self._dir_x(dx)]
-        preferred = [d for d in preferred if d]
-
-        # Fall back to any legal direction so a blocked scout keeps exploring
-        # instead of standing still against a wall for the rest of the mission.
-        options = preferred + sorted(DIRECTIONS)
-        for direction in options:
-            ddx, ddy = DIRECTIONS[direction]
-            nx, ny = here[0] + ddx, here[1] + ddy
-            if world.passable(nx, ny, flying=robot.flying) and not world.occupied(
-                nx, ny, ignore=self.robot_id
-            ):
-                return Action.move(direction)
-
+        # Nothing reachable here: drop the target so the next tick picks another
+        # frontier rather than standing against a wall.
+        self.explored.add(target)
         self.frontier_target = None
         return Action.idle()
 
-    @staticmethod
-    def _dir_x(dx: int) -> str:
-        return "e" if dx > 0 else "w" if dx < 0 else ""
-
-    @staticmethod
-    def _dir_y(dy: int) -> str:
-        return "s" if dy > 0 else "n" if dy < 0 else ""
+    def _landing(self, world: World, here: tuple[int, int], direction: str) -> tuple[int, int]:
+        """Where one `move` leaves this scout — the sim's rule, mirrored."""
+        dx, dy = DIRECTIONS[direction]
+        x, y = here
+        for _ in range(ROLES[world.robots[self.robot_id].role]["speed"]):
+            nx, ny = x + dx, y + dy
+            if not world.passable(nx, ny, flying=True):
+                break
+            if world.occupied(nx, ny, ignore=self.robot_id):
+                break
+            x, y = nx, ny
+        return (x, y)
 
 
 def seed_sector_tasks(mem, mission_id, world_map) -> list:
