@@ -34,6 +34,7 @@ class FakeFleetMem:
         self._robots: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
+        self._victims: dict[UUID, dict[str, Any]] = {}
 
     def close(self) -> None:
         pass
@@ -135,6 +136,49 @@ class FakeFleetMem:
             return out
 
     # --- tasks ------------------------------------------------------------
+
+    def register_victim(
+        self,
+        mission_id: UUID,
+        pos: tuple[int, int],
+        reported_by: str,
+        blocked_by: Sequence[tuple[int, int]] = (),
+        vitals_deadline: int | None = None,
+        priority: int = 5,
+    ) -> tuple[UUID, list[UUID]]:
+        with self._lock:
+            existing = next(
+                (v for v in self._victims.values()
+                 if v["mission_id"] == mission_id and (v["pos_x"], v["pos_y"]) == pos),
+                None,
+            )
+            if existing is not None:
+                # Via the delivery task and out through its dependencies; see
+                # the note in CockroachFleetMem.register_victim.
+                deliver = next(
+                    (t for t in self._tasks.values()
+                     if t["mission_id"] == mission_id and t["kind"] == "deliver_kit"
+                     and (t["target_x"], t["target_y"]) == pos),
+                    None,
+                )
+                if deliver is None:
+                    return existing["id"], []
+                return existing["id"], [*deliver["depends_on"], deliver["id"]]
+
+            victim_id = uuid4()
+            self._victims[victim_id] = {
+                "id": victim_id, "mission_id": mission_id,
+                "pos_x": pos[0], "pos_y": pos[1], "state": "located",
+                "vitals_deadline": vitals_deadline, "reported_by": reported_by,
+            }
+        clears = [
+            self.create_task(mission_id, "clear_debris", tile, priority=priority)
+            for tile in blocked_by
+        ]
+        deliver = self.create_task(
+            mission_id, "deliver_kit", pos, priority=priority, depends_on=clears
+        )
+        return victim_id, [*clears, deliver]
 
     def create_task(
         self,

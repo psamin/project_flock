@@ -293,3 +293,64 @@ def test_open_tasks_excludes_live_work(mem, mission):
     task = mem.create_task(mission, "clear_debris", (1, 1))
     mem.claim_task(task, "l1")
     assert task not in {t.id for t in mem.open_tasks(mission)}
+
+
+# --- the rescue chain the gate creates (§4.2 step 3) ------------------------
+
+
+def test_a_new_victim_creates_the_clear_then_deliver_chain(mem, mission):
+    """The handoff exists in the data, not in any message between robots: the
+    medic's task is gated on the lifter's by depends_on."""
+    victim, tasks = mem.register_victim(
+        mission, (14, 9), reported_by="s1", blocked_by=[(14, 8)]
+    )
+
+    assert victim is not None
+    assert len(tasks) == 2
+
+    open_now = {t.kind for t in mem.open_tasks(mission)}
+    assert open_now == {"clear_debris"}, "deliver_kit should be blocked, not open"
+
+
+def test_completing_the_clear_unblocks_the_delivery(mem, mission):
+    _, (clear, deliver) = mem.register_victim(
+        mission, (14, 9), reported_by="s1", blocked_by=[(14, 8)]
+    )
+
+    mem.claim_task(clear, "l1")
+    assert mem.complete_task(clear, "l1") == [deliver]
+    assert mem.claim_task(deliver, "m1") is True
+
+
+def test_a_victim_behind_two_walls_waits_for_both(mem, mission):
+    """§3.3's hardest victim: scout -> lifter -> lifter -> medic."""
+    _, tasks = mem.register_victim(
+        mission, (3, 27), reported_by="s1", blocked_by=[(4, 27), (5, 27)]
+    )
+    first, second, deliver = tasks
+
+    mem.claim_task(first, "l1")
+    assert mem.complete_task(first, "l1") == [], "opened before both clears were done"
+    mem.claim_task(second, "l1")
+    assert mem.complete_task(second, "l1") == [deliver]
+
+
+def test_a_reachable_victim_needs_no_clearing(mem, mission):
+    _, tasks = mem.register_victim(mission, (12, 10), reported_by="s1")
+    assert len(tasks) == 1
+    assert [t.kind for t in mem.open_tasks(mission)] == ["deliver_kit"]
+
+
+def test_registering_the_same_victim_twice_does_not_double_dispatch(mem, mission):
+    """Two scouts sighting one victim must not create two rescue chains — the
+    same duplication the reconcile gate prevents for beliefs."""
+    first_id, first_tasks = mem.register_victim(
+        mission, (14, 9), reported_by="s1", blocked_by=[(14, 8)]
+    )
+    second_id, second_tasks = mem.register_victim(
+        mission, (14, 9), reported_by="s2", blocked_by=[(14, 8)]
+    )
+
+    assert first_id == second_id
+    assert set(second_tasks) == set(first_tasks), "a second chain was created"
+    assert len(mem.open_tasks(mission)) == 1, "the fleet was dispatched twice"

@@ -161,6 +161,61 @@ class CockroachFleetMem:
 
     # --- tasks ------------------------------------------------------------
 
+    def register_victim(
+        self,
+        mission_id: UUID,
+        pos: tuple[int, int],
+        reported_by: str,
+        blocked_by: Sequence[tuple[int, int]] = (),
+        vitals_deadline: int | None = None,
+        priority: int = 5,
+    ) -> tuple[UUID, list[UUID]]:
+        """Record a victim and the task chain that reaches them (§4.2 step 3).
+
+        Returns (victim_id, task_ids). One transaction: the victim row, a
+        `clear_debris` task per blocking tile, and a `deliver_kit` that
+        `depends_on` all of them. That gating is the handoff — the medic's task
+        is not claimable until the last lifter finishes, and nobody has to
+        message anybody.
+
+        Idempotent per position: a second sighting of the same victim returns the
+        existing chain rather than dispatching the fleet twice.
+        """
+        with self.conn.transaction():
+            existing = self.conn.execute(
+                "SELECT id FROM victims WHERE mission_id = %s AND pos_x = %s AND pos_y = %s",
+                (mission_id, pos[0], pos[1]),
+            ).fetchone()
+            if existing is not None:
+                # Found via the delivery task, then out through its
+                # dependencies: the clears target the *blocking* tiles, not the
+                # victim's, so looking them up by position finds nothing and the
+                # caller would be handed a chain missing its own prerequisites.
+                deliver = self.conn.execute(
+                    "SELECT id, depends_on FROM tasks"
+                    " WHERE mission_id = %s AND kind = 'deliver_kit'"
+                    "   AND target_x = %s AND target_y = %s",
+                    (mission_id, pos[0], pos[1]),
+                ).fetchone()
+                if deliver is None:
+                    return existing["id"], []
+                return existing["id"], [*(deliver["depends_on"] or []), deliver["id"]]
+
+            victim = self.conn.execute(
+                "INSERT INTO victims (mission_id, pos_x, pos_y, state, vitals_deadline,"
+                "   reported_by) VALUES (%s, %s, %s, 'located', %s, %s) RETURNING id",
+                (mission_id, pos[0], pos[1], vitals_deadline, reported_by),
+            ).fetchone()["id"]
+
+            clears = [
+                self.create_task(mission_id, "clear_debris", tile, priority=priority)
+                for tile in blocked_by
+            ]
+            deliver = self.create_task(
+                mission_id, "deliver_kit", pos, priority=priority, depends_on=clears
+            )
+            return victim, [*clears, deliver]
+
     def create_task(
         self,
         mission_id: UUID,

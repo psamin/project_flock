@@ -19,7 +19,7 @@ SDK_METHODS = [
     # lease mechanics (§4.4) — recovery lives here, so the fake must match
     "renew_leases", "release_task",
     # supporting methods the orchestrator and tests rely on
-    "create_task", "open_tasks", "find_similar", "register_robot",
+    "create_task", "open_tasks", "find_similar", "register_robot", "register_victim",
     "stale_robots", "events", "plans_for", "close",
 ]
 
