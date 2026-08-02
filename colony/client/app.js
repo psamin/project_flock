@@ -5,8 +5,8 @@
  * That interpolation is the whole trick: without it a 4 Hz sim reads as a chess
  * clock, with it it reads as a world. Never render raw tick jumps.
  *
- * Layers, drawn bottom to top per §4.8: ground, hazards, entities, floaters.
- * Fog of war, thought bubbles and sprite atlases are Aug 4-6.
+ * Layers, drawn bottom to top per §4.8: ground, hazards, fog mask, entities,
+ * floaters. Thought bubbles and sprite atlases are still to come.
  *
  * Canvas 2D rather than the PixiJS §4.8 calls for, deliberately. PixiJS 7 has no
  * automatic canvas fallback: on a machine without WebGL it throws "Unable to
@@ -33,6 +33,10 @@ const PALETTE = {
   victimStabilized: "#6fbf73",
   victimLost: "#6b6472",
 };
+
+// Unexplored ground reads as near-black: the map filling in as the fleet
+// explores is the hero visual (§3.6), so what is unknown has to look unknown.
+const UNSEEN = "#0e0d12";
 const ROLE_COLOR = { scout: "#63c5da", lifter: "#d9884a", medic: "#d96a9a" };
 
 let canvas = null;
@@ -42,6 +46,10 @@ let tile = 32;
 
 let robots = [];
 let victims = [];
+// Fog of war (FR-8, §4.8 layer 4). Held as a Set of "x,y" keys because it grows
+// to the size of the map and is tested once per tile per frame.
+let explored = new Set();
+let sharedVision = true;
 const motion = new Map();   // robot id -> {fromX, fromY, toX, toY}
 let windowStart = 0;
 
@@ -52,9 +60,11 @@ function boot(snapshot) {
   // diffs onto it leaves two grids that never reconverge.
   world = snapshot.world;
   tile = world.tile_size;
+  sharedVision = world.shared_vision !== false;
   motion.clear();
   robots = [];
   victims = [];
+  explored = new Set();
 
   const stage = document.getElementById("stage");
   if (!canvas) {
@@ -77,6 +87,10 @@ function applyTileChanges(changes) {
     world.ground[c.y][c.x] = c.ground;
     world.objects[c.y][c.x] = c.object;
   }
+}
+
+function applyExplored(tiles) {
+  for (const [x, y] of tiles || []) explored.add(`${x},${y}`);
 }
 
 function trackRobots(incoming) {
@@ -104,10 +118,12 @@ function draw() {
   const t = Math.min(1, (performance.now() - windowStart) / TICK_MS);
   const eased = t * t * (3 - 2 * t); // smoothstep: no linear snap at the ends
 
-  // 1-2: ground and hazards. Redrawn wholesale; 1,200 fills is nothing.
+  // 1-2: ground and hazards, then 4: the fog mask over them. Redrawn wholesale;
+  // 1,200 fills is nothing, and it keeps the fog exact rather than incremental.
   for (let y = 0; y < world.height; y++) {
     for (let x = 0; x < world.width; x++) {
-      ctx.fillStyle = tileColor(world.ground[y][x], world.objects[y][x]);
+      const seen = explored.has(`${x},${y}`);
+      ctx.fillStyle = seen ? tileColor(world.ground[y][x], world.objects[y][x]) : UNSEEN;
       ctx.fillRect(x * tile, y * tile, tile - 1, tile - 1);
     }
   }
@@ -118,6 +134,7 @@ function draw() {
     // Unknown victims stay hidden: the viewer learns where they are when the
     // fleet does, which is the point of the demo.
     if (v.state === "unknown") continue;
+    if (!explored.has(`${v.x},${v.y}`)) continue;   // not found yet, not drawn
     ctx.globalAlpha = v.state === "located" ? pulse : 1;
     ctx.fillStyle =
       v.state === "stabilized" ? PALETTE.victimStabilized
@@ -166,6 +183,10 @@ function updateHud(metrics) {
   document.getElementById("m-located").textContent = metrics.victims_located ?? 0;
   document.getElementById("m-stabilized").textContent = metrics.victims_stabilized ?? 0;
   document.getElementById("m-lost").textContent = metrics.victims_lost ?? 0;
+  const coverage = document.getElementById("m-coverage");
+  if (coverage && metrics.coverage !== undefined) {
+    coverage.textContent = `${Math.round(metrics.coverage * 100)}%`;
+  }
 }
 
 function logEvents(events) {
@@ -202,6 +223,7 @@ function connect() {
       // the full grid anyway.
       if (!world) return;
       applyTileChanges(frame.tiles_changed);
+      applyExplored(frame.explored);
       trackRobots(frame.robots || []);
       victims = frame.victims || victims;
       windowStart = performance.now();

@@ -392,3 +392,79 @@ def test_an_off_map_target_does_not_corrupt_a_distant_tile():
         world.step({})
 
     assert world.objects == before, "an out-of-bounds target changed the world"
+
+
+# --- fog of war (FR-8) -------------------------------------------------------
+
+
+def test_a_tile_is_explored_once_a_robot_sees_it():
+    data = _flat(width=20, height=20, spawn_points={"scout": [{"x": 10, "y": 10}]})
+    world = World(parse_map(data), seed=0)
+    assert world.explored == set()
+
+    world.percept("s1")
+
+    radius = ROLES["scout"]["vision"]
+    assert (10, 10) in world.explored
+    assert (10 + radius, 10) in world.explored
+    assert (10 + radius + 1, 10) not in world.explored, "saw past its vision radius"
+
+
+def test_exploration_is_shared_across_the_fleet():
+    """The coordinated-mode promise (§4.8): any robot's vision reveals for all,
+    which is the visible difference the ON/OFF toggle demonstrates."""
+    data = _flat(width=30, height=20,
+                 spawn_points={"scout": [{"x": 5, "y": 5}], "medic": [{"x": 25, "y": 15}]})
+    world = World(parse_map(data), seed=0)
+
+    world.percept("s1")
+    world.percept("m1")
+
+    assert (5, 5) in world.explored and (25, 15) in world.explored
+    assert world.explored_by["s1"] != world.explored_by["m1"], "per-robot sets merged"
+    assert world.explored == world.explored_by["s1"] | world.explored_by["m1"]
+
+
+def test_only_newly_revealed_tiles_ride_in_a_frame():
+    """The explored set grows to the whole map; resending it four times a second
+    would dwarf every other field in the frame."""
+    data = _flat(width=20, height=20, spawn_points={"scout": [{"x": 10, "y": 10}]})
+    world = World(parse_map(data), seed=0)
+
+    first = world.step({"s1": Action.idle()})
+    assert first.explored, "nothing was revealed on the first tick"
+
+    second = world.step({"s1": Action.idle()})
+    assert second.explored == [], "already-known tiles were resent"
+
+
+def test_the_snapshot_carries_the_whole_explored_set():
+    """A browser joining mid-mission must see the fog as it stands, not a blank
+    map that fills in only from the next tick."""
+    data = _flat(width=20, height=20, spawn_points={"scout": [{"x": 10, "y": 10}]})
+    world = World(parse_map(data), seed=0)
+    world.step({"s1": Action.idle()})
+
+    snapshot = world.snapshot()
+    assert len(snapshot.explored) == len(world.explored)
+
+
+def test_coverage_ignores_walls():
+    """Counting walls would cap Coverage@500 (§4.7) below 100% forever and make
+    the metric unreadable."""
+    data = _flat(width=10, height=10, spawn_points={})
+    for x in range(10):
+        data["layers"]["ground"][0][x] = WALL
+    world = World(parse_map(data), seed=0)
+
+    world.explored = {(x, y) for y in range(1, 10) for x in range(10)}
+    assert world.coverage() == 1.0
+
+
+def test_coverage_starts_at_zero_and_rises():
+    data = _flat(width=20, height=20, spawn_points={"scout": [{"x": 10, "y": 10}]})
+    world = World(parse_map(data), seed=0)
+    assert world.metrics()["coverage"] == 0.0
+
+    world.step({"s1": Action.idle()})
+    assert 0.0 < world.metrics()["coverage"] < 1.0

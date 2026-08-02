@@ -102,6 +102,10 @@ class StateFrame:
     robots: list[dict[str, Any]] = field(default_factory=list)
     victims: list[dict[str, Any]] = field(default_factory=list)
     tiles_changed: list[dict[str, Any]] = field(default_factory=list)
+    # Tiles revealed this tick (FR-8). Sent as a delta for the same reason as
+    # tiles_changed: the explored set grows to the size of the map, and resending
+    # it every tick at 4 Hz would dwarf every other field in the frame.
+    explored: list[list[int]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     # snapshot only — the initial world the client renders before diffs arrive
