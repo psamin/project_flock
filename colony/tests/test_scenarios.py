@@ -35,7 +35,7 @@ def make_scenario(
     medics: int = 1,
 ):
     """A random but solvable map: staging strip on the left, obstacles beyond."""
-    rng = random.Random(seed)
+    rng = random.Random(seed)   # noqa: S311 - reproducible maps are the point
     ground = [["open"] * width for _ in range(height)]
     objects = [[EMPTY] * width for _ in range(height)]
 

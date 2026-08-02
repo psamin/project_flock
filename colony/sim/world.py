@@ -232,7 +232,7 @@ class World:
             if robot.role != "medic":
                 self._reject(robot, f"{robot.role} cannot stabilize")
                 return
-            victim = self._victim_at(tx, ty)
+            victim = self.victim_at(tx, ty)
             if victim is None or victim.state == "stabilized":
                 self._reject(robot, f"no victim to stabilize at ({tx},{ty})")
                 return
@@ -263,7 +263,7 @@ class World:
             self._tile_changed(tx, ty)
             self._event(robot.id, "debris_cleared", {"x": tx, "y": ty})
         elif robot.status == "stabilizing":
-            victim = self._victim_at(tx, ty)
+            victim = self.victim_at(tx, ty)
             if victim is not None:
                 victim.state = "stabilized"
                 self._event(robot.id, "victim_stabilized", {"victim": victim.id})
@@ -419,7 +419,9 @@ class World:
 
     # --- helpers ----------------------------------------------------------
 
-    def _victim_at(self, x: int, y: int) -> Victim | None:
+    def victim_at(self, x: int, y: int) -> Victim | None:
+        """The victim on this tile, if any. Public: agents ask it to decide
+        whether a delivery is still needed."""
         return next((v for v in self.victims.values() if v.x == x and v.y == y), None)
 
     def _tile_changed(self, x: int, y: int) -> None:

@@ -263,11 +263,12 @@ class FakeFleetMem:
             task["claimed_by"] = None
             task["lease_expires_at"] = None
 
-    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
+    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID] | None:
+        """None when the completion did not apply; see CockroachFleetMem."""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None or task["claimed_by"] != robot_id or task["status"] == DONE:
-                return []
+                return None
             task["status"] = DONE
             task["lease_expires_at"] = None   # a finished task is not abandoned work
 

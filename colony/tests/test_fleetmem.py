@@ -195,7 +195,7 @@ def test_a_task_waits_for_every_dependency(mem, mission):
 def test_only_the_claimer_can_complete(mem, mission):
     task = mem.create_task(mission, "clear_debris", (1, 1))
     mem.claim_task(task, "l1")
-    assert mem.complete_task(task, "l2") == []
+    assert mem.complete_task(task, "l2") is None, "a non-owner completed the task"
 
 
 def test_completing_twice_does_not_re_unblock(mem, mission):
@@ -206,7 +206,7 @@ def test_completing_twice_does_not_re_unblock(mem, mission):
     mem.claim_task(clear, "l1")
 
     assert mem.complete_task(clear, "l1") == [deliver]
-    assert mem.complete_task(clear, "l1") == []
+    assert mem.complete_task(clear, "l1") is None
 
 
 def test_open_tasks_are_priority_ordered(mem, mission):
@@ -413,3 +413,18 @@ def test_concurrent_sightings_produce_one_chain_on_cockroach(mission):
     assert len(checker.open_tasks(mission)) == 1, "the fleet was dispatched twice"
     for conn in conns:
         conn.close()
+
+
+def test_completion_reports_whether_it_applied(mem, mission):
+    """None and [] must mean different things. [] is "completed, nothing was
+    waiting on it"; None is "this did not apply". A caller that cannot tell
+    them apart logs a completion for work another robot finished, and every
+    §4.7 metric derived from the event log inflates."""
+    solo = mem.create_task(mission, "clear_debris", (1, 1))
+    mem.claim_task(solo, "l1")
+    assert mem.complete_task(solo, "l1") == [], "applied, nothing unblocked"
+
+    taken = mem.create_task(mission, "clear_debris", (2, 2))
+    mem.claim_task(taken, "l1", lease_seconds=-1)
+    assert mem.claim_task(taken, "l2") is True          # lease lapsed, taken over
+    assert mem.complete_task(taken, "l1") is None, "the old owner completed it anyway"

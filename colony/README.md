@@ -106,7 +106,7 @@ to both or the build goes red.
 report_observation(mission_id, robot_id, kind, pos, payload=None, embedding=None, confidence=1.0) -> UUID
 get_beliefs(mission_id, area=None, kind=None) -> list[Belief]
 claim_task(task_id, robot_id, lease_seconds=15) -> bool   # open OR expired lease
-complete_task(task_id, robot_id) -> list[UUID]   # ids of tasks this unblocked
+complete_task(task_id, robot_id) -> list[UUID] | None   # unblocked ids; None if it did not apply
 heartbeat(robot_id, pos=None, battery=None, status=None, lease_seconds=15) -> None  # renews leases
 log_event(mission_id, actor, verb, detail=None) -> None
 

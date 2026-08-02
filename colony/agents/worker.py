@@ -22,7 +22,7 @@ from agents.pathing import find_move_plan
 from fleetmem.types import Task
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, World
-from world.map_format import DEBRIS, FIRE, RUBBLE_HEAVY, WALL
+from world.map_format import DEBRIS, RUBBLE_HEAVY
 
 # Which task kinds each role is eligible for (§3.3 abilities).
 ROLE_TASKS = {
@@ -205,16 +205,15 @@ class Worker:
         return (x, y)
 
     def _passable(self, world: World, point: tuple[int, int]) -> bool:
-        x, y = point
-        if not (0 <= x < world.map.width and 0 <= y < world.map.height):
-            return False
-        if world.ground[y][x] == WALL:
-            return False
-        obj = world.objects[y][x]
-        if obj == FIRE:
-            return False
-        # A lifter walks *to* debris to clear it, but never through it.
-        return obj not in (DEBRIS, RUBBLE_HEAVY)
+        """The sim's rule, asked of the sim.
+
+        Re-implementing it here meant two copies that could drift: add an
+        impassable object to the world and the planner would keep routing
+        through it, making every plan unexecutable while still looking correct.
+        A lifter walks *to* debris to clear it, never through it, which is
+        exactly what `flying=False` already means.
+        """
+        return world.passable(point[0], point[1], flying=False)
 
     # --- finishing --------------------------------------------------------
 
@@ -226,14 +225,26 @@ class Worker:
         """
         if self.task.kind == "clear_debris":
             return world.objects[target[1]][target[0]] not in (DEBRIS, RUBBLE_HEAVY)
-        victim = world._victim_at(*target)          # noqa: SLF001 - sim-internal lookup
+        victim = world.victim_at(*target)
         return victim is not None and victim.state in ("stabilized", "lost")
 
     def _complete(self) -> None:
+        """Report completion — but only if shared memory accepted it.
+
+        `complete_task` applies only while this robot still owns the task. If
+        the lease lapsed and someone else took it over, the write matches no row
+        and returns None. Logging `task_completed` anyway would inflate the §4.7
+        metrics, which are derived entirely from this event stream, and would
+        credit a robot for work another one did.
+        """
         unblocked = self.mem.complete_task(self.task.id, self.robot_id)
-        self.mem.log_event(self.mission_id, self.robot_id, "task_completed",
-                           {"task": str(self.task.id), "kind": self.task.kind,
-                            "unblocked": [str(u) for u in unblocked]})
+        if unblocked is None:
+            self.mem.log_event(self.mission_id, self.robot_id, "task_lost",
+                               {"task": str(self.task.id), "kind": self.task.kind})
+        else:
+            self.mem.log_event(self.mission_id, self.robot_id, "task_completed",
+                               {"task": str(self.task.id), "kind": self.task.kind,
+                                "unblocked": [str(u) for u in unblocked]})
         self.task = None
 
     def _abandon(self, reason: str = "invalid") -> None:

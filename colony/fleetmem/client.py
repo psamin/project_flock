@@ -332,9 +332,16 @@ class CockroachFleetMem:
         )
 
     @retry_on_serialization_failure
-    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
+    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID] | None:
         """Mark a task done and unblock its dependents in the SAME transaction
-        (§4.4). Returns the ids of tasks that became open as a result.
+        (§4.4). Returns the ids of tasks that became open as a result, or
+        **None if the completion did not apply** — the task was already done, or
+        its lease lapsed and another robot now owns it.
+
+        The None/[] distinction matters: [] means "completed, nothing was
+        waiting on it", and a caller that cannot tell the two apart logs a
+        completion for work it did not finish, inflating every §4.7 metric
+        derived from the event log.
 
         A blocked task opens only when *every* dependency is done, so this checks
         the whole `depends_on` array rather than just the task that finished —
@@ -349,7 +356,7 @@ class CockroachFleetMem:
                 (DONE, task_id, robot_id, DONE),
             ).fetchone()
             if done is None:
-                return []
+                return None
             unblocked = self.conn.execute(
                 "UPDATE tasks SET status = %s"
                 " WHERE status = %s AND %s = ANY(depends_on)"
