@@ -6,7 +6,7 @@ import pytest
 from fleetmem.client import DEFAULT_DSN, CockroachFleetMem
 from fleetmem.fake import FakeFleetMem
 
-SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "v0.sql"
+SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "v1_1.sql"
 
 
 def _db_available() -> bool:

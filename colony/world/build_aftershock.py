@@ -20,6 +20,7 @@ from world.map_format import (
 )
 
 WIDTH, HEIGHT, TILE = 40, 30, 32
+SECTOR_W, SECTOR_H = 10, 10      # §3.3: a 4x3 grid of 10x10-tile sectors
 SEED = 20260801
 OUT = Path(__file__).resolve().parents[1] / "world" / "maps" / "aftershock.json"
 
@@ -94,6 +95,7 @@ def build() -> dict:
         "mission_length_ticks": 1200,
         "layers": {"ground": ground, "objects": objects},
         "zones": ZONES,
+        "sectors": _sectors(),
         "spawn_points": {
             "scout":  [{"x": 2, "y": 2}, {"x": 4, "y": 2}],
             "lifter": [{"x": 2, "y": 4}],
@@ -104,6 +106,24 @@ def build() -> dict:
     }
     parse_map(world)   # never write a map that would not load
     return world
+
+
+def _sectors() -> list[dict]:
+    """The 4x3 exploration grid from §3.3 — 12 sectors of 10x10 tiles.
+
+    One `explore_sector` task per sector at mission bootstrap (FR-16), so scouts
+    divide the map by claiming rather than by convention. Ids read A1..D3 so an
+    event log line like "s1 claimed sector C2" is legible to a judge.
+    """
+    return [
+        {
+            "id": f"{chr(ord('A') + col)}{row + 1}",
+            "x": col * SECTOR_W, "y": row * SECTOR_H,
+            "width": SECTOR_W, "height": SECTOR_H,
+        }
+        for row in range(HEIGHT // SECTOR_H)
+        for col in range(WIDTH // SECTOR_W)
+    ]
 
 
 def _victims() -> list[dict]:

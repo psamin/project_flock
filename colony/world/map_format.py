@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,11 @@ class WorldMap:
     spawn_points: dict[str, list[dict[str, int]]]
     victims: list[dict[str, Any]]
     escalations: list[dict[str, Any]]
+    # Exploration sectors (§3.3, v3.1): a 4x3 grid of 10x10 tiles on the demo
+    # map. Mission bootstrap seeds one `explore_sector` task per sector, so two
+    # live scouts can never sweep the same ground and a dead scout's sector
+    # frees itself (FR-16). Granularity is a playtest tuning knob.
+    sectors: list[dict[str, Any]] = field(default_factory=list)
     # Mission metadata. Carried through rather than dropped on load: the tick
     # server needs `mission_length_ticks` to know when the mission ends, and
     # `seed` is what makes a demo run reproducible (§4.8 "same seed + same action
@@ -79,6 +84,19 @@ class WorldMap:
                 return zone["name"]
         return None
 
+    def sector_at(self, x: int, y: int) -> str | None:
+        for sector in self.sectors:
+            if (sector["x"] <= x < sector["x"] + sector["width"]
+                    and sector["y"] <= y < sector["y"] + sector["height"]):
+                return sector["id"]
+        return None
+
+    def sector(self, sector_id: str) -> dict[str, Any]:
+        for sector in self.sectors:
+            if sector["id"] == sector_id:
+                return sector
+        raise KeyError(f"no sector {sector_id!r}")
+
 
 def load_map(path: str | Path) -> WorldMap:
     return parse_map(json.loads(Path(path).read_text()))
@@ -108,6 +126,42 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
                 raise MapError(f"zone {zone.get('name', '?')!r} is missing {key!r}")
         if zone["x"] + zone["width"] > width or zone["y"] + zone["height"] > height:
             raise MapError(f"zone {zone['name']!r} extends past the map bounds")
+
+    sectors = data.get("sectors", [])
+    seen_ids: set[str] = set()
+    # Counted per tile rather than by summing areas. Summed area cannot tell an
+    # overlap from a hole: two sectors overlapping on 50 tiles while 50 others
+    # go uncovered still totals width*height and would pass. Both halves of that
+    # matter — uncovered ground is never assigned to anyone and stays unswept,
+    # and doubly-covered ground puts two scouts on the same tiles, which is the
+    # duplicated effort sector claims exist to prevent (FR-16).
+    owner: dict[tuple[int, int], str] = {}
+    for sector in sectors:
+        for key in ("id", "x", "y", "width", "height"):
+            if key not in sector:
+                raise MapError(f"sector {sector.get('id', '?')!r} is missing {key!r}")
+        if sector["id"] in seen_ids:
+            raise MapError(f"duplicate sector id {sector['id']!r}")
+        seen_ids.add(sector["id"])
+        if sector["x"] + sector["width"] > width or sector["y"] + sector["height"] > height:
+            raise MapError(f"sector {sector['id']!r} extends past the map bounds")
+        for y in range(sector["y"], sector["y"] + sector["height"]):
+            for x in range(sector["x"], sector["x"] + sector["width"]):
+                if (x, y) in owner:
+                    raise MapError(
+                        f"sectors {owner[(x, y)]!r} and {sector['id']!r} both cover"
+                        f" ({x},{y}); every tile must belong to exactly one sector"
+                    )
+                owner[(x, y)] = sector["id"]
+
+    if sectors and len(owner) != width * height:
+        missing = [
+            (x, y) for y in range(height) for x in range(width) if (x, y) not in owner
+        ]
+        raise MapError(
+            f"{len(missing)} tiles belong to no sector, e.g. {missing[:3]};"
+            " every tile must belong to exactly one sector"
+        )
 
     for role, points in data["spawn_points"].items():
         if role not in ROLES:
@@ -167,6 +221,7 @@ def parse_map(data: dict[str, Any]) -> WorldMap:
         spawn_points=deepcopy(data["spawn_points"]),
         victims=deepcopy(data["victims"]),
         escalations=deepcopy(data["escalations"]),
+        sectors=deepcopy(sectors),
         name=data.get("name", ""), description=data.get("description", ""),
         seed=seed, mission_length_ticks=mission_ticks,
     )

@@ -1,16 +1,21 @@
 # Colony — fleet coordination layer
 
-Phase 1 (§5.3, Aug 1): cluster, schema, the `fleetmem` SDK, the `map.json` contract,
-CockroachDB vector indexing, and the Bedrock adapter. No tick server or renderer yet —
-that's the walking skeleton, Aug 2–3.
+Phase 1 (Aug 1): cluster, schema, the `fleetmem` SDK, the `map.json` contract,
+CockroachDB vector indexing, the Bedrock adapter.
+Phase 2 (Aug 2–3): the walking skeleton — scouts move, write beliefs, and render live in
+a browser. All four §5.2 interface contracts are now frozen.
 
 ## Start here
 
 ```bash
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
-make test     # 123 tests
+make sim      # tick server + renderer -> http://localhost:8000
+make test     # 202 tests
 ```
+
+`make sim` runs without a cluster too — it falls back to in-memory fleet memory and says
+so, so the renderer is never blocked on CockroachDB.
 
 `make dev` prints the DSN and the admin UI URL. `make down` tears it back down.
 
@@ -22,12 +27,43 @@ so a broken cluster can't masquerade as a green run.
 
 | Path | What it is |
 |---|---|
-| [`schema/v0.sql`](schema/v0.sql) | Schema v0 (§4.5), validated against live CockroachDB |
+| [`schema/v1_1.sql`](schema/v1_1.sql) | Schema v1.1 (§4.5), grouped by the four memories, validated against live CockroachDB |
 | [`fleetmem/client.py`](fleetmem/client.py) | The SDK — shared memory, claiming, reconcile gate |
 | [`fleetmem/fake.py`](fleetmem/fake.py) | In-memory implementation; no cluster needed |
 | [`bedrock/adapter.py`](bedrock/adapter.py) | Titan V2 embeddings + Claude planning, with offline mode |
 | [`world/map_format.py`](world/map_format.py) | `map.json` loader and validator (§4.8) |
 | [`world/maps/aftershock.json`](world/maps/aftershock.json) | The Aftershock reference map (§3.3) |
+| [`sim/protocol.py`](sim/protocol.py) | Action API + websocket state frame (contracts 2 and 3) |
+| [`sim/world.py`](sim/world.py) | Authoritative world state and the tick pipeline (§4.8) |
+| [`sim/server.py`](sim/server.py) | 4 Hz tick loop, websocket broadcast, serves the client |
+| [`agents/scout.py`](agents/scout.py) | Scout loop: sense → sync → think → act → report |
+| [`client/app.js`](client/app.js) | Renderer, with client-side interpolation between ticks |
+
+## Interface contracts (§5.2 — all four frozen Aug 3)
+
+**2. Agent → sim.** One action per robot per tick; the server validates every one and
+rejects illegal ones as events rather than exceptions.
+
+```python
+Action.move("n" | "s" | "e" | "w")     # advances up to the role's speed (§3.3)
+Action.act("clear_debris" | "stabilize", (x, y))       # adjacent, in-bounds
+# "recharge" and "restock" parse but the server rejects them — battery and kit
+# logistics are lane 2's, not built yet. Don't build against them today.
+Action.idle()
+```
+
+**3. Sim → browser.** A full `snapshot` frame on connect, then `diff` frames:
+
+```jsonc
+{"tick": 42, "kind": "diff",
+ "robots": [{"id": "s1", "role": "scout", "x": 14, "y": 9, "facing": "e", "status": "moving", ...}],
+ "victims": [{"id": "v1", "x": 14, "y": 9, "state": "located", ...}],
+ "tiles_changed": [{"x": 6, "y": 19, "ground": "open", "object": "rubble_heavy"}],
+ "events": [{"tick": 42, "actor": "s1", "verb": "victim_found", "detail": {...}}],
+ "metrics": {"victims_located": 3, ...}}
+```
+
+Only `tiles_changed` is sent per tick — the full grid rides along once, in the snapshot.
 
 ## For lanes 2 and 4 — start now, no cluster required
 
@@ -69,9 +105,9 @@ to both or the build goes red.
 ```python
 report_observation(mission_id, robot_id, kind, pos, payload=None, embedding=None, confidence=1.0) -> UUID
 get_beliefs(mission_id, area=None, kind=None) -> list[Belief]
-claim_task(task_id, robot_id) -> bool
+claim_task(task_id, robot_id, lease_seconds=15) -> bool   # open OR expired lease
 complete_task(task_id, robot_id) -> list[UUID]   # ids of tasks this unblocked
-heartbeat(robot_id, pos=None, battery=None, status=None) -> None
+heartbeat(robot_id, pos=None, battery=None, status=None, lease_seconds=15) -> None  # renews leases
 log_event(mission_id, actor, verb, detail=None) -> None
 
 create_task(mission_id, kind, target=(None, None), priority=1, depends_on=()) -> UUID
@@ -80,6 +116,10 @@ find_similar(mission_id, kind, pos, embedding, limit=5) -> Match | None
 register_robot(robot_id, role, pos, battery) -> None
 stale_robots(seconds=10) -> list[str]
 events(mission_id) -> list[dict]
+renew_leases(robot_id, lease_seconds=15) -> int
+release_task(task_id) -> None                    # status -> open, lease cleared
+log_plan(mission_id, robot_id, trigger, chosen, rationale, based_on=()) -> UUID
+plans_for(mission_id, robot_id=None) -> list[Plan]
 ```
 
 ## AWS Bedrock

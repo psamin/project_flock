@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import math
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 from uuid import UUID, uuid4
 
-from fleetmem.types import BLOCKED, CLAIMED, DONE, OPEN, Belief, Match, Task
+from fleetmem.types import (
+    BLOCKED, CLAIMED, DONE, IN_PROGRESS, OPEN, Belief, Match, Plan, Task,
+)
 
 MERGE_DISTANCE = 0.18
 MERGE_RADIUS_TILES = 5
+LEASE_SECONDS = 15   # mirrors fleetmem.client (§4.4)
 
 
 class FakeFleetMem:
@@ -30,6 +33,7 @@ class FakeFleetMem:
         self._tasks: dict[UUID, dict[str, Any]] = {}
         self._robots: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
+        self._plans: list[dict[str, Any]] = []
 
     def close(self) -> None:
         pass
@@ -151,18 +155,51 @@ class FakeFleetMem:
                 "id": task_id, "mission_id": mission_id, "kind": kind,
                 "target_x": target[0], "target_y": target[1], "priority": priority,
                 "status": BLOCKED if deps else OPEN, "depends_on": deps,
-                "claimed_by": None,
+                "claimed_by": None, "lease_expires_at": None,
             }
             return task_id
 
-    def claim_task(self, task_id: UUID, robot_id: str) -> bool:
+    def claim_task(self, task_id: UUID, robot_id: str,
+                   lease_seconds: int = LEASE_SECONDS) -> bool:
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task["status"] != OPEN:
+            if task is None or not self._claimable(task):
                 return False
             task["status"] = CLAIMED
             task["claimed_by"] = robot_id
+            task["lease_expires_at"] = _now() + timedelta(seconds=lease_seconds)
             return True
+
+    @staticmethod
+    def _claimable(task: dict[str, Any]) -> bool:
+        """Open, or held under a lease that has already lapsed (§4.4)."""
+        if task["status"] == OPEN:
+            return True
+        if task["status"] not in (CLAIMED, IN_PROGRESS):
+            return False
+        expires = task.get("lease_expires_at")
+        # A missing lease counts as expired, matching the client: rows claimed
+        # before the v1.1 migration carry no lease, and without this they would
+        # stay owned forever with nothing to repair them.
+        return expires is None or expires < _now()
+
+    def renew_leases(self, robot_id: str, lease_seconds: int = LEASE_SECONDS) -> int:
+        with self._lock:
+            renewed = 0
+            for task in self._tasks.values():
+                if task["claimed_by"] == robot_id and task["status"] in (CLAIMED, IN_PROGRESS):
+                    task["lease_expires_at"] = _now() + timedelta(seconds=lease_seconds)
+                    renewed += 1
+            return renewed
+
+    def release_task(self, task_id: UUID) -> None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task["status"] not in (CLAIMED, IN_PROGRESS):
+                return
+            task["status"] = OPEN
+            task["claimed_by"] = None
+            task["lease_expires_at"] = None
 
     def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
         with self._lock:
@@ -170,6 +207,7 @@ class FakeFleetMem:
             if task is None or task["claimed_by"] != robot_id or task["status"] == DONE:
                 return []
             task["status"] = DONE
+            task["lease_expires_at"] = None   # a finished task is not abandoned work
 
             unblocked = []
             for other in self._tasks.values():
@@ -182,9 +220,10 @@ class FakeFleetMem:
 
     def open_tasks(self, mission_id: UUID) -> list[Task]:
         with self._lock:
+            # Expired leases count as available — recovery needs no separate step.
             rows = [
                 t for t in self._tasks.values()
-                if t["mission_id"] == mission_id and t["status"] == OPEN
+                if t["mission_id"] == mission_id and self._claimable(t)
             ]
             rows.sort(key=lambda t: t["priority"], reverse=True)
             return [
@@ -192,7 +231,7 @@ class FakeFleetMem:
                     id=t["id"], mission_id=t["mission_id"], kind=t["kind"],
                     target=(t["target_x"], t["target_y"]), status=t["status"],
                     priority=t["priority"], depends_on=list(t["depends_on"]),
-                    claimed_by=t["claimed_by"],
+                    claimed_by=t["claimed_by"], lease_expires_at=t["lease_expires_at"],
                 )
                 for t in rows
             ]
@@ -205,18 +244,22 @@ class FakeFleetMem:
         pos: tuple[int, int] | None = None,
         battery: int | None = None,
         status: str | None = None,
+        lease_seconds: int = LEASE_SECONDS,
     ) -> None:
         with self._lock:
             robot = self._robots.get(robot_id)
-            if robot is None:
-                return
-            robot["heartbeat_at"] = _now()
-            if pos is not None:
-                robot["pos_x"], robot["pos_y"] = pos
-            if battery is not None:
-                robot["battery"] = battery
-            if status is not None:
-                robot["status"] = status
+            if robot is not None:
+                robot["heartbeat_at"] = _now()
+                if pos is not None:
+                    robot["pos_x"], robot["pos_y"] = pos
+                if battery is not None:
+                    robot["battery"] = battery
+                if status is not None:
+                    robot["status"] = status
+        # Renewal happens even for an unregistered robot, matching the client:
+        # the two statements there are independent, and a robot holding tasks
+        # must not lose them because its row is missing.
+        self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -228,11 +271,43 @@ class FakeFleetMem:
             }
 
     def stale_robots(self, seconds: int = 10) -> list[str]:
+        """Lost-marking for the UI only — never a recovery path. See the client."""
         with self._lock:
             cutoff = _now().timestamp() - seconds
             return [
                 r["id"] for r in self._robots.values()
                 if r["heartbeat_at"].timestamp() < cutoff
+            ]
+
+    def log_plan(
+        self,
+        mission_id: UUID,
+        robot_id: str,
+        trigger: str,
+        chosen: dict[str, Any],
+        rationale: str,
+        based_on: Sequence[UUID] = (),
+    ) -> UUID:
+        with self._lock:
+            plan_id = uuid4()
+            self._plans.append({
+                "id": plan_id, "mission_id": mission_id, "robot_id": robot_id,
+                "trigger": trigger, "chosen": chosen, "rationale": rationale,
+                "based_on": list(based_on), "at": _now(),
+            })
+            return plan_id
+
+    def plans_for(self, mission_id: UUID, robot_id: str | None = None) -> list[Plan]:
+        with self._lock:
+            return [
+                Plan(
+                    id=p["id"], mission_id=p["mission_id"], robot_id=p["robot_id"],
+                    trigger=p["trigger"], chosen=p["chosen"], rationale=p["rationale"],
+                    based_on=list(p["based_on"]), at=p["at"],
+                )
+                for p in self._plans
+                if p["mission_id"] == mission_id
+                and (robot_id is None or p["robot_id"] == robot_id)
             ]
 
     def log_event(

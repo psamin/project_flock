@@ -15,7 +15,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from fleetmem.types import BLOCKED, DONE, OPEN, Belief, Match, Task
+from fleetmem.types import BLOCKED, DONE, OPEN, Belief, Match, Plan, Task
 
 DEFAULT_DSN = "postgresql://root@localhost:26257/colony?sslmode=disable"
 
@@ -23,6 +23,12 @@ DEFAULT_DSN = "postgresql://root@localhost:26257/colony?sslmode=disable"
 # states the gate as >=0.82 cosine *similarity*; distance = 1 - similarity).
 MERGE_DISTANCE = 0.18
 MERGE_RADIUS_TILES = 5
+
+# Lease defaults (§4.4). 15s TTL renewed every 5s means three renewals can be
+# missed before a task frees itself; the longest atomic action (a rubble-heavy
+# clear, 6 ticks at 4 Hz = 1.5s) sits comfortably inside one lease.
+LEASE_SECONDS = 15
+RENEW_SECONDS = 5
 
 
 class CockroachFleetMem:
@@ -116,7 +122,7 @@ class CockroachFleetMem:
         # report_observation inserts a second belief for one victim.
         #
         # ORDER BY <=> with the mission_id prefix constrained is what lets the
-        # cosine index serve this; see the index comment in schema/v0.sql.
+        # cosine index serve this; see the index comment in schema/v1_1.sql.
         rows = self.conn.execute(
             "SELECT id, embedding <=> %s AS distance"
             "  FROM observations"
@@ -188,19 +194,61 @@ class CockroachFleetMem:
         ).fetchone()
         return row["id"]
 
-    def claim_task(self, task_id: UUID, robot_id: str) -> bool:
-        """Attempt to claim an open task. True iff this robot won it.
+    def claim_task(self, task_id: UUID, robot_id: str,
+                   lease_seconds: int = LEASE_SECONDS) -> bool:
+        """Attempt to claim a task. True iff this robot won it.
 
-        The judge-friendly line of SQL (§4.4). Under serializable isolation the
-        `status='open'` predicate makes exactly one concurrent caller win; losers
-        get zero rows back rather than an error, so no retry logic is needed.
+        The judge-friendly SQL (§4.4). Under serializable isolation exactly one
+        concurrent caller wins; losers get zero rows back rather than an error,
+        so no retry logic is needed.
+
+        A task is claimable when it is `open` **or** when its lease has expired —
+        which is what makes recovery lease-native (FR-5). A robot that dies
+        mid-task has its work taken over by the next claim attempt, with no
+        sweep, no watchdog and nothing on the recovery path but this query.
+
+        Expiry is compared against the database's now(), never a robot's clock,
+        so clock skew cannot manufacture a false takeover.
         """
         row = self.conn.execute(
-            "UPDATE tasks SET status = 'claimed', claimed_by = %s, claimed_at = now()"
-            " WHERE id = %s AND status = 'open' RETURNING id",
-            (robot_id, task_id),
+            "UPDATE tasks"
+            "   SET status = 'claimed', claimed_by = %s, claimed_at = now(),"
+            "       lease_expires_at = now() + %s::interval"
+            " WHERE id = %s"
+            "   AND (status = 'open'"
+            "        OR (status IN ('claimed', 'in_progress')"
+            "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
+            " RETURNING id",
+            (robot_id, f"{lease_seconds} seconds", task_id),
         ).fetchone()
         return row is not None
+
+    def renew_leases(self, robot_id: str, lease_seconds: int = LEASE_SECONDS) -> int:
+        """Push out the lease on every task this robot holds; returns the count.
+
+        Called from heartbeat() every RENEW_SECONDS, so three renewals can be
+        missed before a lease lapses (§4.4).
+        """
+        rows = self.conn.execute(
+            "UPDATE tasks SET lease_expires_at = now() + %s::interval"
+            " WHERE claimed_by = %s AND status IN ('claimed', 'in_progress')"
+            " RETURNING id",
+            (f"{lease_seconds} seconds", robot_id),
+        ).fetchall()
+        return len(rows)
+
+    def release_task(self, task_id: UUID) -> None:
+        """Hand a task back to the pool: status -> open, lease cleared (§4.4).
+
+        The explicit counterpart to lease expiry — used when an aftershock
+        invalidates in-flight work (FR-7) or an agent gives up.
+        """
+        self.conn.execute(
+            "UPDATE tasks SET status = 'open', claimed_by = NULL,"
+            "   claimed_at = NULL, lease_expires_at = NULL"
+            " WHERE id = %s AND status IN ('claimed', 'in_progress')",
+            (task_id,),
+        )
 
     def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
         """Mark a task done and unblock its dependents in the SAME transaction
@@ -211,8 +259,10 @@ class CockroachFleetMem:
         the scout→lifter→lifter→medic chain in §3.3 has a task with two.
         """
         with self.conn.transaction():
+            # Clearing the lease on completion keeps a finished task from ever
+            # looking like abandoned work to the takeover query.
             done = self.conn.execute(
-                "UPDATE tasks SET status = %s, done_at = now()"
+                "UPDATE tasks SET status = %s, done_at = now(), lease_expires_at = NULL"
                 " WHERE id = %s AND claimed_by = %s AND status != %s RETURNING id",
                 (DONE, task_id, robot_id, DONE),
             ).fetchone()
@@ -230,9 +280,18 @@ class CockroachFleetMem:
         return [r["id"] for r in unblocked]
 
     def open_tasks(self, mission_id: UUID) -> list[Task]:
-        """Claimable tasks, for the orchestrator's allocation pass (§4.4)."""
+        """Claimable tasks, for the orchestrator's allocation pass (§4.4).
+
+        Includes tasks whose lease has expired: to the allocator, work abandoned
+        by a dead robot is simply available again. This is the whole of the
+        recovery path — there is no separate reassignment step.
+        """
         rows = self.conn.execute(
-            "SELECT * FROM tasks WHERE mission_id = %s AND status = %s"
+            "SELECT * FROM tasks"
+            " WHERE mission_id = %s"
+            "   AND (status = %s"
+            "        OR (status IN ('claimed', 'in_progress')"
+            "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
             " ORDER BY priority DESC",
             (mission_id, OPEN),
         ).fetchall()
@@ -246,9 +305,14 @@ class CockroachFleetMem:
         pos: tuple[int, int] | None = None,
         battery: int | None = None,
         status: str | None = None,
+        lease_seconds: int = LEASE_SECONDS,
     ) -> None:
-        """Prove liveness. The orchestrator releases claims held by a robot whose
-        heartbeat is >10s stale (§4.4) — robot attrition as a 20-line query."""
+        """Report status **and renew every lease this robot holds** (§4.3, §4.4).
+
+        The renewal is the load-bearing half. `robots.heartbeat_at` now exists
+        only so the orchestrator can mark a robot `lost` for the UI and event
+        log; nothing reads it to recover work.
+        """
         self.conn.execute(
             "UPDATE robots SET heartbeat_at = now(),"
             "   pos_x = coalesce(%s, pos_x), pos_y = coalesce(%s, pos_y),"
@@ -257,6 +321,7 @@ class CockroachFleetMem:
             (None if pos is None else pos[0], None if pos is None else pos[1],
              battery, status, robot_id),
         )
+        self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -268,12 +333,53 @@ class CockroachFleetMem:
         )
 
     def stale_robots(self, seconds: int = 10) -> list[str]:
-        """Robots whose heartbeat has lapsed — their claims should be released."""
+        """Robots whose heartbeat has lapsed, for marking them `lost` in the UI
+        and event log.
+
+        Deliberately **not** a recovery mechanism (§4.4, v3.1): their tasks are
+        already reclaimable the moment the leases expire, whether or not anyone
+        runs this query. Do not build release logic on top of it.
+        """
         rows = self.conn.execute(
             "SELECT id FROM robots WHERE heartbeat_at < now() - %s::interval",
             (f"{seconds} seconds",),
         ).fetchall()
         return [r["id"] for r in rows]
+
+    def log_plan(
+        self,
+        mission_id: UUID,
+        robot_id: str,
+        trigger: str,
+        chosen: dict[str, Any],
+        rationale: str,
+        based_on: Sequence[UUID] = (),
+    ) -> UUID:
+        """Record a decision and the memories that drove it (FR-17, §4.0).
+
+        `based_on` is the ids of the belief rows that were in the prompt digest.
+        Storing them is what turns "the robot said it was going to the office"
+        into a traceable answer to "why?" — the commander console joins these
+        back to `observations`, and clicking a robot in the UI shows rationale
+        plus sources.
+        """
+        row = self.conn.execute(
+            "INSERT INTO plans (mission_id, robot_id, trigger, chosen, rationale, based_on)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (mission_id, robot_id, trigger, json.dumps(chosen), rationale,
+             list(based_on) or None),
+        ).fetchone()
+        return row["id"]
+
+    def plans_for(self, mission_id: UUID, robot_id: str | None = None) -> list[Plan]:
+        """Decision history, newest last. The commander console's raw material."""
+        sql = "SELECT * FROM plans WHERE mission_id = %s"
+        params: list[Any] = [mission_id]
+        if robot_id is not None:
+            sql += " AND robot_id = %s"
+            params.append(robot_id)
+        rows = self.conn.execute(sql + " ORDER BY at", params).fetchall()
+        return [_plan(r) for r in rows]
 
     def log_event(
         self, mission_id: UUID, actor: str, verb: str, detail: dict[str, Any] | None = None
@@ -306,10 +412,18 @@ def _belief(r: dict[str, Any]) -> Belief:
     )
 
 
+def _plan(r: dict[str, Any]) -> Plan:
+    return Plan(
+        id=r["id"], mission_id=r["mission_id"], robot_id=r["robot_id"],
+        trigger=r["trigger"], chosen=r["chosen"] or {}, rationale=r["rationale"] or "",
+        based_on=list(r["based_on"] or []), at=r["at"],
+    )
+
+
 def _task(r: dict[str, Any]) -> Task:
     return Task(
         id=r["id"], mission_id=r["mission_id"], kind=r["kind"],
         target=(r["target_x"], r["target_y"]), status=r["status"],
         priority=r["priority"], depends_on=list(r["depends_on"] or []),
-        claimed_by=r["claimed_by"],
+        claimed_by=r["claimed_by"], lease_expires_at=r.get("lease_expires_at"),
     )
