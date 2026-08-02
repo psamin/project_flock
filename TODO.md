@@ -8,10 +8,15 @@ off when a test proves that condition.
 
 ## Walking skeleton (Aug 1–3)
 
-- [ ] CRDB Cloud cluster (3 nodes) + local `cockroach demo` dev recipe
+- [x] CRDB Cloud cluster (3 nodes) + local `cockroach demo` dev recipe
   - One command brings up a local cluster and applies the schema; a 3-node
     recipe reports all 3 nodes healthy, which is what §6.5's node-kill segment
     runs against.
+  - Done: `make dev` (single node) and `make cluster-3` (three nodes, joined,
+    schema applied). Verified live — 3/3 nodes reporting, and killing one still
+    serves writes. **The CockroachDB Cloud half needs Praneeth**: it requires a
+    Cloud account, so only the self-hosted rig — which §6.5 says the node-kill
+    segment actually runs on — is built here.
 - [ ] Schema v1.1 (lease column, `plans` table, memory-type comments) validated against docs, incl. `VECTOR` + vector index syntax
   - All eight §4.5 tables apply to a live CockroachDB v26.2 instance;
     `observations.embedding` is `VECTOR(512)`; the vector index exists and
