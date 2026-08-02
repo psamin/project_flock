@@ -128,7 +128,9 @@ def test_unstable_ground_is_avoided_when_a_cheaper_way_exists():
     for x in range(6):
         world.ground[1][x] = "unstable"
 
-    route = find_path((0, 0), (5, 0), _walkable(world), cost=_unstable_costs_double(world))
+    route = find_path(
+        (0, 0), (5, 0), _walkable(world), cost=_unstable_costs_double(world)
+    )
 
     assert all(world.ground[y][x] != "unstable" for x, y in route)
 
@@ -140,7 +142,9 @@ def test_a_short_unstable_route_still_beats_a_long_detour():
         world.ground[y][x] = WALL
     world.ground[4][4] = "unstable"
 
-    route = find_path((0, 4), (8, 4), _walkable(world), cost=_unstable_costs_double(world))
+    route = find_path(
+        (0, 4), (8, 4), _walkable(world), cost=_unstable_costs_double(world)
+    )
 
     assert route is not None and (4, 4) in route
 
