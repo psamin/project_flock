@@ -29,9 +29,9 @@ from world.map_format import load_map
 
 TICK_HZ = 4
 TICK_SECONDS = 1 / TICK_HZ
-# Shorter than a tick: a viewer that cannot absorb a frame within one tick is
-# already falling behind, and waiting longer would hold up the simulation.
-SEND_TIMEOUT = TICK_SECONDS
+# Frames a viewer may fall behind before it is dropped: two seconds at 4 Hz.
+# Enough to ride out a slow paint, short enough that a wedged tab is noticed.
+QUEUE_FRAMES = 8
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
@@ -59,6 +59,39 @@ def _make_memory():
         return FakeFleetMem(), "fake"
 
 
+class Viewer:
+    """One browser, with its own outbound queue.
+
+    The queue is what keeps a slow client's problem to itself: frames are handed
+    over without ever awaiting the socket, and a viewer that falls more than
+    QUEUE_FRAMES behind is dropped rather than allowed to hold up the tick loop.
+    """
+
+    def __init__(self, socket: WebSocket):
+        self.socket = socket
+        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_FRAMES)
+        self.dropped = False
+
+    def offer(self, payload: str) -> bool:
+        """Queue a frame. False when the viewer is too far behind to keep."""
+        if self.dropped:
+            return False
+        try:
+            self.queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    def close(self) -> None:
+        self.dropped = True
+
+    async def pump(self) -> None:
+        """Own the socket: drain the queue until the client goes away."""
+        while not self.dropped:
+            payload = await self.queue.get()
+            await self.socket.send_text(payload)
+
+
 class Mission:
     """One running mission: the world, its agents, and everyone watching."""
 
@@ -66,7 +99,7 @@ class Mission:
         self.world = World(load_map(map_path), seed=seed)
         self.mission_id = uuid.uuid4()
         self.mem, self.memory_kind = _make_memory()
-        self.viewers: set[WebSocket] = set()
+        self.viewers: set[Viewer] = set()
         self.running = False
         # Held while a frame goes out, and while a joining viewer is snapshotted
         # and registered. Without it those two interleave: registering first lets
@@ -114,63 +147,62 @@ class Mission:
         self.running = False
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
-        """Fan out one frame. Concurrent, and bounded per viewer.
+        """Hand one frame to every viewer's queue. Never touches a socket.
 
-        Sending sequentially without a timeout let a single viewer that stopped
-        reading fill its send buffer and block the await — which blocks the tick
-        loop, which stops the mission for everyone. A browser tab that cannot
-        keep up gets dropped instead; it reconnects and receives a fresh
-        snapshot.
+        The tick loop must not be able to block on a browser. Writing to sockets
+        here — even concurrently, even with a timeout — means a wedged client can
+        hold things up for as long as that timeout allows, and the mission stops
+        for everyone else. Queueing is O(viewers) and cannot block at all; the
+        per-viewer pump owns the socket.
         """
-        if not self.viewers:
-            return
         payload = json.dumps(frame)
-
-        async def send(viewer: WebSocket) -> WebSocket | None:
-            try:
-                await asyncio.wait_for(viewer.send_text(payload), timeout=SEND_TIMEOUT)
-            except Exception:                      # noqa: BLE001 - a dropped viewer is routine
-                return viewer
-            return None
-
         async with self._broadcast_lock:
-            viewers = list(self.viewers)
-            for dead in await asyncio.gather(*(send(v) for v in viewers)):
-                if dead is not None:
-                    self.viewers.discard(dead)
+            for viewer in list(self.viewers):
+                if not viewer.offer(payload):
+                    # Queue full: this viewer is more than QUEUE_FRAMES behind
+                    # and will never catch up. Drop it; the browser reconnects
+                    # and gets a fresh snapshot.
+                    self.viewers.discard(viewer)
+                    viewer.close()
 
-    async def attach(self, socket: WebSocket) -> None:
-        """Register a viewer and send it the world, atomically w.r.t. broadcasts.
+    async def attach(self, socket: WebSocket) -> "Viewer":
+        """Register a viewer with the current world already queued.
 
-        Snapshotting, sending and registering all happen under the broadcast
-        lock, so the first thing a browser sees is a snapshot and the next thing
-        is the very next tick's diff — no gap, no reordering.
+        Snapshotting and registering happen under the broadcast lock and without
+        awaiting the socket, so the first frame a browser sees is a snapshot and
+        the next is the very next tick's diff — no gap, no reordering, and no way
+        for a slow client to stall the simulation while it is joining.
         """
+        viewer = Viewer(socket)
         async with self._broadcast_lock:
-            await socket.send_text(json.dumps(self.world.snapshot().to_json()))
-            self.viewers.add(socket)
+            viewer.offer(json.dumps(self.world.snapshot().to_json()))
+            self.viewers.add(viewer)
+        return viewer
+
+    def detach(self, viewer: "Viewer") -> None:
+        self.viewers.discard(viewer)
+        viewer.close()
 
 
-app = FastAPI(title="Colony sim")
 mission = Mission()
-_loop_task: asyncio.Task | None = None
 
 
-@app.on_event("startup")
-async def _start() -> None:
-    global _loop_task
-    _loop_task = asyncio.create_task(mission.run())
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start the tick loop with the app and stop it cleanly on shutdown."""
+    task = asyncio.create_task(mission.run())
     print(f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
           f"({mission.memory_kind} memory, {len(mission.agents)} scouts)")
-
-
-@app.on_event("shutdown")
-async def _stop() -> None:
-    mission.running = False
-    if _loop_task is not None:
-        _loop_task.cancel()
+    try:
+        yield
+    finally:
+        mission.running = False
+        task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await _loop_task
+            await task
+
+
+app = FastAPI(title="Colony sim", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -186,14 +218,25 @@ async def health() -> dict[str, Any]:
 async def ws(socket: WebSocket) -> None:
     """A viewer gets the full world once, then diffs (§4.8)."""
     await socket.accept()
-    await mission.attach(socket)
-    try:
+    viewer = await mission.attach(socket)
+
+    async def watch_for_disconnect() -> None:
         while True:
             await socket.receive_text()            # viewers are read-only for now
-    except WebSocketDisconnect:
-        pass
+
+    # Whichever finishes first ends the connection: the pump raises when the
+    # socket dies, the watcher raises when the client disconnects.
+    tasks = [asyncio.create_task(viewer.pump()),
+             asyncio.create_task(watch_for_disconnect())]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                task.result()
     finally:
-        mission.viewers.discard(socket)
+        mission.detach(viewer)
 
 
 @app.get("/")
