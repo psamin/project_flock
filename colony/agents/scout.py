@@ -20,12 +20,18 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from agents.pathing import find_path
 from sim.protocol import DIRECTIONS, Action
 from sim.world import Percept, World
-from world.map_format import EMPTY, WALL
+from world.map_format import DEBRIS, EMPTY, FIRE, RUBBLE_HEAVY, WALL
 
 # Kinds the scout reports into shared memory.
 VICTIM, HAZARD = "victim", "hazard"
+
+# What crossing a debris tile costs when planning a rescue route. Roughly the
+# cost of clearing it (3 ticks, 6 for rubble-heavy), so a route digs through only
+# when going around is genuinely worse.
+DEBRIS_ROUTE_COST = 4
 
 
 def split_sectors(sectors: list[dict[str, Any]], parts: int) -> list[tuple[str, ...]]:
@@ -94,7 +100,7 @@ class Scout:
         this tick.
         """
         percept = world.percept(self.robot_id)      # sense
-        self._sync(percept)                          # sync: local -> shared memory
+        self._sync(percept, world)                   # sync: local -> shared memory
         action = self._think(world, percept)         # think
         self.mem.heartbeat(self.robot_id,
                            pos=(world.robots[self.robot_id].x, world.robots[self.robot_id].y),
@@ -104,29 +110,93 @@ class Scout:
 
     # --- sync -------------------------------------------------------------
 
-    def _sync(self, percept: Percept) -> None:
-        """Push new sightings through the reconcile gate.
+    def _blockers(self, world: World, pos: tuple[int, int]) -> list[tuple[int, int]]:
+        """Debris a ground robot must clear before it can reach this victim.
+
+        Not just the tiles touching the victim. §3.3's victims sit *behind* a
+        debris wall in a dense block, and the wall is usually somewhere along the
+        route rather than against the victim — ordering only adjacent clears left
+        medics pathing to victims they could never reach, abandoning the task,
+        and re-claiming it forever while the clock ran out.
+
+        So the route decides: path from where the ground robots start, treating
+        debris as passable but expensive, and every debris tile the cheapest
+        route crosses becomes a `clear_debris`. If a clean route already exists,
+        no lifter is needed.
+        """
+        origin = self._ground_origin(world)
+        if origin is None:
+            return []
+
+        route = find_path(
+            origin, pos,
+            passable=lambda p: (
+                0 <= p[0] < world.map.width and 0 <= p[1] < world.map.height
+                and world.ground[p[1]][p[0]] != WALL
+                and world.objects[p[1]][p[0]] != FIRE
+            ),
+            # Debris is crossable only by clearing it, so it costs about what
+            # clearing costs; the route then prefers going around when going
+            # around is cheap and digs through when it is not.
+            cost=lambda p: DEBRIS_ROUTE_COST if world.objects[p[1]][p[0]] in
+            (DEBRIS, RUBBLE_HEAVY) else 1,
+            goal_is_adjacent=True,
+        )
+        if route is None:
+            return []
+        return [p for p in route if world.objects[p[1]][p[0]] in (DEBRIS, RUBBLE_HEAVY)]
+
+    def _ground_origin(self, world: World) -> tuple[int, int] | None:
+        """Where ground robots come from. Their spawn, or failing that, a lifter
+        or medic's current tile — a scout's own position is no use, since it can
+        fly over the very debris the question is about."""
+        for role in ("lifter", "medic"):
+            points = world.map.spawn_points.get(role)
+            if points:
+                return (points[0]["x"], points[0]["y"])
+        for robot in world.robots.values():
+            if not robot.flying:
+                return (robot.x, robot.y)
+        return None
+
+    def _sync(self, percept: Percept, world: World) -> None:
+        """Push new sightings through the reconcile gate, and turn victims into
+        the rescue chain that reaches them.
 
         Deduplicated locally first, so a scout hovering over one victim does not
         hammer the gate with the same observation every tick. The gate is still
-        the authority on whether two *different* robots saw the same thing.
+        the authority on whether two *different* robots saw the same thing, and
+        register_victim is idempotent per position, so a second scout arriving
+        later cannot dispatch the fleet twice.
         """
         for tile in percept.tiles:
             self.explored.add((tile["x"], tile["y"]))
 
         for victim in percept.victims:
-            self._report(VICTIM, victim["x"], victim["y"], {
+            new = self._report(VICTIM, victim["x"], victim["y"], {
                 "victim_id": victim["id"], "state": victim["state"],
                 "note": "sighted by scout",
             })
+            if not new:
+                continue
+            # §4.2 step 3: the sighting creates the work. Without this a scout
+            # reports victims into shared memory that nobody is ever dispatched
+            # to reach.
+            self.mem.register_victim(
+                self.mission_id, (victim["x"], victim["y"]),
+                reported_by=self.robot_id,
+                blocked_by=self._blockers(world, (victim["x"], victim["y"])),
+                vitals_deadline=victim.get("vitals_deadline"),
+            )
 
         for hazard in percept.hazards:
             self._report(HAZARD, hazard["x"], hazard["y"], {"kind": hazard["kind"]})
 
-    def _report(self, kind: str, x: int, y: int, payload: dict[str, Any]) -> None:
+    def _report(self, kind: str, x: int, y: int, payload: dict[str, Any]) -> bool:
+        """Report a sighting. False when this scout has already reported it."""
         key = (kind, x, y)
         if key in self.reported:
-            return
+            return False
         self.reported.add(key)
 
         embedding = None
@@ -140,6 +210,7 @@ class Scout:
         )
         self.mem.log_event(self.mission_id, self.robot_id, f"{kind}_reported",
                            {"x": x, "y": y, **payload})
+        return True
 
     # --- think ------------------------------------------------------------
 

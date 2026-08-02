@@ -8,6 +8,7 @@ apart.
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any, Sequence
 from uuid import UUID
@@ -30,6 +31,29 @@ MERGE_RADIUS_TILES = 5
 LEASE_SECONDS = 15
 RENEW_SECONDS = 5
 
+# CockroachDB runs SERIALIZABLE and aborts transactions that would violate it,
+# with SQLSTATE 40001. That is not an error condition, it is the contract: the
+# client is expected to replay the transaction. Two scouts reporting the same
+# victim at the same instant is exactly the contention that triggers it, so the
+# reconcile gate and the chain it creates must both be replayable.
+MAX_RETRIES = 5
+
+
+def retry_on_serialization_failure(method):
+    """Replay a transactional method when CockroachDB asks us to."""
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        for attempt in range(MAX_RETRIES):
+            try:
+                return method(*args, **kwargs)
+            except psycopg.errors.SerializationFailure:
+                if attempt == MAX_RETRIES - 1:
+                    raise
+        raise AssertionError("unreachable")
+
+    return wrapper
+
 
 class CockroachFleetMem:
     def __init__(self, dsn: str = DEFAULT_DSN):
@@ -40,6 +64,7 @@ class CockroachFleetMem:
 
     # --- observations -----------------------------------------------------
 
+    @retry_on_serialization_failure
     def report_observation(
         self,
         mission_id: UUID,
@@ -161,6 +186,7 @@ class CockroachFleetMem:
 
     # --- tasks ------------------------------------------------------------
 
+    @retry_on_serialization_failure
     def register_victim(
         self,
         mission_id: UUID,
@@ -305,6 +331,7 @@ class CockroachFleetMem:
             (task_id,),
         )
 
+    @retry_on_serialization_failure
     def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
         """Mark a task done and unblock its dependents in the SAME transaction
         (§4.4). Returns the ids of tasks that became open as a result.

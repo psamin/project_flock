@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from bedrock.adapter import EMBED_DIMS, BedrockAdapter
+from tests.conftest import needs_db
 from fleetmem.types import BLOCKED, CLAIMED, DONE, OPEN
 
 
@@ -354,3 +355,61 @@ def test_registering_the_same_victim_twice_does_not_double_dispatch(mem, mission
     assert first_id == second_id
     assert set(second_tasks) == set(first_tasks), "a second chain was created"
     assert len(mem.open_tasks(mission)) == 1, "the fleet was dispatched twice"
+
+
+def test_the_fake_never_returns_a_half_built_chain(mission):
+    """Regression: the fake released its lock between inserting the victim and
+    creating its tasks, so a concurrent sighting could see the victim, take the
+    'already registered' branch, and be handed an empty chain — reporting that a
+    trapped victim needs no rescue at all.
+
+    Fake-specific by design: this is a test of its locking. The client is
+    covered below, where each thread gets its own connection.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fleetmem.fake import FakeFleetMem
+
+    mem = FakeFleetMem()
+
+    def register(_):
+        return mem.register_victim(
+            mission, (14, 9), reported_by="s1", blocked_by=[(14, 8)]
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(register, range(8)))
+
+    assert len({v for v, _ in results}) == 1, "the victim was registered twice"
+    for _, tasks in results:
+        assert len(tasks) == 2, f"a caller got a half-built chain: {tasks}"
+
+
+@needs_db
+def test_concurrent_sightings_produce_one_chain_on_cockroach(mission):
+    """Two scouts sighting the same victim at the same instant is exactly the
+    contention SERIALIZABLE aborts with 40001, which is why register_victim is
+    replayable. Each thread gets its own connection — sharing one would be
+    testing psycopg, not the database."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fleetmem.client import CockroachFleetMem
+
+    conns = [CockroachFleetMem() for _ in range(4)]
+
+    def register(conn):
+        return conn.register_victim(
+            mission, (21, 17), reported_by="s1", blocked_by=[(21, 16)]
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(register, conns))
+
+    assert len({v for v, _ in results}) == 1, "the victim was registered twice"
+    for _, tasks in results:
+        assert len(tasks) == 2, f"a caller got a half-built chain: {tasks}"
+
+    checker = conns[0]
+    assert len(checker.open_tasks(mission)) == 1, "the fleet was dispatched twice"
+    for conn in conns:
+        conn.close()

@@ -55,7 +55,14 @@ def find_path(
 
     def reached(point: Point) -> bool:
         if goal_is_adjacent:
-            return abs(point[0] - goal[0]) + abs(point[1] - goal[1]) == 1
+            # Distance <= 1, not == 1, to match the sim's rule for work verbs:
+            # a robot standing *on* the target can act on it too. Requiring
+            # exactly 1 made a speed-2 medic stall two tiles out, because the
+            # single adjacent tile is not a position it can stop at and landing
+            # on the victim scored no better than staying put. Targets that
+            # cannot be stood on — debris, rubble — are impassable anyway, so
+            # this never routes a lifter onto its own work.
+            return abs(point[0] - goal[0]) + abs(point[1] - goal[1]) <= 1
         return point == goal
 
     if reached(start):
@@ -93,6 +100,84 @@ def find_path(
                 (step + abs(nxt[0] - goal[0]) + abs(nxt[1] - goal[1]), counter, nxt),
             )
     return None
+
+
+def find_move_plan(
+    start: Point,
+    goal: Point,
+    landing: Callable[[Point, str], Point],
+    *,
+    goal_is_adjacent: bool = False,
+    speed: int = 1,
+    max_expansions: int = 20_000,
+) -> list[str] | None:
+    """Cheapest sequence of *moves* from `start`, or None if there isn't one.
+
+    Searching tiles and then walking the result one tile at a time is wrong for
+    any robot whose speed exceeds one: a single `move` carries it up to `speed`
+    tiles (§3.3), so the tile where a route turns is not a position it can stop
+    at. In practice the robot overshoots, replans from the far side, and either
+    paces between two tiles forever or — worse — stalls outright, because no
+    single-tile step improves its distance.
+
+    So the search runs over moves. Each edge is "issue one move in direction d"
+    and lands wherever the world actually puts the robot, which makes the plan
+    executable by construction rather than by luck. Speed is a parameter, not an
+    assumption, so this works unchanged for a speed-1 lifter and a speed-3 scout.
+    """
+    def reached(point: Point) -> bool:
+        if goal_is_adjacent:
+            return abs(point[0] - goal[0]) + abs(point[1] - goal[1]) <= 1
+        return point == goal
+
+    if reached(start):
+        return []
+
+    def heuristic(point: Point) -> int:
+        # Manhattan distance divided by the furthest one move can carry us:
+        # admissible, so the search stays optimal.
+        gap = abs(point[0] - goal[0]) + abs(point[1] - goal[1])
+        return (max(0, gap - (1 if goal_is_adjacent else 0)) + speed - 1) // max(1, speed)
+
+    counter = 0
+    frontier: list[tuple[int, int, Point]] = [(heuristic(start), counter, start)]
+    came_from: dict[Point, tuple[Point, str]] = {}
+    best: dict[Point, int] = {start: 0}
+    expansions = 0
+
+    while frontier:
+        _, _, current = heapq.heappop(frontier)
+        if reached(current):
+            return _rebuild_moves(came_from, start, current)
+
+        expansions += 1
+        if expansions > max_expansions:
+            return None
+
+        for direction in sorted(DIRECTIONS):     # sorted: deterministic ties
+            nxt = landing(current, direction)
+            if nxt == current:
+                continue                          # this move goes nowhere
+            steps = best[current] + 1
+            if steps >= best.get(nxt, 1 << 30):
+                continue
+            best[nxt] = steps
+            came_from[nxt] = (current, direction)
+            counter += 1
+            heapq.heappush(frontier, (steps + heuristic(nxt), counter, nxt))
+    return None
+
+
+def _rebuild_moves(
+    came_from: dict[Point, tuple[Point, str]], start: Point, end: Point
+) -> list[str]:
+    moves: list[str] = []
+    cursor = end
+    while cursor != start:
+        cursor, direction = came_from[cursor]
+        moves.append(direction)
+    moves.reverse()
+    return moves
 
 
 def _rebuild(came_from: dict[Point, Point], start: Point, end: Point) -> list[Point]:
