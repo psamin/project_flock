@@ -217,3 +217,123 @@ def test_a_scout_reports_fire_as_a_hazard(mem, mission):
 
     hazards = mem.get_beliefs(mission, kind="hazard")
     assert len(hazards) == 1 and hazards[0].pos == (12, 10)
+
+
+# --- sector claims (FR-16) ---------------------------------------------------
+
+
+def _sector_world():
+    """A 20x20 map split into four 10x10 sectors."""
+    data = {
+        "width": 20, "height": 20, "tile_size": 32,
+        "layers": {"ground": [["open"] * 20 for _ in range(20)],
+                   "objects": [[EMPTY] * 20 for _ in range(20)]},
+        "zones": [],
+        "sectors": [
+            {"id": "A1", "x": 0, "y": 0, "width": 10, "height": 10},
+            {"id": "B1", "x": 10, "y": 0, "width": 10, "height": 10},
+            {"id": "A2", "x": 0, "y": 10, "width": 10, "height": 10},
+            {"id": "B2", "x": 10, "y": 10, "width": 10, "height": 10},
+        ],
+        "spawn_points": {"scout": [{"x": 2, "y": 2}, {"x": 4, "y": 2}]},
+        "victims": [], "escalations": [],
+    }
+    return World(parse_map(data), seed=0)
+
+
+def test_a_scout_claims_a_sector_before_exploring(mem, mission):
+    from agents.scout import seed_sector_tasks
+
+    world = _sector_world()
+    seed_sector_tasks(mem, mission, world.map)
+    scout = _scout(mem, mission)
+
+    scout.step(world)
+
+    assert scout.sector_task is not None, "the scout explored without claiming"
+    verbs = [e["verb"] for e in mem.events(mission)]
+    assert "sector_claimed" in verbs
+
+
+def test_two_scouts_never_hold_the_same_sector(mem, mission):
+    """FR-16's whole point, and it rides on the same claiming transaction that
+    stops two lifters taking one debris pile."""
+    from agents.scout import seed_sector_tasks
+
+    world = _sector_world()
+    seed_sector_tasks(mem, mission, world.map)
+    a = Scout(robot_id="s1", mission_id=mission, mem=mem, embedder=BedrockAdapter())
+    b = Scout(robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter(), seed=1)
+
+    a.step(world)
+    b.step(world)
+
+    assert a.sector_task is not None and b.sector_task is not None
+    assert a.sector_task.id != b.sector_task.id, "both scouts hold one sector"
+
+
+def test_a_scout_claims_the_nearest_sector(mem, mission):
+    """Sectors share a priority, so without distance ordering a scout can fly
+    the width of the map past unswept ground."""
+    from agents.scout import seed_sector_tasks
+
+    world = _sector_world()
+    seed_sector_tasks(mem, mission, world.map)
+    scout = _scout(mem, mission)          # spawns at (2, 2), inside A1
+    scout.step(world)
+
+    assert scout.sector_task.kind == "explore_sector:A1"
+
+
+def test_a_swept_sector_is_completed_and_the_next_claimed(mem, mission):
+    from agents.scout import seed_sector_tasks
+
+    world = _sector_world()
+    seed_sector_tasks(mem, mission, world.map)
+    scout = _scout(mem, mission)
+    scout.step(world)
+    first = scout.sector_task.id
+
+    # Pretend the sector has been swept.
+    sector = world.map.sector(scout.sector_task.kind.split(":", 1)[1])
+    scout.explored |= {
+        (x, y)
+        for y in range(sector["y"], sector["y"] + sector["height"])
+        for x in range(sector["x"], sector["x"] + sector["width"])
+    }
+    scout.step(world)
+
+    assert scout.sector_task is not None
+    assert scout.sector_task.id != first, "the scout stayed on a finished sector"
+    assert "sector_swept" in [e["verb"] for e in mem.events(mission)]
+
+
+def test_a_dead_scouts_sector_frees_itself(mem, mission):
+    """Recovery with no supervisor: the lease lapses and the sector is claimable
+    again (§4.4). This is the resilience story, applied to exploration."""
+    from agents.scout import seed_sector_tasks
+
+    world = _sector_world()
+    tasks = seed_sector_tasks(mem, mission, world.map)
+    # s1 claims every sector and then dies, leases already lapsed.
+    for task in tasks:
+        assert mem.claim_task(task, "s1", lease_seconds=-1) is True
+    assert mem.open_tasks(mission), "no sector came back to the pool"
+
+    survivor = Scout(robot_id="s2", mission_id=mission, mem=mem, embedder=BedrockAdapter())
+    survivor.step(world)
+
+    assert survivor.sector_task is not None, "the dead scout's sectors were not reclaimed"
+    assert survivor.sector_task.id in tasks
+
+
+def test_a_scout_falls_back_to_static_shares_without_sector_tasks(mem, mission):
+    """Baseline mode seeds no sector tasks (§3.3), and small fixtures have no
+    sector grid at all. Exploration must still work."""
+    world = _sector_world()
+    scout = Scout(robot_id="s1", mission_id=mission, mem=mem,
+                  embedder=BedrockAdapter(), sectors=("A1",))
+    action = scout.step(world)
+
+    assert scout.sector_task is None
+    assert action.kind in ("move", "idle")

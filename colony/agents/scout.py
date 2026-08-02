@@ -33,6 +33,16 @@ VICTIM, HAZARD = "victim", "hazard"
 # when going around is genuinely worse.
 DEBRIS_ROUTE_COST = 4
 
+# FR-16. A short lease because a sector sweep is short: a dead scout's sector
+# should return to the pool quickly, but not so quickly that a live scout keeps
+# losing the one it is working.
+SECTOR_LEASE_SECONDS = 20
+
+# Coverage at which a sector counts as swept (§4.4: "~85%, tuned at playtest").
+# Never 100%: walls and sealed interiors are unreachable, so a scout waiting for
+# every tile would hold its sector for the whole mission.
+SECTOR_DONE_COVERAGE = 0.85
+
 
 def split_sectors(sectors: list[dict[str, Any]], parts: int) -> list[tuple[str, ...]]:
     """Divide the map's sector grid into `parts` **contiguous** shares.
@@ -68,20 +78,15 @@ class Scout:
     embedder: Any = None           # BedrockAdapter; None skips embeddings
     seed: int = 0
 
-    # Sector ids from the map's 4x3 grid (§3.3) this scout is responsible for,
-    # e.g. ("A1", "C2", "B3"). Two scouts running identical nearest-frontier
-    # logic from neighbouring spawns lock together and fly in formation, seeing
-    # the same tiles twice — the duplicated exploration this product exists to
-    # remove, on display in the demo.
-    #
-    # v3.1 turns this into `explore_sector` tasks claimed one at a time under a
-    # short lease (FR-16), so two live scouts can't share a sector and a dead
-    # scout's sector frees itself. That claiming loop is Aug 4-6. Holding a
-    # *share* of the grid is the interim stand-in: a single static sector is
-    # swept out in a few ticks, after which the scout has nowhere assigned to go
-    # and drifts back onto its neighbour's ground — measured at 1.18x the
-    # coverage of one scout, against 1.67x when each holds a share.
+    # Static fallback share of the sector grid, used only when sector tasks are
+    # not seeded (baseline mode, and small fixtures). FR-16's claimed sectors
+    # take precedence whenever they exist.
     sectors: tuple[str, ...] = ()
+
+    # The sector this scout currently holds a claim on (FR-16). Claimed one at a
+    # time under a short lease, so two live scouts can never sweep the same
+    # ground and a dead scout's sector frees itself with no supervisor involved.
+    sector_task: Any = field(default=None)
 
     explored: set[tuple[int, int]] = field(default_factory=set)
     reported: set[tuple[str, int, int]] = field(default_factory=set)
@@ -105,7 +110,7 @@ class Scout:
         self.mem.heartbeat(self.robot_id,
                            pos=(world.robots[self.robot_id].x, world.robots[self.robot_id].y),
                            battery=world.robots[self.robot_id].battery,
-                           status="exploring")
+                           status="exploring", lease_seconds=SECTOR_LEASE_SECONDS)
         return action                                # act (the sim applies it)
 
     # --- sync -------------------------------------------------------------
@@ -214,10 +219,70 @@ class Scout:
 
     # --- think ------------------------------------------------------------
 
+    # --- sector claims (FR-16) --------------------------------------------
+
+    def _sector_tiles(self, world: World, sector_id: str) -> list[tuple[int, int]]:
+        sector = world.map.sector(sector_id)
+        return [
+            (x, y)
+            for y in range(sector["y"], sector["y"] + sector["height"])
+            for x in range(sector["x"], sector["x"] + sector["width"])
+            if world.ground[y][x] != WALL
+        ]
+
+    def _sector_coverage(self, world: World, sector_id: str) -> float:
+        tiles = self._sector_tiles(world, sector_id)
+        if not tiles:
+            return 1.0
+        return sum(1 for t in tiles if t in self.explored) / len(tiles)
+
+    def _manage_sector(self, world: World) -> None:
+        """Complete a swept sector and claim the next one.
+
+        Claiming is what makes exploration non-duplicating: the same transaction
+        that stops two lifters taking one debris pile stops two scouts sweeping
+        one sector, with no coordinator in the middle.
+        """
+        if self.sector_task is not None:
+            sector_id = self.sector_task.kind.split(":", 1)[1]
+            if self._sector_coverage(world, sector_id) >= SECTOR_DONE_COVERAGE:
+                self.mem.complete_task(self.sector_task.id, self.robot_id)
+                self.mem.log_event(self.mission_id, self.robot_id, "sector_swept",
+                                   {"sector": sector_id})
+                self.sector_task = None
+            else:
+                return
+
+        robot = world.robots[self.robot_id]
+        # Nearest first: sectors all carry the same priority, so without this a
+        # scout takes whatever the query happens to return and can fly the width
+        # of the map past unswept ground to reach it.
+        candidates = sorted(
+            (t for t in self.mem.open_tasks(self.mission_id)
+             if t.kind.startswith("explore_sector:")),
+            key=lambda t: (abs((t.target[0] or 0) - robot.x)
+                           + abs((t.target[1] or 0) - robot.y), str(t.id)),
+        )
+        for task in candidates:
+            if self.mem.claim_task(task.id, self.robot_id,
+                                   lease_seconds=SECTOR_LEASE_SECONDS):
+                self.sector_task = task
+                self.mem.log_event(self.mission_id, self.robot_id, "sector_claimed",
+                                   {"sector": task.kind.split(":", 1)[1]})
+                return
+
+    @property
+    def _active_sectors(self) -> tuple[str, ...]:
+        """The claimed sector if there is one, else the static share."""
+        if self.sector_task is not None:
+            return (self.sector_task.kind.split(":", 1)[1],)
+        return self.sectors
+
     def _think(self, world: World, percept: Percept) -> Action:
         """Frontier-biased exploration (§4.3): head for the nearest tile we have
         not seen, preferring to keep going rather than dithering between equally
         good options."""
+        self._manage_sector(world)
         robot = world.robots[self.robot_id]
         here = (robot.x, robot.y)
 
@@ -249,7 +314,8 @@ class Scout:
                 if (x, y) in self.explored or world.ground[y][x] == WALL:
                     continue
                 score = abs(x - here[0]) + abs(y - here[1])
-                if self.sectors and world.map.sector_at(x, y) not in self.sectors:
+                if (self._active_sectors
+                        and world.map.sector_at(x, y) not in self._active_sectors):
                     score += penalty
                 if best_score is None or score < best_score:
                     best, best_score = (x, y), score
@@ -294,3 +360,17 @@ class Scout:
     @staticmethod
     def _dir_y(dy: int) -> str:
         return "s" if dy > 0 else "n" if dy < 0 else ""
+
+
+def seed_sector_tasks(mem, mission_id, world_map) -> list:
+    """One `explore_sector` task per sector at mission bootstrap (FR-16).
+
+    The sector id rides in the task kind so a scout can read it back without a
+    second lookup, and so the event ticker says `explore_sector:C2` rather than
+    an opaque uuid — legible to a judge watching the demo.
+    """
+    return [
+        mem.create_task(mission_id, f"explore_sector:{sector['id']}",
+                        (sector["x"], sector["y"]), priority=1)
+        for sector in world_map.sectors
+    ]
