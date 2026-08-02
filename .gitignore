@@ -1,1 +1,14 @@
 .gstack/
+
+# Credentials — team-wide, and the one thing here that must stay shared.
+# Personal tooling config belongs in each clone's .git/info/exclude; this does
+# not, because a leaked secret is everyone's problem.
+#
+# Relevant to Lane 1 specifically: §3.5 gives every robot its own SQL user, and
+# `cockroach cert` writes node and client certs into certs/.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+certs/
