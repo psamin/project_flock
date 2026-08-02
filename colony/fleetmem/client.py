@@ -8,6 +8,7 @@ apart.
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any, Sequence
 from uuid import UUID
@@ -30,6 +31,29 @@ MERGE_RADIUS_TILES = 5
 LEASE_SECONDS = 15
 RENEW_SECONDS = 5
 
+# CockroachDB runs SERIALIZABLE and aborts transactions that would violate it,
+# with SQLSTATE 40001. That is not an error condition, it is the contract: the
+# client is expected to replay the transaction. Two scouts reporting the same
+# victim at the same instant is exactly the contention that triggers it, so the
+# reconcile gate and the chain it creates must both be replayable.
+MAX_RETRIES = 5
+
+
+def retry_on_serialization_failure(method):
+    """Replay a transactional method when CockroachDB asks us to."""
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        for attempt in range(MAX_RETRIES):
+            try:
+                return method(*args, **kwargs)
+            except psycopg.errors.SerializationFailure:
+                if attempt == MAX_RETRIES - 1:
+                    raise
+        raise AssertionError("unreachable")
+
+    return wrapper
+
 
 class CockroachFleetMem:
     def __init__(self, dsn: str = DEFAULT_DSN):
@@ -40,6 +64,7 @@ class CockroachFleetMem:
 
     # --- observations -----------------------------------------------------
 
+    @retry_on_serialization_failure
     def report_observation(
         self,
         mission_id: UUID,
@@ -161,6 +186,62 @@ class CockroachFleetMem:
 
     # --- tasks ------------------------------------------------------------
 
+    @retry_on_serialization_failure
+    def register_victim(
+        self,
+        mission_id: UUID,
+        pos: tuple[int, int],
+        reported_by: str,
+        blocked_by: Sequence[tuple[int, int]] = (),
+        vitals_deadline: int | None = None,
+        priority: int = 5,
+    ) -> tuple[UUID, list[UUID]]:
+        """Record a victim and the task chain that reaches them (§4.2 step 3).
+
+        Returns (victim_id, task_ids). One transaction: the victim row, a
+        `clear_debris` task per blocking tile, and a `deliver_kit` that
+        `depends_on` all of them. That gating is the handoff — the medic's task
+        is not claimable until the last lifter finishes, and nobody has to
+        message anybody.
+
+        Idempotent per position: a second sighting of the same victim returns the
+        existing chain rather than dispatching the fleet twice.
+        """
+        with self.conn.transaction():
+            existing = self.conn.execute(
+                "SELECT id FROM victims WHERE mission_id = %s AND pos_x = %s AND pos_y = %s",
+                (mission_id, pos[0], pos[1]),
+            ).fetchone()
+            if existing is not None:
+                # Found via the delivery task, then out through its
+                # dependencies: the clears target the *blocking* tiles, not the
+                # victim's, so looking them up by position finds nothing and the
+                # caller would be handed a chain missing its own prerequisites.
+                deliver = self.conn.execute(
+                    "SELECT id, depends_on FROM tasks"
+                    " WHERE mission_id = %s AND kind = 'deliver_kit'"
+                    "   AND target_x = %s AND target_y = %s",
+                    (mission_id, pos[0], pos[1]),
+                ).fetchone()
+                if deliver is None:
+                    return existing["id"], []
+                return existing["id"], [*(deliver["depends_on"] or []), deliver["id"]]
+
+            victim = self.conn.execute(
+                "INSERT INTO victims (mission_id, pos_x, pos_y, state, vitals_deadline,"
+                "   reported_by) VALUES (%s, %s, %s, 'located', %s, %s) RETURNING id",
+                (mission_id, pos[0], pos[1], vitals_deadline, reported_by),
+            ).fetchone()["id"]
+
+            clears = [
+                self.create_task(mission_id, "clear_debris", tile, priority=priority)
+                for tile in blocked_by
+            ]
+            deliver = self.create_task(
+                mission_id, "deliver_kit", pos, priority=priority, depends_on=clears
+            )
+            return victim, [*clears, deliver]
+
     def create_task(
         self,
         mission_id: UUID,
@@ -250,9 +331,17 @@ class CockroachFleetMem:
             (task_id,),
         )
 
-    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
+    @retry_on_serialization_failure
+    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID] | None:
         """Mark a task done and unblock its dependents in the SAME transaction
-        (§4.4). Returns the ids of tasks that became open as a result.
+        (§4.4). Returns the ids of tasks that became open as a result, or
+        **None if the completion did not apply** — the task was already done, or
+        its lease lapsed and another robot now owns it.
+
+        The None/[] distinction matters: [] means "completed, nothing was
+        waiting on it", and a caller that cannot tell the two apart logs a
+        completion for work it did not finish, inflating every §4.7 metric
+        derived from the event log.
 
         A blocked task opens only when *every* dependency is done, so this checks
         the whole `depends_on` array rather than just the task that finished —
@@ -267,7 +356,7 @@ class CockroachFleetMem:
                 (DONE, task_id, robot_id, DONE),
             ).fetchone()
             if done is None:
-                return []
+                return None
             unblocked = self.conn.execute(
                 "UPDATE tasks SET status = %s"
                 " WHERE status = %s AND %s = ANY(depends_on)"

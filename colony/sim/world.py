@@ -108,6 +108,15 @@ class World:
             for v in world_map.victims
         }
         self.events: list[dict[str, Any]] = []
+        # Fog of war (FR-8). `explored` is the *shared* set — any robot's vision
+        # reveals for everyone, straight from what the fleet collectively knows,
+        # which is precisely the difference the ON/OFF toggle demonstrates.
+        # Baseline mode keeps per-robot sets instead, so the two runs diverge
+        # visibly rather than only in the metrics.
+        self.explored: set[tuple[int, int]] = set()
+        self.explored_by: dict[str, set[tuple[int, int]]] = {}
+        self.shared_vision = True
+        self._explored_delta: list[tuple[int, int]] = []
         self._tiles_changed: list[dict[str, Any]] = []
         self._fired_escalations: set[int] = set()
         self._spawn_from_map()
@@ -150,6 +159,7 @@ class World:
         """Advance exactly one tick and return the frame describing it."""
         self.tick += 1
         self._tiles_changed = []
+        self._explored_delta = []
         # `events` is deliberately NOT cleared here. Agents call percept()
         # before step() (see Mission.tick_once and Scout.step), and percept
         # appends victim_found — clearing at the top of the tick threw those
@@ -170,6 +180,7 @@ class World:
                 self._apply(robot, action)
 
         self._run_dynamics()
+        self._update_vision()
         return self._frame()
 
     def _apply(self, robot: Robot, action: Action) -> None:
@@ -232,7 +243,7 @@ class World:
             if robot.role != "medic":
                 self._reject(robot, f"{robot.role} cannot stabilize")
                 return
-            victim = self._victim_at(tx, ty)
+            victim = self.victim_at(tx, ty)
             if victim is None or victim.state == "stabilized":
                 self._reject(robot, f"no victim to stabilize at ({tx},{ty})")
                 return
@@ -263,7 +274,7 @@ class World:
             self._tile_changed(tx, ty)
             self._event(robot.id, "debris_cleared", {"x": tx, "y": ty})
         elif robot.status == "stabilizing":
-            victim = self._victim_at(tx, ty)
+            victim = self.victim_at(tx, ty)
             if victim is not None:
                 victim.state = "stabilized"
                 self._event(robot.id, "victim_stabilized", {"victim": victim.id})
@@ -336,15 +347,46 @@ class World:
 
     # --- percepts ---------------------------------------------------------
 
+    def _update_vision(self) -> None:
+        """Pipeline stage: derive what every robot can see (§4.8).
+
+        A stage rather than a side effect of `percept()`, because a robot with no
+        agent driving it still has eyes. Tying revelation to whoever happened to
+        ask for percepts left the fog claiming ground was unseen while a robot
+        stood in the middle of it, and double-logged a sighting whenever percept
+        was called twice in a tick.
+        """
+        for robot_id, robot in self.robots.items():
+            radius = robot.vision
+            for y in range(max(0, robot.y - radius),
+                           min(self.map.height, robot.y + radius + 1)):
+                for x in range(max(0, robot.x - radius),
+                               min(self.map.width, robot.x + radius + 1)):
+                    self._reveal(robot_id, (x, y))
+
+            for victim in self.victims.values():
+                if (abs(victim.x - robot.x) <= radius
+                        and abs(victim.y - robot.y) <= radius
+                        and victim.state == "unknown"):
+                    victim.state = "located"
+                    victim.found_at = self.tick
+                    self._event(robot_id, "victim_found",
+                                {"victim": victim.id, "x": victim.x, "y": victim.y})
+
     def percept(self, robot_id: str) -> Percept:
         """Local vision only — the shared map comes from fleetmem, not from here.
 
+        A pure read; revelation and victim-locating happen in `_update_vision`.
         Square vision radius per §3.3's "vision radius" stat; no line-of-sight
         model, which the PRD does not ask for.
         """
         robot = self.robots[robot_id]
         radius = robot.vision
         seen = Percept(robot_id=robot_id, tick=self.tick)
+        # Agents call percept() before the first step(), so derive vision on
+        # demand when the tick loop has not done it yet.
+        if not self.explored:
+            self._update_vision()
 
         for y in range(max(0, robot.y - radius), min(self.map.height, robot.y + radius + 1)):
             for x in range(max(0, robot.x - radius), min(self.map.width, robot.x + radius + 1)):
@@ -357,13 +399,38 @@ class World:
 
         for victim in self.victims.values():
             if abs(victim.x - robot.x) <= radius and abs(victim.y - robot.y) <= radius:
-                if victim.state == "unknown":
-                    victim.state = "located"
-                    victim.found_at = self.tick
-                    self._event(robot_id, "victim_found",
-                                {"victim": victim.id, "x": victim.x, "y": victim.y})
                 seen.victims.append(victim.to_json())
         return seen
+
+    def _reveal(self, robot_id: str, tile: tuple[int, int]) -> None:
+        """Record that a robot can see this tile.
+
+        In coordinated mode the fleet keeps one set; in baseline each robot keeps
+        its own and the viewer sees the union dimmed (§4.8). Only newly revealed
+        tiles go into the frame — the set grows to the whole map, and resending
+        it four times a second would swamp every other field.
+        """
+        seen_by_robot = self.explored_by.setdefault(robot_id, set())
+        seen_by_robot.add(tile)
+        if tile not in self.explored:
+            self.explored.add(tile)
+            self._explored_delta.append(tile)
+
+    def coverage(self) -> float:
+        """Explored share of the tiles a robot could ever stand on or see.
+
+        Walls are excluded: counting them would cap coverage below 100% forever
+        and make Coverage@500 (§4.7) unreadable.
+        """
+        reachable = sum(
+            1
+            for y in range(self.map.height)
+            for x in range(self.map.width)
+            if self.ground[y][x] != "wall"
+        )
+        if not reachable:
+            return 1.0
+        return len(self.explored) / reachable
 
     # --- frames -----------------------------------------------------------
 
@@ -374,6 +441,7 @@ class World:
             robots=[r.to_json() for r in self.robots.values()],
             victims=[v.to_json() for v in self.victims.values()],
             metrics=self.metrics(),
+            explored=[list(t) for t in sorted(self.explored)],
             world={
                 "width": self.map.width, "height": self.map.height,
                 "tile_size": self.map.tile_size,
@@ -381,6 +449,7 @@ class World:
                 "mission_length_ticks": self.map.mission_length_ticks,
                 "ground": self.ground, "objects": self.objects,
                 "zones": self.map.zones,
+                "shared_vision": self.shared_vision,
                 "sectors": self.map.sectors,
             },
         )
@@ -391,6 +460,7 @@ class World:
             robots=[r.to_json() for r in self.robots.values()],
             victims=[v.to_json() for v in self.victims.values()],
             tiles_changed=list(self._tiles_changed),
+            explored=[list(t) for t in self._explored_delta],
             events=list(self.events),
             metrics=self.metrics(),
         )
@@ -405,6 +475,7 @@ class World:
             "victims_located": sum(1 for s in states if s != "unknown"),
             "victims_stabilized": sum(1 for s in states if s == "stabilized"),
             "victims_lost": sum(1 for s in states if s == "lost"),
+            "coverage": round(self.coverage(), 3),
         }
 
     @property
@@ -419,7 +490,9 @@ class World:
 
     # --- helpers ----------------------------------------------------------
 
-    def _victim_at(self, x: int, y: int) -> Victim | None:
+    def victim_at(self, x: int, y: int) -> Victim | None:
+        """The victim on this tile, if any. Public: agents ask it to decide
+        whether a delivery is still needed."""
         return next((v for v in self.victims.values() if v.x == x and v.y == y), None)
 
     def _tile_changed(self, x: int, y: int) -> None:

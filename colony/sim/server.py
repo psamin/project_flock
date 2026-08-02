@@ -22,7 +22,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from agents.scout import Scout, split_sectors
+from agents.scout import Scout, seed_sector_tasks, split_sectors
+from agents.worker import Worker
 from bedrock.adapter import adapter_from_env
 from sim.world import World
 from world.map_format import load_map
@@ -109,13 +110,17 @@ class Mission:
         self._broadcast_lock = asyncio.Lock()
 
         embedder = adapter_from_env()
-        self.agents: dict[str, Scout] = {}
+        self.agents: dict[str, Any] = {}
         scouts = [r for r in self.world.robots.values() if r.role == "scout"]
         # Contiguous shares of the map's sector grid, until scouts claim
         # `explore_sector` tasks for themselves (FR-16, Aug 4-6).
+        # FR-16: one explore_sector task per sector at bootstrap. Scouts claim
+        # them one at a time under a short lease, so two live scouts can never
+        # sweep the same ground and a dead scout's sector frees itself. The
+        # static shares below remain as the fallback for maps with no grid.
+        seed_sector_tasks(self.mem, self.mission_id, self.world.map)
         shares = split_sectors(self.world.map.sectors, len(scouts))
         for i, robot in enumerate(scouts):
-            # lifter and medic behaviours are Aug 4-6; only scouts think today.
             self.mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
             self.agents[robot.id] = Scout(
                 robot_id=robot.id, mission_id=self.mission_id,
@@ -123,9 +128,13 @@ class Mission:
                 sectors=shares[i],
             )
         for robot in self.world.robots.values():
-            if robot.role != "scout":
+            if robot.role in ("lifter", "medic"):
                 self.mem.register_robot(robot.id, robot.role, (robot.x, robot.y),
                                         robot.battery)
+                self.agents[robot.id] = Worker(
+                    robot_id=robot.id, role=robot.role,
+                    mission_id=self.mission_id, mem=self.mem,
+                )
 
     def tick_once(self) -> dict[str, Any]:
         """One pass of the pipeline. Split out from the loop so tests can drive

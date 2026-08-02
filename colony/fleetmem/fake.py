@@ -34,6 +34,7 @@ class FakeFleetMem:
         self._robots: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
+        self._victims: dict[UUID, dict[str, Any]] = {}
 
     def close(self) -> None:
         pass
@@ -136,6 +137,56 @@ class FakeFleetMem:
 
     # --- tasks ------------------------------------------------------------
 
+    def register_victim(
+        self,
+        mission_id: UUID,
+        pos: tuple[int, int],
+        reported_by: str,
+        blocked_by: Sequence[tuple[int, int]] = (),
+        vitals_deadline: int | None = None,
+        priority: int = 5,
+    ) -> tuple[UUID, list[UUID]]:
+        with self._lock:
+            existing = next(
+                (v for v in self._victims.values()
+                 if v["mission_id"] == mission_id and (v["pos_x"], v["pos_y"]) == pos),
+                None,
+            )
+            if existing is not None:
+                # Via the delivery task and out through its dependencies; see
+                # the note in CockroachFleetMem.register_victim.
+                deliver = next(
+                    (t for t in self._tasks.values()
+                     if t["mission_id"] == mission_id and t["kind"] == "deliver_kit"
+                     and (t["target_x"], t["target_y"]) == pos),
+                    None,
+                )
+                if deliver is None:
+                    return existing["id"], []
+                return existing["id"], [*deliver["depends_on"], deliver["id"]]
+
+            victim_id = uuid4()
+            self._victims[victim_id] = {
+                "id": victim_id, "mission_id": mission_id,
+                "pos_x": pos[0], "pos_y": pos[1], "state": "located",
+                "vitals_deadline": vitals_deadline, "reported_by": reported_by,
+            }
+            # The chain is built while the lock is still held. Releasing it here
+            # opened a window where a concurrent sighting of the same victim saw
+            # the row but not yet its tasks, took the "already registered"
+            # branch, and was handed an empty chain — reporting that a victim
+            # needs no rescue at all. `_create_task_locked` exists because
+            # threading.Lock is not reentrant and create_task would deadlock.
+            clears = [
+                self._create_task_locked(mission_id, "clear_debris", tile,
+                                         priority=priority)
+                for tile in blocked_by
+            ]
+            deliver = self._create_task_locked(
+                mission_id, "deliver_kit", pos, priority=priority, depends_on=clears
+            )
+            return victim_id, [*clears, deliver]
+
     def create_task(
         self,
         mission_id: UUID,
@@ -145,19 +196,30 @@ class FakeFleetMem:
         depends_on: Sequence[UUID] = (),
     ) -> UUID:
         with self._lock:
-            task_id = uuid4()
-            deps = list(depends_on)
-            unknown = [d for d in deps if d not in self._tasks]
-            if unknown:
-                # Matches CockroachFleetMem: see the note on its create_task.
-                raise ValueError(f"depends_on refers to unknown task ids: {unknown}")
-            self._tasks[task_id] = {
-                "id": task_id, "mission_id": mission_id, "kind": kind,
-                "target_x": target[0], "target_y": target[1], "priority": priority,
-                "status": BLOCKED if deps else OPEN, "depends_on": deps,
-                "claimed_by": None, "lease_expires_at": None,
-            }
-            return task_id
+            return self._create_task_locked(mission_id, kind, target, priority, depends_on)
+
+    def _create_task_locked(
+        self,
+        mission_id: UUID,
+        kind: str,
+        target: tuple[int | None, int | None] = (None, None),
+        priority: int = 1,
+        depends_on: Sequence[UUID] = (),
+    ) -> UUID:
+        """Caller must already hold `self._lock`."""
+        task_id = uuid4()
+        deps = list(depends_on)
+        unknown = [d for d in deps if d not in self._tasks]
+        if unknown:
+            # Matches CockroachFleetMem: see the note on its create_task.
+            raise ValueError(f"depends_on refers to unknown task ids: {unknown}")
+        self._tasks[task_id] = {
+            "id": task_id, "mission_id": mission_id, "kind": kind,
+            "target_x": target[0], "target_y": target[1], "priority": priority,
+            "status": BLOCKED if deps else OPEN, "depends_on": deps,
+            "claimed_by": None, "lease_expires_at": None,
+        }
+        return task_id
 
     def claim_task(self, task_id: UUID, robot_id: str,
                    lease_seconds: int = LEASE_SECONDS) -> bool:
@@ -201,11 +263,12 @@ class FakeFleetMem:
             task["claimed_by"] = None
             task["lease_expires_at"] = None
 
-    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID]:
+    def complete_task(self, task_id: UUID, robot_id: str) -> list[UUID] | None:
+        """None when the completion did not apply; see CockroachFleetMem."""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None or task["claimed_by"] != robot_id or task["status"] == DONE:
-                return []
+                return None
             task["status"] = DONE
             task["lease_expires_at"] = None   # a finished task is not abandoned work
 
