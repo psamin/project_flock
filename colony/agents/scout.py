@@ -1,12 +1,13 @@
-"""Scout agent — the §4.3 loop, rules only for now.
+"""Scout agent — the §4.3 loop.
 
     sense -> sync -> think -> act -> report
 
-Bedrock planning is deliberately absent at this stage: §4.3 restricts LLM calls
-to plan boundaries (task selection, replan-on-aftershock, conflict resolution),
-and until there are tasks to choose between there is no boundary to call at.
-Frontier exploration is the §4.3 "role behaviour" the LLM would be choosing
-*among*, so it is needed either way.
+Bedrock is asked one question, at one boundary: which sector to sweep next
+(`agents/planning.py`). Everything else — the frontier bias inside a sector,
+when a sector counts as swept, when to fly home and charge — is rules, because
+§4.3 has the model choosing *among* behaviours rather than executing them. A
+scout with `planner=None` is a complete scout; the planner improves a choice it
+was already able to make.
 
 The agent holds no shared world model of its own. What it sees goes to fleetmem
 and comes back as shared belief — that is the whole product thesis, so the
@@ -20,7 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from agents import logistics, planning
 from agents.pathing import find_move_plan, find_path
+from agents.planning import BEDROCK, RULES
+from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, Percept, World
 from world.map_format import DEBRIS, FIRE, RUBBLE_HEAVY, WALL
@@ -88,9 +92,21 @@ class Scout:
     # ground and a dead scout's sector frees itself with no supervisor involved.
     sector_task: Any = field(default=None)
 
+    # Bedrock at plan boundaries (§4.3) — which sector to sweep next. None means
+    # rules only, which is a complete scout.
+    planner: Any = None
+
     explored: set[tuple[int, int]] = field(default_factory=set)
     reported: set[tuple[str, int, int]] = field(default_factory=set)
     frontier_target: tuple[int, int] | None = field(default=None)
+    # Heading home to recharge (§3.3): 120 ticks of flight does not cover a
+    # 40x30 map, so a scout that never goes back strands itself mid-sweep.
+    homing: bool = False
+    seen_escalations: int = 0
+    # tile -> tick this scout last had eyes on it. Turns "everything is
+    # explored" into "this is the stalest ground I know", which is what a scout
+    # needs after the map changes under it (FR-7).
+    last_seen: dict[tuple[int, int], int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.rng = random.Random(self.seed)
@@ -104,17 +120,121 @@ class Scout:
         than after the action so a belief is never lost if the mission ends on
         this tick.
         """
+        robot = world.robots[self.robot_id]
         percept = world.percept(self.robot_id)  # sense
         self._sync(percept, world)  # sync: local -> shared memory
-        action = self._think(world, percept)  # think
+        self._note_escalation(world)
+
+        if robot.work_left > 0:  # mid-recharge; the sim drives it
+            action = Action.idle()
+        elif self.homing or logistics.needs_base(world, robot, (robot.x, robot.y)):
+            action = self._go_home(world, robot)
+        else:
+            action = self._think(world, percept)  # think
+
         self.mem.heartbeat(
             self.robot_id,
-            pos=(world.robots[self.robot_id].x, world.robots[self.robot_id].y),
-            battery=world.robots[self.robot_id].battery,
-            status="exploring",
+            pos=(robot.x, robot.y),
+            battery=robot.battery,
+            status=robot.status,
             lease_seconds=SECTOR_LEASE_SECONDS,
         )
         return action  # act (the sim applies it)
+
+    # --- battery (§3.3) ---------------------------------------------------
+
+    def _go_home(self, world: World, robot: Any) -> Action:
+        """Fly back and recharge, giving the sector up on the way out.
+
+        A scout that holds its sector while it charges keeps 10x10 tiles off the
+        board for 40 ticks and nobody else may sweep them — the exact
+        duplicate-effort problem sector claims exist to prevent, inverted. The
+        lease would have expired anyway; releasing says so immediately.
+        """
+        if self.sector_task is not None:
+            self.mem.release_task(self.sector_task.id)
+            self.mem.log_event(
+                self.mission_id,
+                self.robot_id,
+                "task_released",
+                {"task": str(self.sector_task.id), "reason": "returning to base"},
+            )
+            self.sector_task = None
+        if not self.homing:
+            self.homing = True
+            self.mem.log_event(
+                self.mission_id,
+                self.robot_id,
+                "returning_to_base",
+                {"battery": robot.battery},
+            )
+
+        service = logistics.service_action(world, robot)
+        if service is not None:
+            self._say(world, "🔌 recharging")
+            return service
+        if logistics.is_serviced(world, robot):
+            self.homing = False
+            return Action.idle()
+
+        base = logistics.base_tile(world, "scout")
+        if base is None:
+            self.homing = False
+            return Action.idle()
+        self._say(world, "🔋 returning to base")
+        return self._step_toward(world, (robot.x, robot.y), base)
+
+    # --- reacting to the world (FR-7) -------------------------------------
+
+    def _note_escalation(self, world: World) -> None:
+        """An aftershock means the map a scout finished sweeping is not the map
+        it is standing in (FR-7).
+
+        The sector it holds goes back to the pool and its own idea of what it
+        has seen is dropped, so the sweep can be redone on the merits. What it
+        must *not* do is read the escalation's tile list: an aftershock is felt,
+        not downloaded, and a scout that knew where the new victim was without
+        flying there would be ground truth wearing a robot costume.
+        """
+        if world.escalations_fired <= self.seen_escalations:
+            return
+        self.seen_escalations = world.escalations_fired
+        self.explored.clear()
+        self.frontier_target = None
+        if self.sector_task is not None:
+            self.mem.release_task(self.sector_task.id)
+            self.sector_task = None
+        self._log_plan(
+            world,
+            trigger=AFTERSHOCK,
+            chosen={"action": "explore", "sector": None, "source": RULES},
+            rationale="aftershock felt; re-sweeping from what I can see now",
+        )
+        self._say(world, "🌐 aftershock — re-sweeping")
+
+    def _say(self, world: World, text: str) -> None:
+        """Set the thought bubble the renderer already carries (§3.6)."""
+        world.robots[self.robot_id].bubble = text
+
+    def _log_plan(
+        self, world: World, *, trigger: str, chosen: dict[str, Any], rationale: str
+    ) -> None:
+        """Every decision, with the memories behind it (FR-17).
+
+        A scout logged nothing at all before this: clicking one in the demo
+        opened an empty panel, on the agent that does most of the deciding.
+        """
+        digest = planning.build_digest(
+            self.mem, self.mission_id, world.robots[self.robot_id]
+        )
+        self.mem.log_plan(
+            self.mission_id,
+            self.robot_id,
+            trigger=trigger,
+            chosen=chosen,
+            rationale=rationale,
+            based_on=list(digest.ids),
+        )
 
     # --- sync -------------------------------------------------------------
 
@@ -148,9 +268,11 @@ class Scout:
             # Debris is crossable only by clearing it, so it costs about what
             # clearing costs; the route then prefers going around when going
             # around is cheap and digs through when it is not.
-            cost=lambda p: DEBRIS_ROUTE_COST
-            if world.objects[p[1]][p[0]] in (DEBRIS, RUBBLE_HEAVY)
-            else 1,
+            cost=lambda p: (
+                DEBRIS_ROUTE_COST
+                if world.objects[p[1]][p[0]] in (DEBRIS, RUBBLE_HEAVY)
+                else 1
+            ),
             goal_is_adjacent=True,
         )
         if route is None:
@@ -182,6 +304,10 @@ class Scout:
         """
         for tile in percept.tiles:
             self.explored.add((tile["x"], tile["y"]))
+            # When, not just whether: after the map changes under a finished
+            # sweep, "longest since anyone looked" is the only useful question
+            # left (see _pick_stale).
+            self.last_seen[(tile["x"], tile["y"])] = percept.tick
 
         for victim in percept.victims:
             new = self._report(
@@ -292,6 +418,7 @@ class Scout:
         that stops two lifters taking one debris pile stops two scouts sweeping
         one sector, with no coordinator in the middle.
         """
+        trigger = IDLE_TRIGGER
         if self.sector_task is not None:
             sector_id = self.sector_task.kind.split(":", 1)[1]
             if self._sector_is_swept(world, sector_id):
@@ -303,6 +430,7 @@ class Scout:
                     {"sector": sector_id},
                 )
                 self.sector_task = None
+                trigger = TASK_DONE
             else:
                 return
 
@@ -321,17 +449,51 @@ class Scout:
                 str(t.id),
             ),
         )
+        if not candidates:
+            return
+
+        # §4.3: the model picks which sector, the rules fly it there. A choice
+        # it cannot justify costs one lost claim race, no more.
+        digest = planning.build_digest(self.mem, self.mission_id, robot)
+        plan = (
+            self.planner.plan(robot, world.tick, digest, candidates)
+            if self.planner is not None
+            else None
+        )
+        if plan is not None and plan.action == "claim_task" and plan.task_id:
+            candidates.sort(key=lambda t: str(t.id) != str(plan.task_id))
+
         for task in candidates:
             if self.mem.claim_task(
                 task.id, self.robot_id, lease_seconds=SECTOR_LEASE_SECONDS
             ):
                 self.sector_task = task
+                sector_id = task.kind.split(":", 1)[1]
                 self.mem.log_event(
                     self.mission_id,
                     self.robot_id,
                     "sector_claimed",
-                    {"sector": task.kind.split(":", 1)[1]},
+                    {"sector": sector_id},
                 )
+                self.mem.log_plan(
+                    self.mission_id,
+                    self.robot_id,
+                    trigger=trigger,
+                    chosen={
+                        "action": "explore",
+                        "sector": sector_id,
+                        "task_id": str(task.id),
+                        "considered": len(candidates),
+                        "source": BEDROCK if plan is not None else RULES,
+                    },
+                    rationale=(
+                        plan.rationale
+                        if plan is not None and plan.rationale
+                        else f"nearest unswept sector of {len(candidates)} open"
+                    ),
+                    based_on=list(digest.ids),
+                )
+                self._say(world, f"🔍 scanning sector {sector_id}")
                 return
 
     @property
@@ -355,8 +517,54 @@ class Scout:
             self.frontier_target = self._pick_frontier(world, here)
 
         if self.frontier_target is None:
+            self.frontier_target = self._pick_stale(world, here)
+        if self.frontier_target is None:
+            self._say(world, "🔍 holding station")
             return Action.idle()
+        # §3.6's own example is 🔍 "scanning sector C". The sector is what a
+        # viewer can place on the map; a raw tile coordinate is a debug view.
+        sector = self._active_sectors[0] if self._active_sectors else None
+        self._say(
+            world,
+            f"🔍 scanning sector {sector}"
+            if sector
+            else f"🔍 sweeping {self.frontier_target[0]},{self.frontier_target[1]}",
+        )
         return self._step_toward(world, here, self.frontier_target)
+
+    def _pick_stale(
+        self, world: World, here: tuple[int, int]
+    ) -> tuple[int, int] | None:
+        """The ground this scout has not looked at for longest.
+
+        "Explored" is not "still true". Once every sector was swept the scouts
+        idled for the rest of the mission, so the aftershock could re-block a
+        corridor, reveal a victim and change the map with nobody watching —
+        measured on the demo map: the revealed victim was never found and died
+        at its deadline. Patrolling the stalest tile turns exploration into
+        something a mission never finishes, which is what a disaster site
+        actually is.
+
+        Own share only: patrolling across a neighbour's ground would put the
+        duplicate-effort index (§4.7) back up for no coverage in return.
+        """
+        oldest, oldest_at = None, None
+        for y in range(world.map.height):
+            for x in range(world.map.width):
+                if not world.passable(x, y, flying=True):
+                    continue
+                if (
+                    self._active_sectors
+                    and world.map.sector_at(x, y) not in self._active_sectors
+                ):
+                    continue
+                seen_at = self.last_seen.get((x, y), -1)
+                # Distance breaks ties, so a scout sweeps the stale ground near
+                # it rather than crossing the sector for an equally stale tile.
+                key = (seen_at, abs(x - here[0]) + abs(y - here[1]), x, y)
+                if oldest_at is None or key < oldest_at:
+                    oldest, oldest_at = (x, y), key
+        return oldest if oldest != here else None
 
     def _worth_pursuing(self, target: tuple[int, int] | None) -> bool:
         return target is not None and target not in self.explored
@@ -408,6 +616,12 @@ class Scout:
             here,
             target,
             landing=lambda p, d: self._landing(world, p, d),
+            # Deliberately *not* priced by the shared hazard map, unlike the
+            # ground robots (`agents/beliefs.py`). Giving fire-adjacent tiles a
+            # wide berth is prudent for a speed-1 lifter that could be cut off;
+            # for a speed-3 drone whose entire job is coverage it measured as an
+            # 8% coverage loss at 30 ticks, buying safety from a danger a flying
+            # robot can leave in a single move.
             speed=ROLES[world.robots[self.robot_id].role]["speed"],
         )
         if plan:

@@ -90,7 +90,7 @@ class Plan:
     rationale: str = ""  # surfaced in the UI as the thought bubble
 
     @classmethod
-    def parse(cls, raw: str) -> "Plan":
+    def parse(cls, raw: str) -> Plan:
         """Parse a model response, tolerating prose or fences around the JSON.
 
         A malformed plan must not stall a robot mid-mission, so anything
@@ -202,6 +202,22 @@ class BedrockAdapter:
         if self.mode == RECORD:
             self._remember(key, text)
         return Plan.parse(text)
+
+    def knows_plan(
+        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+    ) -> bool:
+        """Whether the cassette can answer this prompt without inventing one.
+
+        Lets a caller tell "a real decision was recorded for exactly this
+        situation" from "replay would fall back to the offline rules". The agent
+        loop uses it to keep fabricated rationales out of the UI: the rules are
+        perfectly good at *deciding*, but a rule-based choice presented as a
+        Bedrock rationale is a claim we cannot support in front of a judge.
+        """
+        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
+        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks)) in (
+            self._cassette
+        )
 
     def _remember(self, key: str, value: Any) -> None:
         self._cassette[key] = value

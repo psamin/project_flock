@@ -24,6 +24,15 @@ FIRE_SPREAD_TICKS = 25  # §3.3: fire spreads every 25 ticks
 CLEAR_TICKS = {DEBRIS: 3, RUBBLE_HEAVY: 6}
 STABILIZE_TICKS = 2
 
+# §3.3 battery is quoted in *ticks* of operation, not tiles travelled: a scout
+# has "120 (recharge at base)". Draining per tile made a speed-3 scout last 40
+# ticks and a speed-1 lifter 300, which is neither the stat block nor a fair
+# comparison between roles.
+RECHARGE_TICKS = 20  # a full battery, from the staging zone
+RESTOCK_TICKS = 2  # §3.3: kits come off the shelf, they are not manufactured
+MEDIC_KITS = 2  # §3.3: "carries 2 supply kits"
+BASE_ZONE = "staging"  # §3.3: "Staging (base + charging, top-left)"
+
 # §3.3 stat blocks. Speed is tiles per tick: one move action advances the robot
 # up to `speed` tiles in that direction, stopping early at the first obstacle.
 # Keeping it one action per tick leaves contract 2 simple — an agent that had to
@@ -45,6 +54,7 @@ class Robot:
     status: str = "idle"
     battery: int = 0
     bubble: str = ""
+    kits: int = 0  # medics only (§3.3); stabilizing spends one
     work_left: int = 0  # ticks remaining on the current act()
     work_target: tuple[int, int] | None = None
 
@@ -65,6 +75,12 @@ class Robot:
             "facing": self.facing,
             "status": self.status,
             "battery": self.battery,
+            "kits": self.kits,
+            # The renderer dims ground nobody is currently looking at (§4.8's
+            # "explored-but-stale"), which it can only work out from where the
+            # robots are and how far each one sees. Sending the radius keeps the
+            # §3.3 stat block in one place instead of copied into JavaScript.
+            "vision": self.vision,
             "bubble": self.bubble,
         }
 
@@ -146,6 +162,7 @@ class World:
                     x=point["x"],
                     y=point["y"],
                     battery=ROLES[role]["battery"],
+                    kits=MEDIC_KITS if role == "medic" else 0,
                 )
 
     # --- queries ----------------------------------------------------------
@@ -208,6 +225,19 @@ class World:
             return
 
         if action.kind == MOVE:
+            # §3.3 quotes battery in ticks of operation, so a flat move is a
+            # flat cost: a robot that has run its battery down is stranded where
+            # it stands until someone gets it home, and the agents plan around
+            # that (return-to-base) rather than being rescued by the sim.
+            if robot.battery <= 0:
+                self._reject(robot, "battery empty")
+                # Set after the rejection, which reports "blocked" — a robot
+                # that ran out of power is not blocked by anything and will not
+                # come unblocked. The renderer and the event log both need to
+                # say so, because it is the one failure the fleet cannot undo.
+                robot.status = "stranded"
+                return
+
             dx, dy = DIRECTIONS[action.direction]
             robot.facing = action.direction
             moved = 0
@@ -218,11 +248,11 @@ class World:
                 if self.occupied(nx, ny, ignore=robot.id):
                     break
                 robot.x, robot.y = nx, ny
-                robot.battery = max(0, robot.battery - 1)
                 moved += 1
             if moved == 0:
                 self._reject(robot, f"cannot move {action.direction}")
                 return
+            robot.battery -= 1
             robot.status = "moving"
             return
 
@@ -231,6 +261,14 @@ class World:
 
     def _begin_work(self, robot: Robot, action: Action) -> None:
         tx, ty = action.target
+
+        # Base services first: they are the one pair of verbs whose target is
+        # the robot's own tile, so the adjacency and bounds rules below are the
+        # wrong questions to ask about them.
+        if action.verb in ("recharge", "restock"):
+            self._begin_base_service(robot, action.verb)
+            return
+
         # Bounds first: Action.parse validates shape only, and adjacency uses
         # absolute differences, so an off-map target slips through whenever the
         # robot stands at an edge. A negative coordinate would then index from
@@ -263,10 +301,61 @@ class World:
             if victim is None or victim.state == "stabilized":
                 self._reject(robot, f"no victim to stabilize at ({tx},{ty})")
                 return
+            if robot.kits <= 0:
+                # §3.3: two kits, then back to base. The medic plans around this
+                # the same way it plans around battery — the sim only says no.
+                self._reject(robot, "out of supply kits")
+                return
             self._start_work(robot, "stabilizing", (tx, ty), STABILIZE_TICKS)
             return
 
         self._reject(robot, f"verb {action.verb!r} is not implemented yet")
+
+    def _begin_base_service(self, robot: Robot, verb: str) -> None:
+        """Recharge or restock, both of which only happen at base (§3.3)."""
+        if not self.at_base(robot.x, robot.y):
+            self._reject(robot, f"{verb} needs the staging zone")
+            return
+        if verb == "restock" and robot.role != "medic":
+            self._reject(robot, f"{robot.role} carries no kits")
+            return
+        if verb == "recharge" and robot.battery >= ROLES[robot.role]["battery"]:
+            self._reject(robot, "battery already full")
+            return
+        if verb == "restock" and robot.kits >= MEDIC_KITS:
+            self._reject(robot, "kits already full")
+            return
+        self._start_work(
+            robot,
+            "recharging" if verb == "recharge" else "restocking",
+            (robot.x, robot.y),
+            RECHARGE_TICKS if verb == "recharge" else RESTOCK_TICKS,
+        )
+
+    def at_base(self, x: int, y: int) -> bool:
+        """Whether this tile is inside the staging zone — base, charger and
+        supply shelf in one (§3.3).
+
+        Falls back to the spawn tiles for maps that define no zones, which is
+        every fixture in the test suite: a robot that could never recharge
+        because its test map has no zone list would be a fixture artefact
+        showing up as agent behaviour.
+        """
+        for zone in self.map.zones:
+            if zone.get("name") != BASE_ZONE:
+                continue
+            if (
+                zone["x"] <= x < zone["x"] + zone["width"]
+                and zone["y"] <= y < zone["y"] + zone["height"]
+            ):
+                return True
+        if any(z.get("name") == BASE_ZONE for z in self.map.zones):
+            return False
+        return any(
+            point["x"] == x and point["y"] == y
+            for points in self.map.spawn_points.values()
+            for point in points
+        )
 
     def _start_work(
         self, robot: Robot, status: str, target: tuple[int, int], ticks: int
@@ -294,7 +383,14 @@ class World:
             victim = self.victim_at(tx, ty)
             if victim is not None:
                 victim.state = "stabilized"
+                robot.kits = max(0, robot.kits - 1)
                 self._event(robot.id, "victim_stabilized", {"victim": victim.id})
+        elif robot.status == "recharging":
+            robot.battery = ROLES[robot.role]["battery"]
+            self._event(robot.id, "recharged", {"battery": robot.battery})
+        elif robot.status == "restocking":
+            robot.kits = MEDIC_KITS
+            self._event(robot.id, "restocked", {"kits": robot.kits})
         robot.status = "idle"
         robot.work_target = None
 
@@ -555,6 +651,17 @@ class World:
         )
 
     # --- helpers ----------------------------------------------------------
+
+    @property
+    def escalations_fired(self) -> int:
+        """How many scheduled escalations have gone off (FR-7).
+
+        Agents watch the count, not the contents: an aftershock is felt by
+        everyone, but *what* it changed has to be discovered by looking, the
+        same as anything else. Handing agents the escalation's tile list would
+        be ground truth arriving without a robot ever sensing it.
+        """
+        return len(self._fired_escalations)
 
     def victim_at(self, x: int, y: int) -> Victim | None:
         """The victim on this tile, if any. Public: agents ask it to decide

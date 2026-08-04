@@ -13,7 +13,7 @@ not care where `passable` comes from.
 from __future__ import annotations
 
 import heapq
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from sim.protocol import DIRECTIONS
 
@@ -106,6 +106,7 @@ def find_move_plan(
     start: Point,
     goal: Point,
     landing: Callable[[Point, str], Point],
+    cost: Callable[[Point], int] | None = None,
     *,
     goal_is_adjacent: bool = False,
     speed: int = 1,
@@ -124,6 +125,11 @@ def find_move_plan(
     and lands wherever the world actually puts the robot, which makes the plan
     executable by construction rather than by luck. Speed is a parameter, not an
     assumption, so this works unchanged for a speed-1 lifter and a speed-3 scout.
+
+    `cost` prices the tile a move lands on — this is where the shared belief map
+    enters routing (`agents/beliefs.py`): a route past a fire somebody else
+    reported costs more than the long way round. It must never return less than
+    1, or the heuristic below stops being admissible.
     """
 
     def reached(point: Point) -> bool:
@@ -142,6 +148,7 @@ def find_move_plan(
             1, speed
         )
 
+    move_cost = cost or (lambda _: NORMAL_COST)
     counter = 0
     frontier: list[tuple[int, int, Point]] = [(heuristic(start), counter, start)]
     came_from: dict[Point, tuple[Point, str]] = {}
@@ -161,7 +168,7 @@ def find_move_plan(
             nxt = landing(current, direction)
             if nxt == current:
                 continue  # this move goes nowhere
-            steps = best[current] + 1
+            steps = best[current] + move_cost(nxt)
             if steps >= best.get(nxt, 1 << 30):
                 continue
             best[nxt] = steps
