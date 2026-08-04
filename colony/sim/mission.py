@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from agents.planning import Planner
 from agents.scout import Scout, seed_sector_tasks, split_sectors
 from agents.worker import Worker
 from bedrock.adapter import BedrockAdapter
@@ -36,6 +37,69 @@ class MissionRun:
     metrics: Metrics
 
 
+def build_fleet(
+    world: World,
+    mem: Any,
+    mission_id: UUID,
+    *,
+    coordinated: bool = True,
+    seed: int | None = None,
+    embedder: Any = None,
+    planner: Any = None,
+) -> dict[str, Any]:
+    """Register the robots, seed the sector tasks, and return agents by robot id.
+
+    One definition of what a fleet *is*, because there are two callers — the
+    batch runner below and the live server — and they had drifted: the server
+    seeded sector tasks unconditionally and hard-coded coordinated behaviour, so
+    the ON/OFF toggle it now offers would have switched the fog of war without
+    switching the fleet underneath it. A demo that claims to compare two modes
+    has to actually run two.
+    """
+    embedder = embedder or BedrockAdapter()
+    # One planner for the mission: the §3.5 rate cap is per robot, but the
+    # thread pool and the cassette are not. Both modes get one, so a difference
+    # between the runs is never "the baseline had no planner".
+    planner = planner or Planner(adapter=embedder)
+
+    if coordinated:
+        # Baseline explores on private frontier bias only (§3.3), so it gets no
+        # sector tasks to claim.
+        seed_sector_tasks(mem, mission_id, world.map)
+
+    scouts = [r for r in world.robots.values() if r.role == "scout"]
+    shares = split_sectors(world.map.sectors, max(1, len(scouts)))
+    agents: dict[str, Any] = {
+        robot.id: Scout(
+            robot_id=robot.id,
+            mission_id=mission_id,
+            mem=mem,
+            embedder=embedder,
+            seed=(seed or 0) + i,
+            sectors=shares[i] if coordinated else (),
+            planner=planner,
+        )
+        for i, robot in enumerate(scouts)
+    }
+    agents.update(
+        {
+            robot.id: Worker(
+                robot_id=robot.id,
+                role=robot.role,
+                mission_id=mission_id,
+                mem=mem,
+                coordinated=coordinated,
+                planner=planner,
+            )
+            for robot in world.robots.values()
+            if robot.role in ("lifter", "medic")
+        }
+    )
+    for robot in world.robots.values():
+        mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
+    return agents
+
+
 def run_mission(
     world_map: WorldMap,
     mem: Any,
@@ -44,44 +108,23 @@ def run_mission(
     seed: int | None = None,
     max_ticks: int | None = None,
     embedder: Any = None,
+    planner: Any = None,
 ) -> MissionRun:
     """Run one mission to completion and return it with its §4.7 metrics."""
     world = World(world_map, seed=seed)
     world.shared_vision = coordinated
     mission_id = uuid.uuid4()
-    embedder = embedder or BedrockAdapter()
-
-    if coordinated:
-        # Baseline explores on private frontier bias only (§3.3), so it gets no
-        # sector tasks to claim.
-        seed_sector_tasks(mem, mission_id, world_map)
-
-    scouts = [r for r in world.robots.values() if r.role == "scout"]
-    shares = split_sectors(world_map.sectors, max(1, len(scouts)))
-    agents: list[Any] = [
-        Scout(
-            robot_id=robot.id,
-            mission_id=mission_id,
-            mem=mem,
-            embedder=embedder,
-            seed=(seed or 0) + i,
-            sectors=shares[i] if coordinated else (),
-        )
-        for i, robot in enumerate(scouts)
-    ]
-    agents += [
-        Worker(
-            robot_id=robot.id,
-            role=robot.role,
-            mission_id=mission_id,
-            mem=mem,
+    agents = list(
+        build_fleet(
+            world,
+            mem,
+            mission_id,
             coordinated=coordinated,
-        )
-        for robot in world.robots.values()
-        if robot.role in ("lifter", "medic")
-    ]
-    for robot in world.robots.values():
-        mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
+            seed=seed,
+            embedder=embedder,
+            planner=planner,
+        ).values()
+    )
 
     limit = max_ticks or world_map.mission_length_ticks
     coverage_at_500 = 0.0

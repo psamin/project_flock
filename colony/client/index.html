@@ -13,42 +13,107 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       padding: 16px;
     }
-    header { display: flex; gap: 24px; align-items: baseline; }
-    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.04em; }
+    header { display: flex; gap: 20px; align-items: baseline; flex-wrap: wrap; }
+    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.08em; }
     #status { color: #8a8397; }
-    #hud { display: flex; gap: 18px; color: #b8b1c4; }
+    #mode-badge {
+      font-size: 11px; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 3px;
+    }
+    #mode-badge.on { background: #1e3a2c; color: #6fbf73; }
+    #mode-badge.off { background: #3a2020; color: #e2603f; }
+    button {
+      font: inherit; font-size: 12px; color: #e8e3d9; background: #262232;
+      border: 1px solid #3a3448; border-radius: 4px; padding: 3px 10px; cursor: pointer;
+    }
+    button:hover { background: #302a40; }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    #hud { display: flex; gap: 16px; color: #b8b1c4; font-size: 12px; flex-wrap: wrap; }
     #hud b { color: #e8e3d9; font-weight: 600; }
-    #stage { line-height: 0; box-shadow: 0 8px 40px #0008; }
+    #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
+    #comparison b { color: #f2c14e; }
+
+    /* The map and the provenance panel sit side by side; the panel takes its
+       space only when it is open, so the map is never off-centre by default. */
+    #layout { display: flex; gap: 12px; align-items: flex-start; }
+    #stage { line-height: 0; box-shadow: 0 8px 40px #0008; border-radius: 2px; overflow: hidden; }
+    /* §4.8: no camera — render the whole 40x30 map and letterbox it to fit.
+       Constraining width alone cropped the bottom third of the block on a
+       laptop, which is where most of the victims are. */
+    #stage canvas {
+      display: block; image-rendering: pixelated;
+      max-width: 100%; max-height: calc(100vh - 260px); width: auto; height: auto;
+    }
+
+    #panel {
+      display: none; width: 280px; max-height: 960px; overflow-y: auto;
+      background: #1c1a24; border: 1px solid #2e2939; border-radius: 4px; padding: 12px;
+    }
+    #panel.open { display: block; }
+    #panel-head { display: flex; justify-content: space-between; align-items: baseline; }
+    #panel-title { font-weight: 600; letter-spacing: 0.04em; }
+    #panel-vitals { color: #8a8397; font-size: 11px; margin-bottom: 10px; }
+    #panel-close { padding: 0 6px; }
+    .plan { border-left: 2px solid #3a3448; padding: 4px 0 8px 8px; margin-bottom: 8px; }
+    .plan-head { color: #63c5da; font-size: 11px; letter-spacing: 0.04em; }
+    .plan-why { font-size: 12px; margin: 2px 0; }
+    .plan-sources { color: #8a8397; font-size: 11px; }
+
     #ticker {
-      width: min(1280px, 96vw); height: 84px; overflow-y: auto;
+      width: min(1280px, 96vw); height: 96px; overflow-y: auto;
       background: #1c1a24; padding: 8px 12px; border-radius: 4px;
-      color: #9a93a8; font-size: 12px;
+      color: #9a93a8; font-size: 12px; white-space: pre;
     }
     #ticker div { padding: 1px 0; }
     #ticker .found { color: #f2c14e; }
-    #ticker .shock { color: #e2603f; }
+    #ticker .good { color: #6fbf73; }
+    #ticker .bad { color: #d96a9a; }
+    #ticker .sector { color: #63c5da; }
+    #ticker .shock { color: #e2603f; font-weight: 600; }
+    #hint { color: #6d6779; font-size: 11px; }
   </style>
 </head>
 <body>
   <header>
     <h1>COLONY</h1>
     <span id="status">connecting…</span>
+    <span id="mode-badge" class="on">SHARED MEMORY</span>
+    <button id="toggle">coordination: ON</button>
   </header>
+
   <div id="hud">
     <span>tick <b id="m-tick">0</b></span>
     <span>located <b id="m-located">0</b></span>
     <span>stabilized <b id="m-stabilized">0</b></span>
     <span>lost <b id="m-lost">0</b></span>
+    <span>rescue rate <b id="m-rescue">0%</b></span>
+    <span>median <b id="m-median">—</b></span>
+    <span>duplicate effort <b id="m-duplicate">0%</b></span>
     <span>explored <b id="m-coverage">0%</b></span>
   </div>
-  <div id="stage"></div>
+  <div id="comparison"></div>
+
+  <div id="layout">
+    <div id="stage"></div>
+    <aside id="panel">
+      <div id="panel-head">
+        <span id="panel-title">robot</span>
+        <button id="panel-close">×</button>
+      </div>
+      <div id="panel-vitals"></div>
+      <div id="panel-body"></div>
+    </aside>
+  </div>
+
   <div id="ticker"></div>
+  <div id="hint">click a robot for its reasoning and sources · press S for the sector grid</div>
 
   <!-- No CDN, no bundler, no WebGL requirement. See the note at the top of
-       app.js for why the skeleton renders in Canvas 2D. -->
-  <script src="/static/app.js"></script>
+       app.js for why the renderer is Canvas 2D, and atlas.js for why the
+       sprites are drawn in code rather than downloaded. -->
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
