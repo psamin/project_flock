@@ -22,9 +22,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from agents.scout import Scout, seed_sector_tasks, split_sectors
-from agents.worker import Worker
+from agents.planning import Planner
 from bedrock.adapter import adapter_from_env
+from sim import metrics as metrics_mod
+from sim.mission import build_fleet
 from sim.world import World
 from world.map_format import load_map
 
@@ -33,10 +34,17 @@ TICK_SECONDS = 1 / TICK_HZ
 # Frames a viewer may fall behind before it is dropped: two seconds at 4 Hz.
 # Enough to ride out a slow paint, short enough that a wedged tab is noticed.
 QUEUE_FRAMES = 8
+# §4.7's metrics are derived from the whole event log, so they are recomputed
+# once a second rather than four times (see Mission.metrics).
+METRICS_EVERY_TICKS = TICK_HZ
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
-DEFAULT_MAP = ROOT / "world" / "maps" / "aftershock.json"
+# `COLONY_MAP` points the server at another map — a playtest variant, or a
+# tuned copy for rehearsing the aftershock beat without waiting for tick 300.
+DEFAULT_MAP = Path(
+    os.environ.get("COLONY_MAP", ROOT / "world" / "maps" / "aftershock.json")
+)
 
 
 def _make_memory():
@@ -99,52 +107,135 @@ class Mission:
     """One running mission: the world, its agents, and everyone watching."""
 
     def __init__(self, map_path: Path = DEFAULT_MAP, seed: int | None = None):
-        self.world = World(load_map(map_path), seed=seed)
-        self.mission_id = uuid.uuid4()
+        self.map_path = map_path
+        self.seed = seed
         self.mem, self.memory_kind = _make_memory()
         self.viewers: set[Viewer] = set()
         self.running = False
+        # Bedrock at plan boundaries (§4.3). Replay mode without a cassette
+        # yields nothing and every robot runs on rules, which is why the server
+        # starts with no AWS credentials at all. Built once and reused across
+        # restarts: the cassette and the thread pool outlive any one mission.
+        self.embedder = adapter_from_env()
+        self.planner = Planner(adapter=self.embedder)
+        # Final §4.7 numbers per mode, so the scoreboard can show ON against OFF
+        # side by side (FR-9) rather than only whichever ran last.
+        self.last_runs: dict[str, dict[str, Any]] = {}
         # Held while a frame goes out, and while a joining viewer is snapshotted
         # and registered. Without it those two interleave: registering first lets
         # a diff reach the browser ahead of the snapshot that predates it, and
         # registering last drops the diff entirely. Tile diffs are cumulative, so
         # either way the browser's grid is permanently wrong for that tile.
         self._broadcast_lock = asyncio.Lock()
+        # The tick loop, when one is running. Held so a restart can tell a
+        # finished mission from a live one.
+        self._loop: asyncio.Task | None = None
+        self._build(coordinated=True)
 
-        embedder = adapter_from_env()
-        self.agents: dict[str, Any] = {}
-        scouts = [r for r in self.world.robots.values() if r.role == "scout"]
-        # Contiguous shares of the map's sector grid, until scouts claim
-        # `explore_sector` tasks for themselves (FR-16, Aug 4-6).
-        # FR-16: one explore_sector task per sector at bootstrap. Scouts claim
-        # them one at a time under a short lease, so two live scouts can never
-        # sweep the same ground and a dead scout's sector frees itself. The
-        # static shares below remain as the fallback for maps with no grid.
-        seed_sector_tasks(self.mem, self.mission_id, self.world.map)
-        shares = split_sectors(self.world.map.sectors, len(scouts))
-        for i, robot in enumerate(scouts):
-            self.mem.register_robot(
-                robot.id, robot.role, (robot.x, robot.y), robot.battery
-            )
-            self.agents[robot.id] = Scout(
-                robot_id=robot.id,
-                mission_id=self.mission_id,
-                mem=self.mem,
-                embedder=embedder,
-                seed=(seed or 0) + i,
-                sectors=shares[i],
-            )
-        for robot in self.world.robots.values():
-            if robot.role in ("lifter", "medic"):
-                self.mem.register_robot(
-                    robot.id, robot.role, (robot.x, robot.y), robot.battery
-                )
-                self.agents[robot.id] = Worker(
-                    robot_id=robot.id,
-                    role=robot.role,
-                    mission_id=self.mission_id,
-                    mem=self.mem,
-                )
+    # --- mission lifecycle ------------------------------------------------
+
+    def _build(self, *, coordinated: bool) -> None:
+        """Stand up a fresh world, mission and fleet in this coordination mode."""
+        self.coordinated = coordinated
+        self.world = World(load_map(self.map_path), seed=self.seed)
+        self.world.shared_vision = coordinated
+        self.mission_id = uuid.uuid4()
+        self.agents = build_fleet(
+            self.world,
+            self.mem,
+            self.mission_id,
+            coordinated=coordinated,
+            seed=self.seed,
+            embedder=self.embedder,
+            planner=self.planner,
+        )
+        self._metrics: dict[str, Any] = {}
+        self._metrics_at = -1
+
+    async def reset(self, *, coordinated: bool) -> None:
+        """Restart the mission in the other coordination mode (FR-9).
+
+        The tick loop reads `self.world` and `self.agents` once per tick and
+        never awaits inside `tick_once`, so swapping them between ticks cannot
+        tear. Doing it under the broadcast lock is what keeps a viewer from
+        receiving a diff for the old world after the snapshot for the new one.
+        """
+        async with self._broadcast_lock:
+            # Recorded with whether the mission actually ended: toggling away
+            # from a run twenty ticks old stores numbers that are true and
+            # meaningless, and §4.7's coordination gain is the one number the
+            # video ends on.
+            self.record_run()
+            self._build(coordinated=coordinated)
+            snapshot = self._snapshot()
+            for viewer in list(self.viewers):
+                if not viewer.offer(snapshot):
+                    self.viewers.discard(viewer)
+                    viewer.close()
+
+        # A mission that ran to completion stopped its own tick loop, and the
+        # usual reason to hit the toggle is that you have just watched one
+        # finish. Without this the new world is built, broadcast, and then sits
+        # at tick 0 forever — which looks exactly like a hung server.
+        if not self.running:
+            self._loop = asyncio.create_task(self.run())
+
+    @property
+    def mode(self) -> str:
+        return "coordinated" if self.coordinated else "baseline"
+
+    def metrics(self) -> dict[str, Any]:
+        """The §4.7 numbers, recomputed on the belief-read cadence.
+
+        Derived from the event log like every other metric (§4.7), which means
+        walking the whole mission's events — cheap at a few thousand rows, but
+        not four times a second for the life of a mission, so it is cached for a
+        second at a time. The live counters the world already tracks ride along
+        untouched, because the scoreboard wants both.
+        """
+        if self.world.tick - self._metrics_at < METRICS_EVERY_TICKS and self._metrics:
+            return {**self._metrics, **self.world.metrics()}
+        computed = metrics_mod.compute(
+            self.mem.events(self.mission_id),
+            victims_total=len(self.world.victims),
+            coverage_at_500=self.world.coverage(),
+            ticks=self.world.tick,
+            horizon=self.world.map.mission_length_ticks,
+        )
+        self._metrics = {**computed.to_json(), "mode": self.mode}
+        self._metrics_at = self.world.tick
+        return {**self._metrics, **self.world.metrics()}
+
+    def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Why this robot did what it did, with its sources resolved (FR-17).
+
+        `based_on` holds observation ids, which are the right thing to store and
+        the wrong thing to show: §3.6 wants "based on 2 sightings + hazard #7",
+        not a column of UUIDs. Resolving them here keeps the join on the server
+        where the memory already is, and keeps the client a renderer.
+        """
+        beliefs = {b.id: b for b in self.mem.get_beliefs(self.mission_id)}
+        plans = self.mem.plans_for(self.mission_id, robot_id)[-limit:]
+        return [
+            {
+                "trigger": plan.trigger,
+                "rationale": plan.rationale,
+                "chosen": plan.chosen,
+                "source": (plan.chosen or {}).get("source", "rules"),
+                "based_on": [
+                    {
+                        "kind": beliefs[bid].kind,
+                        "x": beliefs[bid].pos[0],
+                        "y": beliefs[bid].pos[1],
+                        "sightings": beliefs[bid].sightings,
+                        "confidence": round(beliefs[bid].confidence, 2),
+                    }
+                    for bid in (plan.based_on or [])
+                    if bid in beliefs
+                ],
+            }
+            for plan in reversed(plans)  # newest first: the panel reads top-down
+        ]
 
     def tick_once(self) -> dict[str, Any]:
         """One pass of the pipeline. Split out from the loop so tests can drive
@@ -157,7 +248,9 @@ class Mission:
             self.mem.log_event(
                 self.mission_id, event["actor"], event["verb"], event["detail"]
             )
-        return frame.to_json()
+        payload = frame.to_json()
+        payload["metrics"] = self.metrics()
+        return payload
 
     async def run(self) -> None:
         self.running = True
@@ -166,6 +259,19 @@ class Mission:
             await self._broadcast(frame)
             await asyncio.sleep(TICK_SECONDS)
         self.running = False
+        if self.world.finished:
+            # Recorded the moment the mission ends, not when somebody navigates
+            # away from it: a run that has just finished is exactly the one the
+            # scoreboard should be showing, and waiting for a toggle meant the
+            # numbers appeared only after they stopped being on screen.
+            self.record_run()
+
+    def record_run(self) -> None:
+        """Keep this mode's numbers for the ON/OFF comparison (FR-9, §4.7)."""
+        self.last_runs[self.mode] = {
+            **self.metrics(),
+            "finished": self.world.finished,
+        }
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         """Hand one frame to every viewer's queue. Never touches a socket.
@@ -186,7 +292,7 @@ class Mission:
                     self.viewers.discard(viewer)
                     viewer.close()
 
-    async def attach(self, socket: WebSocket) -> "Viewer":
+    async def attach(self, socket: WebSocket) -> Viewer:
         """Register a viewer with the current world already queued.
 
         Snapshotting and registering happen under the broadcast lock and without
@@ -196,11 +302,24 @@ class Mission:
         """
         viewer = Viewer(socket)
         async with self._broadcast_lock:
-            viewer.offer(json.dumps(self.world.snapshot().to_json()))
+            viewer.offer(self._snapshot())
             self.viewers.add(viewer)
         return viewer
 
-    def detach(self, viewer: "Viewer") -> None:
+    def _snapshot(self) -> str:
+        """The full world, with the scoreboard's numbers rather than the world's.
+
+        `World.snapshot()` carries the live counters it owns — victims located,
+        stabilized, coverage. The §4.7 set is derived from the event log and the
+        world knows nothing about it, so a browser attaching to a mission that
+        has already finished would show 8 rescued at a rescue rate of 0%: two
+        true numbers from two sources, disagreeing on screen.
+        """
+        payload = self.world.snapshot().to_json()
+        payload["metrics"] = self.metrics()
+        return json.dumps(payload)
+
+    def detach(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)
         viewer.close()
 
@@ -234,9 +353,46 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "tick": mission.world.tick,
         "memory": mission.memory_kind,
+        "mode": mission.mode,
         "agents": sorted(mission.agents),
-        "metrics": mission.world.metrics(),
+        "metrics": mission.metrics(),
     }
+
+
+@app.get("/api/plans/{robot_id}")
+async def plans(robot_id: str, limit: int = 5) -> dict[str, Any]:
+    """Why a robot did what it did (FR-17) — the bubble click in §3.6.
+
+    Read-only, and read straight out of fleet memory rather than from anything
+    the renderer was told: what a judge sees when they click a robot is the same
+    rows the commander console queries.
+    """
+    if robot_id not in mission.agents:
+        return {"robot": robot_id, "plans": [], "error": "no such robot"}
+    return {"robot": robot_id, "plans": mission.provenance(robot_id, limit=limit)}
+
+
+@app.post("/api/mission/restart")
+async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Flip coordination ON/OFF and start the mission again (FR-9).
+
+    The whole fleet is rebuilt, not just the fog: baseline means private world
+    models, no claiming and no sector tasks (§3.3), which is exactly the
+    `coordinated=False` path the metrics suite measures.
+    """
+    coordinated = bool((body or {}).get("coordinated", True))
+    await mission.reset(coordinated=coordinated)
+    return {
+        "mode": mission.mode,
+        "tick": mission.world.tick,
+        "previous": mission.last_runs,
+    }
+
+
+@app.get("/api/runs")
+async def runs() -> dict[str, Any]:
+    """Final numbers per mode, for the side-by-side scoreboard (FR-9, §4.7)."""
+    return {"current": mission.mode, "runs": mission.last_runs}
 
 
 @app.websocket("/ws")

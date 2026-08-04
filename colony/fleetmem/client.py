@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import functools
 import json
-from typing import Any, Sequence
+import os
+from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 import psycopg
@@ -56,8 +58,20 @@ def retry_on_serialization_failure(method):
 
 
 class CockroachFleetMem:
-    def __init__(self, dsn: str = DEFAULT_DSN):
-        self.conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+    def __init__(self, dsn: str | None = None):
+        """Connect to fleet memory.
+
+        `COLONY_DSN` overrides the local dev cluster, which is how the same code
+        runs against CockroachDB Cloud (§4.6: the primary fleet memory is Cloud;
+        the local recipe and the 3-node chaos rig are for development and the
+        node-kill segment). Explicit `dsn=` still wins, so per-robot credential
+        tests can open one connection per identity.
+        """
+        self.conn = psycopg.connect(
+            dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN),
+            autocommit=True,
+            row_factory=dict_row,
+        )
 
     def close(self) -> None:
         self.conn.close()

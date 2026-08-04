@@ -4,6 +4,10 @@ Phase 1 (Aug 1): cluster, schema, the `fleetmem` SDK, the `map.json` contract,
 CockroachDB vector indexing, the Bedrock adapter.
 Phase 2 (Aug 2–3): the walking skeleton — scouts move, write beliefs, and render live in
 a browser. All four §5.2 interface contracts are now frozen.
+Phase 3 (Aug 3): the fleet — lifter and medic, leased claiming, sector claims, Bedrock
+planning at plan boundaries, battery and kit logistics, replan-on-aftershock.
+Phase 4 (Aug 3): the demo — pixel-art renderer, fog of war in both modes, thought
+bubbles you can click for provenance, the coordination ON/OFF toggle and scoreboard.
 
 ## Start here
 
@@ -11,8 +15,12 @@ a browser. All four §5.2 interface contracts are now frozen.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 202 tests
+make test     # 394 tests
 ```
+
+To exercise CockroachDB Cloud, the 3-node chaos rig or live Bedrock, see
+[`docs/setup-testing.md`](../docs/setup-testing.md) — a green `make test` on a bare
+laptop proves the fleet works, not that the integrations do.
 
 `make sim` runs without a cluster too — it falls back to in-memory fleet memory and says
 so, so the renderer is never blocked on CockroachDB.
@@ -37,7 +45,12 @@ so a broken cluster can't masquerade as a green run.
 | [`sim/world.py`](sim/world.py) | Authoritative world state and the tick pipeline (§4.8) |
 | [`sim/server.py`](sim/server.py) | 4 Hz tick loop, websocket broadcast, serves the client |
 | [`agents/scout.py`](agents/scout.py) | Scout loop: sense → sync → think → act → report |
-| [`client/app.js`](client/app.js) | Renderer, with client-side interpolation between ticks |
+| [`agents/worker.py`](agents/worker.py) | Lifter and medic: claim, path, work, complete |
+| [`agents/planning.py`](agents/planning.py) | Bedrock at plan boundaries: role cards, digest, rate cap (§4.3, §3.5) |
+| [`agents/beliefs.py`](agents/beliefs.py) | The shared hazard map routing is priced against |
+| [`agents/logistics.py`](agents/logistics.py) | Battery, charging and supply kits (§3.3) |
+| [`client/app.js`](client/app.js) | Renderer: layers per §4.8, fog, bubbles, ticker, scoreboard |
+| [`client/atlas.js`](client/atlas.js) | The sprite sheet, drawn in code — no downloads, no licences |
 
 ## Interface contracts (§5.2 — all four frozen Aug 3)
 
@@ -47,10 +60,13 @@ rejects illegal ones as events rather than exceptions.
 ```python
 Action.move("n" | "s" | "e" | "w")     # advances up to the role's speed (§3.3)
 Action.act("clear_debris" | "stabilize", (x, y))       # adjacent, in-bounds
-# "recharge" and "restock" parse but the server rejects them — battery and kit
-# logistics are lane 2's, not built yet. Don't build against them today.
+Action.act("recharge" | "restock", (x, y))   # inside the staging zone (§3.3)
 Action.idle()
 ```
+
+Battery drains one point per tick of movement (§3.3 quotes battery in *ticks*),
+a flat battery strands a robot for good, and a medic spends one of its two kits
+per victim. Agents plan around all three; see `agents/logistics.py`.
 
 **3. Sim → browser.** A full `snapshot` frame on connect, then `diff` frames:
 
@@ -64,6 +80,30 @@ Action.idle()
 ```
 
 Only `tiles_changed` is sent per tick — the full grid rides along once, in the snapshot.
+
+## The demo UI
+
+`make sim`, then http://localhost:8000. Nothing to install: the renderer is
+Canvas 2D with no CDN and no WebGL requirement, and the sprites are drawn in code
+(`client/atlas.js`), so there is no asset pack to fetch and no licence to track.
+
+| Control | What it shows |
+|---|---|
+| click a robot | its latest decisions — rationale, trigger, whether Bedrock or rules chose, and the memories behind it (FR-17) |
+| `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
+| `S` | the exploration sector grid (FR-16) |
+
+Three read-only-ish endpoints back it, and the commander console (lane 4) can use
+the first one for FR-10's "why did robot X do Y":
+
+```
+GET  /api/plans/{robot_id}?limit=5
+POST /api/mission/restart      {"coordinated": false}
+GET  /api/runs                 final numbers per mode
+```
+
+`COLONY_MAP=path/to/map.json make sim` runs a different map — a playtest variant,
+or a copy with the escalation moved earlier to rehearse the aftershock beat.
 
 ## For lanes 2 and 4 — start now, no cluster required
 
@@ -136,10 +176,16 @@ export AWS_REGION=us-east-1
 If `live`/`record` is requested without credentials it falls back to `replay` rather than
 crashing — a missing credential should mean a degraded demo, not a dead one.
 
+Agents ask Bedrock only at plan boundaries (§4.3) and only when it can answer
+better than their own rules: over the §3.5 cap of 4 calls/robot/minute, or in replay
+with no cassette entry, the planner declines and the robot uses the rules it always
+had. `plans.chosen->>'source'` records which one decided, so "the LLM is driving this"
+is a SQL query rather than a claim.
+
 **Not yet done:** nobody has run a live Bedrock call. Titan V2 embedding width (512) and
 the request/response shapes are written to the documented API but are unverified against
 the real service. Whoever wires credentials first should run in `record` mode and commit
-the cassette.
+the cassette — [`docs/setup-testing.md`](../docs/setup-testing.md) §3 has the exact steps.
 
 ## Notes for whoever touches the schema
 

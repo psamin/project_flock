@@ -1,42 +1,41 @@
-/* Colony renderer (PRD §4.8).
+/* Colony renderer (PRD §4.8, §3.6).
  *
  * The server ticks at 4 Hz and owns truth. This renders at 60 fps and tweens
  * each robot from its previous tile to its new one across the 250 ms window.
  * That interpolation is the whole trick: without it a 4 Hz sim reads as a chess
  * clock, with it it reads as a world. Never render raw tick jumps.
  *
- * Layers, drawn bottom to top per §4.8: ground, hazards, fog mask, entities,
- * floaters. Thought bubbles and sprite atlases are still to come.
+ * Layers, drawn bottom to top per §4.8:
+ *   1 ground tilemap · 2 debris and hazards (animated fire) · 3 entities
+ *   (victims, then robots) · 4 fog of war · 5 floaters (name tags, bubbles,
+ *   path ghosts) · 6 HUD, which is DOM rather than canvas.
  *
  * Canvas 2D rather than the PixiJS §4.8 calls for, deliberately. PixiJS 7 has no
  * automatic canvas fallback: on a machine without WebGL it throws "Unable to
  * auto-detect a suitable renderer" and the page renders nothing at all. That is
  * a bad failure for a demo whose entire deliverable is a video, and it also made
  * the renderer impossible to verify in headless QA. At this scale (1,200 tiles,
- * a handful of entities) Canvas 2D is not a compromise. Pixi earns its place
- * when lane 3 adds sprite atlases and animation cycles; the websocket protocol,
- * layer order and interpolation below are unchanged by that swap.
+ * a handful of entities) Canvas 2D is not a compromise — the sprite work lives
+ * in atlas.js and blits the same either way.
  */
 
+import { buildAtlas, drawSprite, tileSprite, COLOURS } from "./atlas.js";
+
 const TICK_MS = 250; // 4 Hz
+const FIRE_FRAME_MS = 140;
+const WALK_FRAME_MS = 220;
+const GHOST_MS = 2500;    // how long a claimed task's path line lingers
+const SHAKE_MS = 600;     // §3.6: screen shake on the aftershock
+const TICKER_MAX = 200;   // DOM lines kept; a 1,200-tick mission would grow forever
 
-// Warm, slightly desaturated base; accents reserved for meaning (§3.6).
-const PALETTE = {
-  open: "#2a2733",
-  wall: "#151319",
-  door: "#6b5a3e",
-  unstable: "#3d3243",
-  debris: "#4a4352",
-  rubble_heavy: "#5c5265",
-  fire: "#e2603f",
-  victim: "#f2c14e",
-  victimStabilized: "#6fbf73",
-  victimLost: "#6b6472",
-};
-
-// Unexplored ground reads as near-black: the map filling in as the fleet
-// explores is the hero visual (§3.6), so what is unknown has to look unknown.
+// Fog (FR-8, §4.8 layer 4). Three states, not two: unexplored is black, ground
+// nobody is currently looking at is dimmed, and what a robot can see right now
+// is full brightness. The middle state is what makes the map feel *remembered*
+// rather than merely uncovered.
 const UNSEEN = "#0e0d12";
+const STALE_ALPHA = 0.32;
+const BASELINE_STALE_ALPHA = 0.55;  // private maps: dimmer still (§4.8)
+
 const ROLE_COLOR = { scout: "#63c5da", lifter: "#d9884a", medic: "#d96a9a" };
 
 let canvas = null;
@@ -46,40 +45,52 @@ let tile = 32;
 
 let robots = [];
 let victims = [];
-// Fog of war (FR-8, §4.8 layer 4). Held as a Set of "x,y" keys because it grows
-// to the size of the map and is tested once per tile per frame.
+// Held as a Set of "x,y" keys because it grows to the size of the map and is
+// tested once per tile per frame.
 let explored = new Set();
 let sharedVision = true;
 const motion = new Map();   // robot id -> {fromX, fromY, toX, toY}
 let windowStart = 0;
+let ghosts = [];            // {x, y, tx, ty, until, role}
+let shakeUntil = 0;
+let selected = null;        // robot id whose provenance panel is open
+let showSectors = false;
 
 function boot(snapshot) {
   // Called on EVERY snapshot, not just the first. `make sim` runs uvicorn with
-  // --reload, so a restart hands the client a different world with the tick
-  // counter back at 0. Keeping the old grid and replaying the new mission's
-  // diffs onto it leaves two grids that never reconverge.
+  // --reload and the ON/OFF toggle restarts the mission, so a snapshot can hand
+  // the client a different world with the tick counter back at 0. Keeping the
+  // old grid and replaying the new mission's diffs onto it leaves two grids that
+  // never reconverge.
   world = snapshot.world;
   tile = world.tile_size;
   sharedVision = world.shared_vision !== false;
   motion.clear();
-  robots = [];
-  victims = [];
-  explored = new Set();
+  robots = snapshot.robots || [];
+  victims = snapshot.victims || [];
+  explored = new Set((snapshot.explored || []).map(([x, y]) => `${x},${y}`));
+  ghosts = [];
+  // The panel describes decisions from a mission that no longer exists.
+  if (selected) closePanel();
 
   const stage = document.getElementById("stage");
   if (!canvas) {
     canvas = document.createElement("canvas");
+    canvas.addEventListener("click", onCanvasClick);
     stage.appendChild(canvas);
     ctx = canvas.getContext("2d");
     requestAnimationFrame(draw);
   }
   canvas.width = world.width * tile;
   canvas.height = world.height * tile;
-}
-
-function tileColor(ground, object) {
-  if (object && PALETTE[object]) return PALETTE[object];
-  return PALETTE[ground] || PALETTE.open;
+  buildAtlas(tile);
+  document.getElementById("mode-badge").textContent = sharedVision
+    ? "SHARED MEMORY"
+    : "PRIVATE MAPS";
+  document.getElementById("mode-badge").className = sharedVision ? "on" : "off";
+  document.getElementById("toggle").textContent = sharedVision
+    ? "coordination: ON"
+    : "coordination: OFF";
 }
 
 function applyTileChanges(changes) {
@@ -111,112 +122,434 @@ function trackRobots(incoming) {
   robots = incoming;
 }
 
+/** Tiles a robot can see right now, for the "stale vs live" fog distinction. */
+function visibleNow() {
+  const live = new Set();
+  for (const r of robots) {
+    const radius = r.vision || 2;
+    for (let y = r.y - radius; y <= r.y + radius; y++) {
+      for (let x = r.x - radius; x <= r.x + radius; x++) live.add(`${x},${y}`);
+    }
+  }
+  return live;
+}
+
 function draw() {
   requestAnimationFrame(draw);
   if (!ctx || !world) return;
 
-  const t = Math.min(1, (performance.now() - windowStart) / TICK_MS);
+  const now = performance.now();
+  const t = Math.min(1, (now - windowStart) / TICK_MS);
   const eased = t * t * (3 - 2 * t); // smoothstep: no linear snap at the ends
+  const fireFrame = Math.floor(now / FIRE_FRAME_MS) % 3;
+  const walkFrame = Math.floor(now / WALK_FRAME_MS) % 2;
+  const live = visibleNow();
 
-  // 1-2: ground and hazards, then 4: the fog mask over them. Redrawn wholesale;
-  // 1,200 fills is nothing, and it keeps the fog exact rather than incremental.
+  ctx.save();
+  if (now < shakeUntil) {
+    // Decays rather than rattling at constant amplitude, so it reads as an
+    // impact and not as a broken renderer.
+    const power = ((shakeUntil - now) / SHAKE_MS) * 6;
+    ctx.translate((Math.random() - 0.5) * power, (Math.random() - 0.5) * power);
+  }
+  ctx.fillStyle = UNSEEN;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Layers 1-2: ground and hazards, then the fog over them.
+  const staleAlpha = sharedVision ? STALE_ALPHA : BASELINE_STALE_ALPHA;
   for (let y = 0; y < world.height; y++) {
     for (let x = 0; x < world.width; x++) {
-      const seen = explored.has(`${x},${y}`);
-      ctx.fillStyle = seen ? tileColor(world.ground[y][x], world.objects[y][x]) : UNSEEN;
-      ctx.fillRect(x * tile, y * tile, tile - 1, tile - 1);
+      const key = `${x},${y}`;
+      if (!explored.has(key)) continue;             // layer 4, by omission
+      const px = x * tile;
+      const py = y * tile;
+      const sprite = tileSprite(world.ground[y][x], world.objects[y][x], x, y);
+      if (sprite) drawSprite(ctx, sprite, px, py);
+      if (world.objects[y][x] === "fire") {
+        drawSprite(ctx, "ground0", px, py);
+        drawSprite(ctx, `fire${fireFrame}`, px, py);
+      }
+      if (!live.has(key)) {
+        ctx.fillStyle = `rgba(14, 13, 18, ${staleAlpha})`;
+        ctx.fillRect(px, py, tile, tile);
+      }
     }
   }
 
-  // 3: entities — victims first so robots draw over them.
-  const pulse = 0.75 + 0.25 * Math.sin(performance.now() / 300);
+  if (showSectors) drawSectors();
+
+  // Layer 3: entities — victims first so robots draw over them.
   for (const v of victims) {
     // Unknown victims stay hidden: the viewer learns where they are when the
     // fleet does, which is the point of the demo.
     if (v.state === "unknown") continue;
-    if (!explored.has(`${v.x},${v.y}`)) continue;   // not found yet, not drawn
-    ctx.globalAlpha = v.state === "located" ? pulse : 1;
-    ctx.fillStyle =
-      v.state === "stabilized" ? PALETTE.victimStabilized
-      : v.state === "lost" ? PALETTE.victimLost
-      : PALETTE.victim;
-    ctx.beginPath();
-    ctx.arc(v.x * tile + tile / 2, v.y * tile + tile / 2, tile * 0.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    if (!explored.has(`${v.x},${v.y}`)) continue;
+    const sprite =
+      v.state === "stabilized" ? "victim_stabilized"
+      : v.state === "lost" ? "victim_lost"
+      : `victim${Math.floor(now / 400) % 2}`;
+    drawSprite(ctx, sprite, v.x * tile, v.y * tile);
   }
+
+  drawGhosts(now);
 
   for (const r of robots) {
     const m = motion.get(r.id);
+    if (!m) continue;
     const px = (m.fromX + (m.toX - m.fromX) * eased) * tile;
     const py = (m.fromY + (m.toY - m.fromY) * eased) * tile;
-    const color = ROLE_COLOR[r.role] || "#ffffff";
-
-    if (r.role === "scout") {
-      // Hovering drone: soft shadow under a round body (§3.6 silhouettes).
-      ctx.globalAlpha = 0.28;
-      ctx.fillStyle = "#000000";
-      ctx.beginPath();
-      ctx.ellipse(px + tile / 2, py + tile - 5, tile * 0.28, tile * 0.12, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(px + tile / 2, py + tile / 2 - 2, tile * 0.3, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.fillStyle = color;
-      ctx.fillRect(px + tile * 0.18, py + tile * 0.18, tile * 0.64, tile * 0.64);
-    }
-
-    // 4: floaters — name tags above the sprites.
-    ctx.fillStyle = "#e8e3d9";
-    ctx.font = "10px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(r.id, px + tile / 2, py - 3);
+    const moving = r.status === "moving";
+    const frame = moving || r.role === "scout" ? walkFrame : 0;
+    drawSprite(ctx, `${r.role}${frame}`, px, py, {
+      flip: r.facing === "w",
+      alpha: r.status === "stranded" ? 0.45 : 1,
+    });
   }
+
+  // Layer 5: floaters, in their own pass so they never sort-fight with sprites.
+  // Bubbles are placed last and stacked, because robots cluster — three of them
+  // charging at base wrote three overlapping bubbles into one unreadable smear.
+  const placed = [];
+  for (const r of robots) {
+    const m = motion.get(r.id);
+    if (!m) continue;
+    const px = (m.fromX + (m.toX - m.fromX) * eased) * tile;
+    const py = (m.fromY + (m.toY - m.fromY) * eased) * tile;
+    drawNameTag(r, px, py);
+    if (r.bubble) placed.push(drawBubble(r.bubble, px + tile / 2, py - 14, placed));
+  }
+  ctx.restore();
+}
+
+function drawSectors() {
+  ctx.save();
+  ctx.strokeStyle = "rgba(160, 150, 190, 0.22)";
+  ctx.fillStyle = "rgba(160, 150, 190, 0.5)";
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.lineWidth = 1;
+  for (const s of world.sectors || []) {
+    ctx.strokeRect(s.x * tile, s.y * tile, s.width * tile, s.height * tile);
+    ctx.fillText(s.id, s.x * tile + 4, s.y * tile + 12);
+  }
+  ctx.restore();
+}
+
+/** Path ghosts (§3.6): a brief line to the tile a robot just claimed work on. */
+function drawGhosts(now) {
+  ghosts = ghosts.filter((g) => g.until > now);
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  for (const g of ghosts) {
+    ctx.globalAlpha = Math.max(0, (g.until - now) / GHOST_MS) * 0.7;
+    ctx.strokeStyle = ROLE_COLOR[g.role] || "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(g.x * tile + tile / 2, g.y * tile + tile / 2);
+    ctx.lineTo(g.tx * tile + tile / 2, g.ty * tile + tile / 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(g.tx * tile + tile / 2, g.ty * tile + tile / 2, 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawNameTag(r, px, py) {
+  ctx.save();
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  const label = r.id.toUpperCase();
+  const width = ctx.measureText(label).width + 8;
+  ctx.fillStyle = selected === r.id ? "rgba(242,193,78,0.9)" : "rgba(20,19,26,0.75)";
+  ctx.fillRect(px + tile / 2 - width / 2, py + tile - 2, width, 12);
+  ctx.fillStyle = selected === r.id ? "#14131a" : ROLE_COLOR[r.role] || "#e8e3d9";
+  ctx.fillText(label, px + tile / 2, py + tile + 7);
+  ctx.restore();
+}
+
+/** The Smallville signature (§3.6): what this robot is thinking, right now.
+ *
+ * Returns the rectangle it used so the next bubble can avoid it. Lifts itself
+ * above anything already drawn rather than shortening the text: the words are
+ * the point, and a truncated thought is worse than one drawn a little high.
+ */
+function drawBubble(text, cx, cy, placed = []) {
+  ctx.save();
+  ctx.font = "11px ui-monospace, monospace";
+  const clipped = text.length > 28 ? `${text.slice(0, 27)}…` : text;
+  const w = ctx.measureText(clipped).width + 12;
+  const h = 18;
+  const x = cx - w / 2;
+  let y = cy - h;
+  for (let guard = 0; guard < placed.length + 1; guard++) {
+    const clash = placed.find(
+      (p) => x < p.x + p.w + 4 && x + w + 4 > p.x && y < p.y + p.h + 2 && y + h + 2 > p.y,
+    );
+    if (!clash) break;
+    y = clash.y - h - 3;
+  }
+
+  ctx.fillStyle = "rgba(28, 26, 36, 0.92)";
+  ctx.strokeStyle = "rgba(160, 150, 190, 0.35)";
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 6);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();                       // the little tail
+  ctx.moveTo(cx - 4, y + h);
+  ctx.lineTo(cx, y + h + 5);
+  ctx.lineTo(cx + 4, y + h);
+  ctx.fill();
+
+  ctx.fillStyle = "#e8e3d9";
+  ctx.textAlign = "center";
+  ctx.fillText(clipped, cx, y + 13);
+  ctx.restore();
+  return { x, y, w, h };
+}
+
+// --- interaction -------------------------------------------------------------
+
+function onCanvasClick(event) {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
+  const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
+
+  let best = null;
+  let bestDistance = tile; // within a tile of the click counts as a hit
+  for (const r of robots) {
+    const m = motion.get(r.id);
+    if (!m) continue;
+    const d = Math.hypot(m.toX * tile + tile / 2 - x, m.toY * tile + tile / 2 - y);
+    if (d < bestDistance) {
+      best = r;
+      bestDistance = d;
+    }
+  }
+  if (best) showProvenance(best);
+  else closePanel();
+}
+
+/** FR-17 made visible: the rationale *and the memories behind it* (§3.6). */
+async function showProvenance(robot) {
+  selected = robot.id;
+  const panel = document.getElementById("panel");
+  panel.classList.add("open");
+  document.getElementById("panel-title").textContent =
+    `${robot.id.toUpperCase()} · ${robot.role}`;
+  document.getElementById("panel-vitals").textContent =
+    `battery ${robot.battery}` +
+    (robot.role === "medic" ? ` · kits ${robot.kits}` : "") +
+    ` · ${robot.status}`;
+  const body = document.getElementById("panel-body");
+  body.textContent = "loading…";
+
+  try {
+    const response = await fetch(`/api/plans/${robot.id}`);
+    const data = await response.json();
+    body.innerHTML = "";
+    if (!data.plans || !data.plans.length) {
+      body.textContent = "no decisions recorded yet";
+      return;
+    }
+    for (const plan of data.plans) {
+      const entry = document.createElement("div");
+      entry.className = "plan";
+      const head = document.createElement("div");
+      head.className = "plan-head";
+      head.textContent = `${plan.trigger} · ${plan.source}`;
+      const why = document.createElement("div");
+      why.className = "plan-why";
+      why.textContent = plan.rationale || "(no rationale)";
+      entry.append(head, why);
+
+      if (plan.based_on.length) {
+        const sources = document.createElement("div");
+        sources.className = "plan-sources";
+        // "based on 2 sightings + hazard #7" — §3.6's exact ask. These are rows
+        // in `observations`, joined server-side, not anything the UI invented.
+        sources.textContent =
+          `based on ${plan.based_on.length} ${plan.based_on.length === 1 ? "memory" : "memories"}: ` +
+          plan.based_on
+            .map((b) => `${b.kind} (${b.x},${b.y}) ×${b.sightings}`)
+            .join(", ");
+        entry.append(sources);
+      }
+      body.append(entry);
+    }
+  } catch (err) {
+    body.textContent = `could not load plans: ${err.message}`;
+  }
+}
+
+function closePanel() {
+  selected = null;
+  document.getElementById("panel").classList.remove("open");
+}
+
+async function toggleMode() {
+  const button = document.getElementById("toggle");
+  button.disabled = true;
+  button.textContent = "restarting…";
+  try {
+    await fetch("/api/mission/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ coordinated: !sharedVision }),
+    });
+    document.getElementById("ticker").innerHTML = "";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// --- HUD ---------------------------------------------------------------------
+
+function setText(id, value) {
+  const node = document.getElementById(id);
+  if (node) node.textContent = value;
 }
 
 function updateHud(metrics) {
   if (!metrics) return;
-  document.getElementById("m-tick").textContent = metrics.tick ?? 0;
-  document.getElementById("m-located").textContent = metrics.victims_located ?? 0;
-  document.getElementById("m-stabilized").textContent = metrics.victims_stabilized ?? 0;
-  document.getElementById("m-lost").textContent = metrics.victims_lost ?? 0;
-  const coverage = document.getElementById("m-coverage");
-  if (coverage && metrics.coverage !== undefined) {
-    coverage.textContent = `${Math.round(metrics.coverage * 100)}%`;
+  setText("m-tick", metrics.tick ?? 0);
+  setText("m-located", metrics.victims_located ?? 0);
+  setText("m-stabilized", metrics.victims_stabilized ?? 0);
+  setText("m-lost", metrics.victims_lost ?? 0);
+  setText("m-coverage", `${Math.round((metrics.coverage ?? 0) * 100)}%`);
+  setText("m-rescue", `${Math.round((metrics.rescue_rate ?? 0) * 100)}%`);
+  setText("m-duplicate", `${Math.round((metrics.duplicate_effort_index ?? 0) * 100)}%`);
+  setText(
+    "m-median",
+    metrics.median_time_to_stabilize == null
+      ? "—"
+      : Math.round(metrics.median_time_to_stabilize),
+  );
+}
+
+/** §4.7's one number the video ends on, once both modes have run. */
+async function refreshComparison() {
+  try {
+    const data = await (await fetch("/api/runs")).json();
+    const runs = data.runs || {};
+    const box = document.getElementById("comparison");
+    const co = runs.coordinated;
+    const base = runs.baseline;
+    if (!co || !base) {
+      box.textContent = co || base ? "run the other mode to compare" : "";
+      return;
+    }
+    if (!co.finished || !base.finished) {
+      // Comparing a finished run against one that was cut short would report a
+      // coordination gain the fleet never earned, in either direction.
+      box.textContent = "let each mode run to the end for a fair comparison";
+      return;
+    }
+    const gain =
+      base.median_time_to_stabilize && co.median_time_to_stabilize != null
+        ? (base.median_time_to_stabilize - co.median_time_to_stabilize) /
+          base.median_time_to_stabilize
+        : 0;
+    box.innerHTML =
+      `<b>coordination gain ${Math.round(gain * 100)}%</b> · ` +
+      `rescued ${co.victims_stabilized}/${co.victims_total} coordinated ` +
+      `vs ${base.victims_stabilized}/${base.victims_total} baseline`;
+  } catch {
+    /* the scoreboard is decoration until both runs exist */
   }
 }
+
+const TICKER_TEXT = {
+  victim_found: (e) => `found ${e.detail.victim} at ${e.detail.x},${e.detail.y}`,
+  victim_stabilized: (e) => `stabilized ${e.detail.victim}`,
+  victim_lost: (e) => `lost ${e.detail.victim}`,
+  debris_cleared: (e) => `cleared debris at ${e.detail.x},${e.detail.y}`,
+  task_claimed: (e) => `claimed ${e.detail.kind}`,
+  task_completed: (e) => `completed ${e.detail.kind}`,
+  task_released: (e) => `released a task (${e.detail.reason})`,
+  sector_claimed: (e) => `claimed sector ${e.detail.sector}`,
+  sector_swept: (e) => `swept sector ${e.detail.sector}`,
+  returning_to_base: () => "heading back to base",
+  recharged: () => "recharged",
+  restocked: () => "restocked kits",
+  fire_spread: (e) => `fire spread to ${e.detail.x},${e.detail.y}`,
+  aftershock: () => "AFTERSHOCK — the map just changed",
+};
+
+const TICKER_CLASS = {
+  victim_found: "found",
+  victim_stabilized: "good",
+  victim_lost: "bad",
+  aftershock: "shock",
+  sector_claimed: "sector",
+  sector_swept: "sector",
+};
 
 function logEvents(events) {
   const ticker = document.getElementById("ticker");
   for (const e of events || []) {
-    if (e.verb === "action_rejected") continue; // noise, not signal
+    if (e.verb === "action_rejected" || e.verb === "tile_visited") continue; // noise
+    if (e.verb === "aftershock") shakeUntil = performance.now() + SHAKE_MS;
+    if (e.verb === "task_claimed" && e.detail.target) {
+      const robot = robots.find((r) => r.id === e.actor);
+      if (robot) {
+        ghosts.push({
+          x: robot.x,
+          y: robot.y,
+          tx: e.detail.target[0],
+          ty: e.detail.target[1],
+          until: performance.now() + GHOST_MS,
+          role: robot.role,
+        });
+      }
+    }
+
     const line = document.createElement("div");
-    if (e.verb === "victim_found") line.className = "found";
-    if (e.verb === "aftershock") line.className = "shock";
-    line.textContent = `${String(e.tick).padStart(4, " ")}  ${e.actor}  ${e.verb}`;
+    line.className = TICKER_CLASS[e.verb] || "";
+    const say = TICKER_TEXT[e.verb];
+    line.textContent =
+      `${String(e.tick).padStart(4, " ")}  ${e.actor.padEnd(6)} ` +
+      (say ? say(e) : e.verb.replace(/_/g, " "));
     ticker.appendChild(line);
   }
+  while (ticker.childElementCount > TICKER_MAX) ticker.removeChild(ticker.firstChild);
   ticker.scrollTop = ticker.scrollHeight;
 }
 
+// --- transport ---------------------------------------------------------------
+
+let socket = null;
+
 function connect() {
   const status = document.getElementById("status");
-  const socket = new WebSocket(`ws://${location.host}/ws`);
+  // Retire any previous socket first. Each reconnect used to leave the old one
+  // subscribed, so after two server restarts every frame was applied three
+  // times: the ticker printed each event three times over, and the aftershock —
+  // the beat the demo is built around — read as three separate earthquakes.
+  if (socket) {
+    socket.onclose = null;
+    socket.onmessage = null;
+    socket.close();
+  }
+  socket = new WebSocket(`ws://${location.host}/ws`);
+  const mine = socket;
 
   socket.onopen = () => { status.textContent = "live"; };
   socket.onerror = () => { status.textContent = "connection error"; };
   socket.onclose = () => {
+    if (mine !== socket) return;   // a socket we already replaced
     status.textContent = "disconnected — retrying";
     setTimeout(connect, 1000);
   };
 
   socket.onmessage = (message) => {
+    if (mine !== socket) return;
     const frame = JSON.parse(message.data);
     try {
-      if (frame.kind === "snapshot") boot(frame);
+      if (frame.kind === "snapshot") {
+        boot(frame);
+        refreshComparison();
+      }
       // A diff can arrive before the snapshot: the server registers a viewer
       // before sending it, deliberately, so no frame is skipped. Without a
       // world there is nothing to apply it to, and the next snapshot carries
@@ -237,5 +570,17 @@ function connect() {
     }
   };
 }
+
+// The comparison changes when a mission *ends*, which is not an event the
+// frame stream carries — polling a read-only endpoint every few seconds is
+// cheaper than inventing one.
+setInterval(refreshComparison, 4000);
+
+document.getElementById("toggle").addEventListener("click", toggleMode);
+document.getElementById("panel-close").addEventListener("click", closePanel);
+window.addEventListener("keydown", (e) => {
+  if (e.key === "s") showSectors = !showSectors;   // FR-16's grid, on demand
+  if (e.key === "Escape") closePanel();
+});
 
 connect();

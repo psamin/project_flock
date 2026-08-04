@@ -10,7 +10,14 @@ import uuid
 import pytest
 
 from agents.scout import Scout
-from agents.worker import ROLE_TASKS, SELF_CLAIM_AFTER_TICKS, Worker, allocation_score
+from agents.worker import (
+    BLOCKED_RELEASE_TICKS,
+    ROLE_TASKS,
+    SELF_CLAIM_AFTER_TICKS,
+    STAGE_AFTER_IDLE_TICKS,
+    Worker,
+    allocation_score,
+)
 from bedrock.adapter import BedrockAdapter
 from fleetmem.types import Task
 from sim.world import World
@@ -271,6 +278,117 @@ def test_a_task_with_no_target_scores_without_crashing():
     assert (
         allocation_score("lifter", world.robots["l1"], _task(target=(None, None))) > 0
     )
+
+
+# --- idle staging (§4.3) -----------------------------------------------------
+
+
+def _corridor_world(lifter_spawn=(2, 2)):
+    """A wall with one door at (8, 10) — a victim on the far side of it, and the
+    only medic on this side. Exactly the shape that froze the demo map."""
+    walls = [(8, y) for y in range(20) if y != 10]
+    return _world(
+        spawn={
+            "lifter": [{"x": lifter_spawn[0], "y": lifter_spawn[1]}],
+            "medic": [{"x": 12, "y": 10}],
+        },
+        victims=[{"id": "v1", "x": 2, "y": 10, "vitals_deadline": 700}],
+        walls=walls,
+    )
+
+
+def test_an_idle_lifter_does_not_park_in_the_only_doorway(mem, mission):
+    """The demo-map freeze, as a fixture.
+
+    A lifter that finished its work in a one-tile corridor used to stand there
+    for the rest of the mission, and the medic behind it waited just as long:
+    with robots treated as obstacles there was no route, and with robots ignored
+    there was, so the medic idled rather than releasing. Measured on Aftershock
+    before idle staging existed: both robots frozen from tick ~150, victim 8
+    dead at its deadline with the medic still holding its delivery task, and the
+    victim the aftershock reveals never claimed at all.
+    """
+    world = _corridor_world()
+    world.robots["l1"].x, world.robots["l1"].y = 8, 10  # finished a job in the door
+    mem.register_victim(mission, (2, 10), reported_by="s1")
+
+    lifter = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
+    medic = Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem)
+    _run(world, [lifter, medic], 60)
+
+    assert (world.robots["l1"].x, world.robots["l1"].y) != (8, 10), (
+        "the lifter is still standing in the doorway"
+    )
+    assert world.victims["v1"].state == "stabilized", "the medic never got through"
+
+
+def test_a_worker_blocked_by_another_robot_gives_the_task_back(mem, mission):
+    """Staging keeps robots out of doorways; it cannot help when the doorway is
+    where a robot belongs. The medic then hands the delivery back rather than
+    holding it to the victim's deadline — an explicit release is what a lapsed
+    lease would have done anyway (§4.4), and any robot with a clear route can
+    take it."""
+    world = _corridor_world(lifter_spawn=(8, 10))  # base *is* the door
+    mem.register_victim(mission, (2, 10), reported_by="s1")
+
+    lifter = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
+    medic = Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem)
+    _run(world, [lifter, medic], BLOCKED_RELEASE_TICKS + 2)
+
+    assert medic.task is None, "the medic is still holding work it cannot reach"
+    assert any(t.kind == "deliver_kit" for t in mem.open_tasks(mission)), (
+        "the delivery was never returned to the pool"
+    )
+
+
+def test_a_lifter_stages_on_the_densest_debris(mem, mission):
+    """§4.3: lifters idle-stage near the densest blocked-victim cluster. Open
+    clear_debris work *is* that cluster — the reconcile gate puts a clear in
+    front of every victim behind rubble (§4.2)."""
+    world = _world(spawn={"lifter": [{"x": 1, "y": 1}]})
+    mem.create_task(mission, "clear_debris", (18, 2))  # a loner
+    for tile in ((4, 15), (5, 15), (4, 16)):  # the cluster
+        mem.create_task(mission, "clear_debris", tile)
+
+    lifter = Worker(robot_id="l1", role="lifter", mission_id=mission, mem=mem)
+    assert lifter._compute_staging_target(world) in ((4, 15), (5, 15), (4, 16))
+
+
+def test_a_medic_waits_between_base_and_the_victims(mem, mission):
+    """§4.3: medics pre-position between base and reachable victims — near
+    enough to respond, near enough to restock once kits land."""
+    world = _world(spawn={"medic": [{"x": 2, "y": 2}]})
+    mem.report_observation(mission, "s1", "victim", (18, 18))
+
+    medic = Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem)
+    assert medic._compute_staging_target(world) == (10, 10)
+
+
+def test_a_baseline_worker_stages_at_base_and_reads_nothing(mem, mission):
+    """Baseline keeps a private world model (§3.3). Staging on shared beliefs
+    would leak the coordination layer into the run the ON/OFF toggle exists to
+    compare against — the delta has to come from sharing, nothing else."""
+    world = _world(spawn={"medic": [{"x": 2, "y": 2}]})
+    mem.report_observation(mission, "s1", "victim", (18, 18))
+
+    medic = Worker(
+        robot_id="m1", role="medic", mission_id=mission, mem=mem, coordinated=False
+    )
+    assert medic._compute_staging_target(world) == (2, 2)
+
+
+def test_a_worker_stays_put_while_work_may_still_arrive(mem, mission):
+    """A robot that has just finished is usually about to be handed the next job
+    — the scout that found this victim is still reporting the ones beside it.
+    Walking away immediately measured one fewer victim stabilized in the first
+    40 ticks of the demo map, so staging waits out STAGE_AFTER_IDLE_TICKS."""
+    world = _world(spawn={"medic": [{"x": 18, "y": 18}]})
+    mem.report_observation(mission, "s1", "victim", (2, 2))
+
+    medic = Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem)
+    for _ in range(STAGE_AFTER_IDLE_TICKS - 1):
+        assert medic.step(world).kind == "idle"
+    assert medic.step(world).kind == "move", "the medic never repositioned"
 
 
 # --- scout hand-off into the chain ------------------------------------------

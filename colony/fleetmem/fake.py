@@ -400,7 +400,13 @@ class FakeFleetMem:
             return [
                 r["id"]
                 for r in self._robots.values()
-                if r["heartbeat_at"].timestamp() < cutoff
+                # `<=`, because a strict comparison makes this flaky at
+                # `seconds=0`: two `datetime.now()` calls in the same clock tick
+                # come back equal and a robot that has said nothing since this
+                # instant reads as fresh. CockroachDB never hits it — statement
+                # timestamps advance — so the fake was the only one failing, at
+                # random, on whichever machine happened to be quick.
+                if r["heartbeat_at"].timestamp() <= cutoff
             ]
 
     def log_plan(

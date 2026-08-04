@@ -4,8 +4,8 @@ import pytest
 
 from sim.protocol import Action, InvalidAction
 from sim.world import FIRE_SPREAD_TICKS, ROLES, World
-from world.map_format import DEBRIS, EMPTY, FIRE, WALL, load_map, parse_map
 from tests.test_map import MAP_PATH
+from world.map_format import DEBRIS, EMPTY, FIRE, WALL, load_map, parse_map
 
 
 @pytest.fixture
@@ -80,7 +80,11 @@ def test_one_move_advances_a_robot_by_its_speed(role, expected_x):
     robot_id = f"{role[0]}1"
     world.step({robot_id: Action.move("e")})
     assert (world.robots[robot_id].x, world.robots[robot_id].y) == (expected_x, 5)
-    assert world.robots[robot_id].battery == ROLES[role]["battery"] - (expected_x - 5)
+    # One tick of operation, one point of battery. §3.3 quotes battery in ticks
+    # — "120 (recharge at base)" — so charging per tile made a speed-3 scout
+    # last 40 ticks against a speed-1 lifter's 300, which is neither the stat
+    # block nor a fair comparison between roles.
+    assert world.robots[robot_id].battery == ROLES[role]["battery"] - 1
 
 
 def test_a_fast_robot_stops_at_the_first_obstacle():
