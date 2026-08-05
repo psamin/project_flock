@@ -16,6 +16,11 @@ schema:
 		-e "CREATE DATABASE IF NOT EXISTS colony"
 	docker compose exec -T cockroach ./cockroach sql --insecure -d colony \
 		--set errexit=true < schema/v1_1.sql
+	# Off by default, and a core changefeed cannot start without it (§4.4 P1,
+	# fleetmem/changefeed.py). Set here so the changefeed tests are reproducible
+	# rather than passing only on whichever laptop enabled it by hand.
+	docker compose exec -T cockroach ./cockroach sql --insecure \
+		-e "SET CLUSTER SETTING kv.rangefeed.enabled = true"
 
 test:
 	uv run --extra dev pytest -q
