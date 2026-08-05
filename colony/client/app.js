@@ -591,6 +591,94 @@ function connect() {
   };
 }
 
+// --- commander console (FR-10) ----------------------------------------------
+
+/** Which robot a question about "robot X" should ask about.
+ *
+ * The selected one when the provenance panel is open, otherwise a scout — a
+ * lifter has logged nothing until a scout has found somebody to dig out, so
+ * defaulting alphabetically makes the flagship question look broken for the
+ * first forty ticks of every run. */
+function subjectRobot() {
+  if (selected) return selected;
+  const scout = robots.find((r) => r.role === "scout");
+  return scout ? scout.id : robots.length ? robots[0].id : "s1";
+}
+
+async function askConsole(question) {
+  const summary = document.getElementById("console-summary");
+  const sqlBox = document.getElementById("console-sql");
+  const rowsBox = document.getElementById("console-rows");
+  summary.className = "";
+  summary.textContent = "asking fleet memory…";
+  sqlBox.textContent = "";
+  rowsBox.textContent = "";
+
+  const body = { question };
+  if (question === "why_did_robot") body.robot_id = subjectRobot();
+  if (question === "what_do_we_know") {
+    // Centred on the selected robot when there is one: "what do we know around
+    // here" is the question a commander actually asks, and (0,0) is a corner.
+    const robot = robots.find((r) => r.id === subjectRobot());
+    body.x = robot ? robot.x : 20;
+    body.y = robot ? robot.y : 15;
+    body.radius = 6;
+  }
+
+  try {
+    const answer = await (
+      await fetch("/api/console/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ).json();
+
+    if (answer.error) {
+      summary.className = "err";
+      summary.textContent = answer.error;
+      return;
+    }
+    summary.textContent = `${answer.prompt} — ${answer.summary}`;
+    // The SQL is shown on purpose: FR-10 claims these answers come out of
+    // fleet memory, and the query beside the rows is what makes that
+    // checkable rather than asserted.
+    sqlBox.textContent = answer.sql;
+    rowsBox.textContent = answer.rows.length
+      ? answer.rows.map((r) => JSON.stringify(r)).join("\n")
+      : "(no rows)";
+  } catch (err) {
+    summary.className = "err";
+    summary.textContent = `console error: ${err.message}`;
+  }
+}
+
+async function buildConsole() {
+  const holder = document.getElementById("console-questions");
+  const status = document.getElementById("console-status");
+  try {
+    const data = await (await fetch("/api/console/questions")).json();
+    if (!data.available) {
+      status.textContent = `unavailable — running on ${data.memory} memory`;
+    }
+    holder.innerHTML = "";
+    for (const q of data.questions) {
+      const button = document.createElement("button");
+      button.textContent = q.prompt.replace(/\{[^}]+\}/g, "…");
+      const tag = document.createElement("span");
+      tag.className = "mem";
+      tag.textContent = q.memory.toUpperCase();
+      button.appendChild(tag);
+      button.addEventListener("click", () => askConsole(q.id));
+      holder.appendChild(button);
+    }
+  } catch {
+    status.textContent = "console unreachable";
+  }
+}
+
+buildConsole();
+
 // The comparison changes when a mission *ends*, which is not an event the
 // frame stream carries — polling a read-only endpoint every few seconds is
 // cheaper than inventing one.

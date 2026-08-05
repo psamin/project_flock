@@ -18,12 +18,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agents.planning import Planner
 from bedrock.adapter import adapter_from_env
+from console import questions as console_questions
+from console.reader import NotReadOnly, ReadOnlyReader
 from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
 from sim.mission import build_fleet
@@ -135,7 +138,26 @@ class Mission:
         # The tick loop, when one is running. Held so a restart can tell a
         # finished mission from a live one.
         self._loop: asyncio.Task | None = None
+        # The commander console's own connection, opened on first use (FR-10).
+        # Separate from `self.mem` on purpose: the sim writes and the console
+        # does not, so they are different identities against the same cluster.
+        self._reader: ReadOnlyReader | None = None
         self._build(coordinated=True)
+
+    # --- the commander console (FR-10) ------------------------------------
+
+    @property
+    def console_available(self) -> bool:
+        """The console reads SQL out of fleet memory, so it needs fleet memory
+        to be a database. On the fake it would answer every question with
+        nothing, which reads as "the fleet did not do that" rather than as
+        "there is no cluster here"."""
+        return self.memory_kind == "cockroach"
+
+    def reader(self) -> ReadOnlyReader:
+        if self._reader is None:
+            self._reader = ReadOnlyReader()
+        return self._reader
 
     # --- mission lifecycle ------------------------------------------------
 
@@ -435,6 +457,70 @@ async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
         "mode": mission.mode,
         "tick": mission.world.tick,
         "previous": mission.last_runs,
+    }
+
+
+@app.get("/api/console/questions")
+async def console_catalog() -> dict[str, Any]:
+    """The five canned demo questions (§5.1 lane 4, FR-10).
+
+    Canned rather than free-form: §5.4 puts demo reliability first, and a model
+    improvising SQL live is the one part of the console that can fail in a way
+    nobody can recover from on camera.
+    """
+    return {
+        "available": mission.console_available,
+        "memory": mission.memory_kind,
+        "mission_id": str(mission.mission_id),
+        "questions": console_questions.catalog(),
+    }
+
+
+@app.post("/api/console/ask")
+async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Answer one canned question from live fleet memory, read-only.
+
+    The SQL comes back with the answer on purpose. FR-10's claim is that the
+    console reads the fleet's actual memory — showing the query alongside the
+    rows is what lets a judge check that rather than take it on faith.
+    """
+    body = body or {}
+    question_id = body.get("question")
+    if not mission.console_available:
+        return {
+            "error": (
+                f"the console reads SQL from fleet memory, and this mission is "
+                f"running on {mission.memory_kind} memory — start a cluster "
+                f"(make dev) and restart the sim"
+            )
+        }
+    try:
+        result = console_questions.answer(
+            mission.reader(),
+            question_id,
+            mission.mission_id,
+            **{k: v for k, v in body.items() if k != "question"},
+        )
+    except console_questions.UnknownQuestion as exc:
+        return {"error": str(exc)}
+    except NotReadOnly as exc:  # pragma: no cover - the canned set is all reads
+        return {"error": f"refused: {exc}"}
+    except KeyError as exc:
+        return {"error": f"missing parameter {exc}"}
+    except psycopg.Error as exc:
+        # A parameter the cluster could not use — `limit="lots"`, a malformed
+        # id. Values are bound rather than interpolated, so this is a rejected
+        # argument and never a rewritten statement; it should read as a bad
+        # question, not as a crashed console.
+        return {"error": f"the cluster refused that: {str(exc).splitlines()[0]}"}
+
+    return {
+        "question": result.question_id,
+        "prompt": result.prompt,
+        "memory": result.memory,
+        "sql": result.sql,
+        "summary": result.summary,
+        "rows": json.loads(json.dumps(result.rows, default=str)),
     }
 
 

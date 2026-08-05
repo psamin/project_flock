@@ -62,6 +62,36 @@
     .plan-why { font-size: 12px; margin: 2px 0; }
     .plan-sources { color: #8a8397; font-size: 11px; }
 
+    /* The commander console (FR-10). Five canned questions, answered read-only
+       out of live fleet memory; the SQL comes back with the answer so a judge
+       can check the claim rather than take it. */
+    #console {
+      width: min(1280px, 96vw); background: #1c1a24; border: 1px solid #2e2939;
+      border-radius: 4px; padding: 10px 12px;
+    }
+    #console-head {
+      display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    #console-head span { color: #8a8397; font-size: 11px; letter-spacing: 0.06em; }
+    #console-questions { display: flex; gap: 6px; flex-wrap: wrap; }
+    #console-questions button { text-align: left; }
+    #console-questions button .mem {
+      color: #63c5da; font-size: 10px; letter-spacing: 0.06em; margin-left: 6px;
+    }
+    #console-answer { margin-top: 10px; font-size: 12px; }
+    #console-summary { color: #e8e3d9; margin-bottom: 6px; }
+    #console-summary.err { color: #d96a9a; }
+    #console-sql {
+      color: #6d6779; font-size: 11px; white-space: pre-wrap; max-height: 150px;
+      overflow-y: auto; border-left: 2px solid #2e2939; padding-left: 8px;
+      margin-bottom: 6px;
+    }
+    #console-rows {
+      color: #9a93a8; font-size: 11px; white-space: pre; max-height: 160px;
+      overflow: auto;
+    }
+
     #ticker {
       width: min(1280px, 96vw); height: 96px; overflow-y: auto;
       background: #1c1a24; padding: 8px 12px; border-radius: 4px;
@@ -107,6 +137,19 @@
       <div id="panel-body"></div>
     </aside>
   </div>
+
+  <section id="console">
+    <div id="console-head">
+      <b>COMMANDER CONSOLE</b>
+      <span id="console-status">read-only · answers from live fleet memory</span>
+    </div>
+    <div id="console-questions"></div>
+    <div id="console-answer">
+      <div id="console-summary"></div>
+      <div id="console-sql"></div>
+      <div id="console-rows"></div>
+    </div>
+  </section>
 
   <div id="ticker"></div>
   <div id="hint">click a robot for its reasoning and sources · press S for the sector grid</div>
