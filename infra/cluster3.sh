@@ -34,6 +34,11 @@ case "${1:-}" in
       -e "CREATE DATABASE IF NOT EXISTS colony"
     $COMPOSE exec -T crdb-1 ./cockroach sql --insecure -d colony \
       --set errexit=true < "$SCHEMA"
+    # Off by default; a core changefeed cannot start without it (§4.4 P1).
+    # Mirrors the Makefile's `schema` target so the two cluster recipes do not
+    # differ in what they leave enabled.
+    $COMPOSE exec -T crdb-1 ./cockroach sql --insecure \
+      -e "SET CLUSTER SETTING kv.rangefeed.enabled = true"
     echo "3-node cluster ready: postgresql://root@localhost:26257/colony?sslmode=disable"
     ;;
   health)

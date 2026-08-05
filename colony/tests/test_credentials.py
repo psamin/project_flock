@@ -19,6 +19,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 CREDENTIALS = ROOT / "infra" / "credentials.py"
 COMPOSE = ROOT / "infra" / "docker-compose.3node.yml"
+# The console's own identity (§6.2). No password: the 3-node rig runs
+# --insecure, which is also why it is a rehearsal rig and not a deployment.
+COMMANDER_DSN = "postgresql://commander@localhost:26257/colony?sslmode=disable"
 
 
 def _load():
@@ -184,3 +187,79 @@ def test_a_robot_can_still_report():
 def test_verify_reports_the_posture_holds():
     """The script teammates run before recording; it must agree with the tests."""
     assert creds.verify(creds.robot_users()) == 0
+
+
+# --- the console, as the identity it actually claims -------------------------
+
+
+@needs_roles
+def test_the_console_answers_every_question_as_the_read_only_role():
+    """FR-10 end to end, through the grant rather than around it.
+
+    Every other console test connects as root, so the `commander` grant is not
+    the thing permitting the read — the code is. This runs the canned set as
+    `commander`, which is the only way to find out that the console needs a
+    table nobody granted it. `plans` is the one that would bite: robots hold
+    INSERT-without-SELECT on it, so a role modelled on a robot could write
+    provenance and never read it back.
+    """
+    import uuid
+
+    from console.questions import QUESTIONS, answer
+    from console.reader import ReadOnlyReader
+    from fleetmem.client import CockroachFleetMem
+
+    mem = CockroachFleetMem()
+    mission = uuid.uuid4()
+    robot = f"probe{uuid.uuid4().hex[:6]}"
+    try:
+        mem.register_robot(robot, "lifter", (3, 3), 300)
+        belief = mem.report_observation(mission, robot, "victim", (10, 10), {})
+        _v, tasks = mem.register_victim(
+            mission, (10, 10), robot, blocked_by=[(10, 9)], vitals_deadline=400
+        )
+        mem.claim_task(tasks[0], robot)
+        mem.log_plan(mission, robot, "idle", {"source": "rules"}, "nearest", [belief])
+    finally:
+        mem.close()
+
+    reader = ReadOnlyReader(dsn=COMMANDER_DSN)
+    try:
+        for question in QUESTIONS:
+            kwargs = {}
+            if "robot_id" in question.params:
+                kwargs["robot_id"] = robot
+            if "x" in question.params:
+                kwargs.update(x=10, y=10, radius=5)
+            # The assertion is that it does not raise: a missing grant surfaces
+            # as SQLSTATE 42501 here, not as an empty result.
+            answer(reader, question.id, mission, **kwargs)
+    finally:
+        reader.close()
+
+
+@needs_roles
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO events (mission_id, actor, verb) VALUES (gen_random_uuid(), 'x', 'y')",
+        "UPDATE tasks SET status = 'open' WHERE 1=0",
+        "DELETE FROM observations WHERE 1=0",
+    ],
+)
+def test_the_commander_cannot_write_even_with_the_in_code_guard_bypassed(statement):
+    """The guard in `console/reader.py` refuses these before they are sent. This
+    sends them anyway, on a raw connection, to check the layer underneath.
+
+    That distinction is the whole point of having two: the guard travels with
+    the code and protects a laptop with no roles applied; the grant protects
+    the cluster even if the code is wrong. Only this test exercises the second.
+    """
+    import psycopg
+
+    conn = psycopg.connect(COMMANDER_DSN, autocommit=True)
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(statement)
+    finally:
+        conn.close()
