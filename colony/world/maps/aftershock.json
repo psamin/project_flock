@@ -1,6 +1,6 @@
 {
  "name": "Aftershock",
- "description": "Post-earthquake city block: collapsed residential, office interior, spreading fire, aftershock at tick 300.",
+ "description": "Post-earthquake city block: collapsed residential, office interior, spreading fire, aftershock at tick 180.",
  "width": 40,
  "height": 30,
  "tile_size": 32,
@@ -2747,7 +2747,7 @@
  ],
  "escalations": [
   {
-   "tick": 300,
+   "tick": 180,
    "kind": "aftershock",
    "screen_shake": true,
    "block_tiles": [

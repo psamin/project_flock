@@ -3,8 +3,8 @@
 A reference instance of the map.json contract, not final level design — lane 5
 owns the authored art-directed version and the stat tuning. What this pins down
 is the *shape* of the file and a playable layout matching the spec: 40x30, four
-zones plus a courtyard, 8 victims in the 3/4/1 access mix, fire, and the tick-300
-aftershock.
+zones plus a courtyard, 8 victims in the 3/4/1 access mix, fire, and the
+aftershock (see ESCALATION_TICK — playtest moved it off §3.3's tick 300).
 
 Deterministic: same seed, same map. Run `make map` to regenerate.
 """
@@ -97,7 +97,7 @@ def build() -> dict:
     world = {
         "name": "Aftershock",
         "description": "Post-earthquake city block: collapsed residential, office interior, "
-        "spreading fire, aftershock at tick 300.",
+        f"spreading fire, aftershock at tick {ESCALATION_TICK}.",
         "width": WIDTH,
         "height": HEIGHT,
         "tile_size": TILE,
@@ -253,13 +253,31 @@ def _clear_victim_tiles(objects: list[list[str]], victims: list[dict]) -> None:
                 objects[ny][nx] = RUBBLE_HEAVY
 
 
+# §3.3 specifies tick 300. Playtest #1 says 300 is wrong: a fleet that no longer
+# deadlocks clears this map at tick ~250, so the aftershock never fired and the
+# replanning beat the demo is built around never happened. Measured at seed 3
+# across the range — every value at or below 220 gives 9/9 stabilized with the
+# mission running on past tick 300, while 300 itself gives 8/8 and no aftershock
+# at all.
+#
+# 180 rather than the top of that range: the point is not that the shock fires,
+# it is that it fires while there is still visible work in flight for it to
+# invalidate. At 180 the fleet is mid-chain and the mission runs ~130 ticks
+# after it, which is the beat §3.3 actually asks for.
+#
+# This is the §5.1 "playtest & tune" knob doing its job. It is a deliberate
+# deviation from the PRD's number, recorded here rather than only in a commit
+# message because the next person to read §3.3 will wonder.
+ESCALATION_TICK = 180
+
+
 def _escalations() -> list[dict]:
-    """The tick-300 aftershock (§3.3): re-blocks two cleared corridors, reveals a
-    new victim, converts a street segment to unstable. This is what forces
-    visible replanning mid-demo."""
+    """The aftershock (§3.3): re-blocks two cleared corridors, reveals a new
+    victim, converts a street segment to unstable. This is what forces visible
+    replanning mid-demo. See ESCALATION_TICK for why it is not at tick 300."""
     return [
         {
-            "tick": 300,
+            "tick": ESCALATION_TICK,
             "kind": "aftershock",
             "screen_shake": True,
             "block_tiles": (

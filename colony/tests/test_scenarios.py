@@ -335,38 +335,67 @@ def test_the_full_chain_runs_on_the_demo_map():
     assert "m1" in actors, "the medic never completed anything"
 
 
-# Aftershock v1 is now too easy, and these two say so. Once idle staging (§4.3)
-# unfroze the fleet it clears the map in ~144 ticks — everyone rescued, nobody
-# lost, and the tick-300 aftershock never fires, so the replanning beat the demo
-# is built around never happens. The knob is the map, not the agents: victim
-# count, vitals deadlines, debris depth or the escalation tick, all of which are
-# lane 5's (§5.1, "playtest & tune"). Slowing the fleet down to keep a map test
-# green would be exactly backwards.
+# These two were xfail(strict) while Aftershock v1 was too easy: once idle
+# staging (§4.3) unfroze the fleet it cleared the map in ~144 ticks, so the
+# escalation scheduled at tick 300 landed after the mission it was supposed to
+# disrupt and the replanning beat never happened. Playtest #1 moved the
+# escalation to tick 180 (§5.1 "playtest & tune"; see ESCALATION_TICK in
+# build_aftershock.py for the measurements), and both now pass for real.
 #
-# strict=True on purpose: whoever tunes the map gets a failing XPASS telling
-# them to delete this marker, so the requirement cannot quietly stay parked.
-DEMO_MAP_TOO_EASY = pytest.mark.xfail(
-    strict=True,
-    reason="Aftershock v1 is cleared before tick 300 — lane 5 playtest knob",
-)
+# They assert against the map's own escalation tick rather than a constant. The
+# requirement is "the mission outlives the shock", not "the mission lasts 300
+# ticks" — pinning the number is what let the previous version drift into
+# testing nothing.
 
 
-@DEMO_MAP_TOO_EASY
+def _escalation_tick(world) -> int:
+    shock = [e for e in world.map.escalations if e["kind"] == "aftershock"]
+    assert len(shock) == 1, "the demo map has exactly one aftershock"
+    return shock[0]["tick"]
+
+
 def test_the_demo_map_is_neither_trivial_nor_hopeless():
-    """A demo needs tension. Everyone rescued by tick 93 means the tick-300
-    aftershock never fires and the replanning beat never happens; nobody
-    rescued means there is no product to show."""
+    """A demo needs tension. Everyone rescued before the shock fires means the
+    replanning beat never happens; nobody rescued means there is no product to
+    show."""
     world, _, _ = _aftershock_mission()
     metrics = world.metrics()
 
     assert metrics["victims_stabilized"] >= 5, "too few rescues to be a demo"
-    assert world.tick > 300, "the mission ended before the aftershock could fire"
+    assert world.tick > _escalation_tick(world), (
+        "the mission ended before the aftershock could fire"
+    )
 
 
-@DEMO_MAP_TOO_EASY
 def test_the_aftershock_fires_during_the_mission():
     world, _, _ = _aftershock_mission()
     assert "v9" in world.victims, "the aftershock never revealed its victim"
+
+
+def test_the_fleet_rescues_the_victim_the_aftershock_reveals():
+    """The beat itself, not just the trigger. v9 appears mid-mission behind
+    ground the fleet had already swept, and reaching it in time is the whole
+    argument for replanning against shared memory rather than a fixed plan."""
+    world, _, _ = _aftershock_mission()
+
+    assert "v9" in world.victims, "the aftershock never revealed its victim"
+    assert world.victims["v9"].state == "stabilized", (
+        f"v9 ended {world.victims['v9'].state} — the fleet found the new victim "
+        "but never got to it"
+    )
+
+
+def test_the_aftershock_actually_forces_a_replan():
+    """FR-7 through the provenance log: the shock is only a demo beat if the
+    fleet visibly re-decides because of it. A map change nobody replanned
+    against would still pass every assertion above."""
+    _, mem, mission = _aftershock_mission()
+    triggers = [p.trigger for p in mem.plans_for(mission)]
+
+    assert "aftershock" in triggers, (
+        "no robot logged an aftershock-triggered plan — the shock fired and "
+        "nothing re-decided because of it"
+    )
 
 
 def test_the_fleet_explores_the_whole_map():

@@ -81,11 +81,26 @@ def test_robots_spawn_on_passable_tiles(world):
             )
 
 
-def test_aftershock_fires_at_tick_300(world):
+def test_the_aftershock_is_scheduled_early_enough_to_fire(world):
+    """§3.3 says tick 300; playtest #1 moved it, and this asserts the reason
+    rather than the number.
+
+    A fleet that no longer deadlocks clears this map around tick 250, so an
+    aftershock at 300 is scheduled after the mission it is supposed to disrupt.
+    The requirement is that it lands while there is still work in flight — the
+    exact tick is lane 5's knob (see ESCALATION_TICK in build_aftershock.py).
+    """
     shock = [e for e in world.escalations if e["kind"] == "aftershock"]
     assert len(shock) == 1
     event = shock[0]
-    assert event["tick"] == 300
+    assert event["tick"] < 250, (
+        f"scheduled at tick {event['tick']}, after the fleet finishes — "
+        "the replanning beat would never happen"
+    )
+    assert event["tick"] > 60, (
+        f"scheduled at tick {event['tick']}, before the fleet has claimed "
+        "enough work for the shock to visibly invalidate anything"
+    )
     assert event["block_tiles"], "the aftershock must re-block cleared corridors"
     assert event["reveal_victims"], "the aftershock reveals one new victim"
     assert event["unstable_tiles"], "the aftershock converts street to unstable"
