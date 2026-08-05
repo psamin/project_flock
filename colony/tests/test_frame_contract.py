@@ -130,6 +130,14 @@ def test_events_carry_what_the_ticker_prints(world, fake, mission):
         assert {"tick", "actor", "verb", "detail"} <= set(event)
 
 
+def test_every_frame_carries_the_lost_roster(world, fake, mission):
+    """§5.1 lane 4's marking, on the wire. Sent whole and on snapshots too:
+    a browser that joins mid-mission never saw the transition go past, so an
+    edge-triggered field would leave it drawing a dead robot as healthy."""
+    assert _snapshot(world)["lost"] == []
+    assert _diff(world, fake, mission)["lost"] == []
+
+
 def test_the_frame_survives_json(world, fake, mission):
     """It goes over a websocket. Anything that is not JSON — a UUID, a set, a
     datetime — takes the whole broadcast down, not just its own field."""

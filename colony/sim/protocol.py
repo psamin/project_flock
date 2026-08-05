@@ -119,6 +119,15 @@ class StateFrame:
     # it every tick at 4 Hz would dwarf every other field in the frame.
     explored: list[list[int]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    # Robots the orchestrator's heartbeat scan currently considers silent
+    # (§5.1 lane 4). Sent whole rather than as a delta, and on snapshots as well
+    # as diffs: a browser that reconnects mid-mission has to learn who is
+    # already lost, and an edge-triggered field cannot tell it.
+    #
+    # Added after the Aug 3 freeze — additive, so a client that ignores it
+    # renders exactly as before. Flagged to the team rather than committed
+    # silently (§5.2).
+    lost: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     # snapshot only — the initial world the client renders before diffs arrive
     world: dict[str, Any] | None = None

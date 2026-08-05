@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agents.planning import Planner
 from bedrock.adapter import adapter_from_env
+from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
 from sim.mission import build_fleet
 from sim.world import World
@@ -37,6 +38,10 @@ QUEUE_FRAMES = 8
 # §4.7's metrics are derived from the whole event log, so they are recomputed
 # once a second rather than four times (see Mission.metrics).
 METRICS_EVERY_TICKS = TICK_HZ
+# The lost scan is one indexed read and is measured in wall-clock seconds, so
+# running it four times a second would ask the same question four times for the
+# same answer.
+LOST_SCAN_EVERY_TICKS = TICK_HZ
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
@@ -151,6 +156,13 @@ class Mission:
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
+        # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
+        # has no mission_id — see LostWatch. Live only: `run_mission` is the
+        # seeded, deterministic path §3.5 records the golden run from, and
+        # lostness is measured against a wall clock, so wiring it in there would
+        # make an identical seed produce a different event log on a slow laptop.
+        self.lost_watch = LostWatch(self.mem, self.mission_id, self.agents)
+        self._lost_at = -1
 
     async def reset(self, *, coordinated: bool) -> None:
         """Restart the mission in the other coordination mode (FR-9).
@@ -248,9 +260,42 @@ class Mission:
             self.mem.log_event(
                 self.mission_id, event["actor"], event["verb"], event["detail"]
             )
+        frame.lost = self._scan_for_lost(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
+
+    def _scan_for_lost(self, frame: Any) -> list[str]:
+        """Run the heartbeat scan on its own cadence and put the edges on the
+        ticker (§5.1 lane 4).
+
+        `LostWatch` has already written both transitions to `events`, so they
+        are appended to the frame here rather than logged again — the ticker
+        prints the frame, the commander console reads the table, and a verb
+        written twice would be counted twice by anything aggregating the log.
+        """
+        if self.world.tick - self._lost_at >= LOST_SCAN_EVERY_TICKS:
+            self._lost_at = self.world.tick
+            scan = self.lost_watch.scan()
+            for robot_id in scan.newly_lost:
+                frame.events.append(
+                    {
+                        "tick": self.world.tick,
+                        "actor": robot_id,
+                        "verb": "robot_lost",
+                        "detail": {"silent_for_seconds": self.lost_watch.after_seconds},
+                    }
+                )
+            for robot_id in scan.recovered:
+                frame.events.append(
+                    {
+                        "tick": self.world.tick,
+                        "actor": robot_id,
+                        "verb": "robot_recovered",
+                        "detail": {},
+                    }
+                )
+        return self.lost_watch.lost_ids()
 
     async def run(self) -> None:
         self.running = True
@@ -317,6 +362,9 @@ class Mission:
         """
         payload = self.world.snapshot().to_json()
         payload["metrics"] = self.metrics()
+        # Who is already lost, not who just became lost: a browser joining a
+        # mission in progress never saw the transition go by.
+        payload["lost"] = self.lost_watch.lost_ids()
         return json.dumps(payload)
 
     def detach(self, viewer: Viewer) -> None:
@@ -355,6 +403,7 @@ async def health() -> dict[str, Any]:
         "memory": mission.memory_kind,
         "mode": mission.mode,
         "agents": sorted(mission.agents),
+        "lost": mission.lost_watch.lost_ids(),
         "metrics": mission.metrics(),
     }
 

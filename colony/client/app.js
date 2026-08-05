@@ -55,6 +55,10 @@ let ghosts = [];            // {x, y, tx, ty, until, role}
 let shakeUntil = 0;
 let selected = null;        // robot id whose provenance panel is open
 let showSectors = false;
+// Robots the orchestrator's heartbeat scan has stopped hearing from (§5.1
+// lane 4). Sent whole in every frame rather than derived from the ticker: a
+// browser that joins mid-mission never saw the event go past.
+let lost = new Set();
 
 function boot(snapshot) {
   // Called on EVERY snapshot, not just the first. `make sim` runs uvicorn with
@@ -69,6 +73,7 @@ function boot(snapshot) {
   robots = snapshot.robots || [];
   victims = snapshot.victims || [];
   explored = new Set((snapshot.explored || []).map(([x, y]) => `${x},${y}`));
+  lost = new Set(snapshot.lost || []);
   ghosts = [];
   // The panel describes decisions from a mission that no longer exists.
   if (selected) closePanel();
@@ -199,10 +204,14 @@ function draw() {
     const px = (m.fromX + (m.toX - m.fromX) * eased) * tile;
     const py = (m.fromY + (m.toY - m.fromY) * eased) * tile;
     const moving = r.status === "moving";
-    const frame = moving || r.role === "scout" ? walkFrame : 0;
+    // A lost robot is one the orchestrator has stopped hearing from, so it is
+    // not animated: the frame it is drawn on is whatever it was doing when it
+    // went quiet. Still walking would say the opposite of what has happened.
+    const isLost = lost.has(r.id);
+    const frame = !isLost && (moving || r.role === "scout") ? walkFrame : 0;
     drawSprite(ctx, `${r.role}${frame}`, px, py, {
       flip: r.facing === "w",
-      alpha: r.status === "stranded" ? 0.45 : 1,
+      alpha: isLost ? 0.28 : r.status === "stranded" ? 0.45 : 1,
     });
   }
 
@@ -216,7 +225,13 @@ function draw() {
     const px = (m.fromX + (m.toX - m.fromX) * eased) * tile;
     const py = (m.fromY + (m.toY - m.fromY) * eased) * tile;
     drawNameTag(r, px, py);
-    if (r.bubble) placed.push(drawBubble(r.bubble, px + tile / 2, py - 14, placed));
+    // A lost robot's last bubble is a lie by the time you read it — it says
+    // "clearing debris" about a robot nobody has heard from in ten seconds.
+    if (lost.has(r.id)) {
+      placed.push(drawBubble("📡 signal lost", px + tile / 2, py - 14, placed));
+    } else if (r.bubble) {
+      placed.push(drawBubble(r.bubble, px + tile / 2, py - 14, placed));
+    }
   }
   ctx.restore();
 }
@@ -474,6 +489,8 @@ const TICKER_TEXT = {
   restocked: () => "restocked kits",
   fire_spread: (e) => `fire spread to ${e.detail.x},${e.detail.y}`,
   aftershock: () => "AFTERSHOCK — the map just changed",
+  robot_lost: (e) => `SIGNAL LOST — silent ${e.detail.silent_for_seconds}s`,
+  robot_recovered: () => "back on the air",
 };
 
 const TICKER_CLASS = {
@@ -483,6 +500,8 @@ const TICKER_CLASS = {
   aftershock: "shock",
   sector_claimed: "sector",
   sector_swept: "sector",
+  robot_lost: "bad",
+  robot_recovered: "good",
 };
 
 function logEvents(events) {
@@ -558,6 +577,7 @@ function connect() {
       applyTileChanges(frame.tiles_changed);
       applyExplored(frame.explored);
       trackRobots(frame.robots || []);
+      lost = new Set(frame.lost || []);
       victims = frame.victims || victims;
       windowStart = performance.now();
       updateHud(frame.metrics);
