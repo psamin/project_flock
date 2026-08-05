@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "colony"))
 
 CLUSTER = ROOT / "infra" / "cluster3.sh"
-KILL_AT_TICK = 40          # after the fleet has claimed work, before it finishes
+KILL_AT_TICK = 40  # after the fleet has claimed work, before it finishes
 REVIVE_AFTER_TICKS = 60
 
 
@@ -121,13 +121,20 @@ def run_rehearsal(kill_at: int = KILL_AT_TICK, verbose: bool = True) -> ChaosRes
     shares = split_sectors(world_map.sectors, max(1, len(scouts)))
     embedder = BedrockAdapter()
     agents: list[Any] = [
-        Scout(robot_id=r.id, mission_id=mission_id, mem=mem, embedder=embedder,
-              seed=i, sectors=shares[i])
+        Scout(
+            robot_id=r.id,
+            mission_id=mission_id,
+            mem=mem,
+            embedder=embedder,
+            seed=i,
+            sectors=shares[i],
+        )
         for i, r in enumerate(scouts)
     ]
     agents += [
         Worker(robot_id=r.id, role=r.role, mission_id=mission_id, mem=mem)
-        for r in world.robots.values() if r.role in ("lifter", "medic")
+        for r in world.robots.values()
+        if r.role in ("lifter", "medic")
     ]
     for robot in world.robots.values():
         mem.register_robot(robot.id, robot.role, (robot.x, robot.y), robot.battery)
@@ -145,8 +152,10 @@ def run_rehearsal(kill_at: int = KILL_AT_TICK, verbose: bool = True) -> ChaosRes
                 result.kill_error = killed_proc.stderr.strip()[:200]
             killed = True
             if verbose:
-                print(f"  tick {tick}: killed a node with "
-                      f"{result.claimed_before_kill} tasks in flight")
+                print(
+                    f"  tick {tick}: killed a node with "
+                    f"{result.claimed_before_kill} tasks in flight"
+                )
 
         if killed and tick == kill_at + REVIVE_AFTER_TICKS:
             _cluster("revive")
@@ -181,8 +190,12 @@ def _completions(mem: Any, mission_id: uuid.UUID) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="FR-11 node-kill rehearsal")
-    parser.add_argument("--rehearsals", type=int, default=1,
-                        help="§5.4 wants at least 5 before recording")
+    parser.add_argument(
+        "--rehearsals",
+        type=int,
+        default=1,
+        help="§5.4 wants at least 5 before recording",
+    )
     parser.add_argument("--kill-at", type=int, default=KILL_AT_TICK)
     args = parser.parse_args()
 
@@ -197,7 +210,7 @@ def main() -> int:
         print(f"  {result.describe()}")
         if not result.survived:
             failures += 1
-        _cluster("revive")           # always leave the cluster whole
+        _cluster("revive")  # always leave the cluster whole
 
     print(f"\n{args.rehearsals - failures}/{args.rehearsals} rehearsals survived")
     return 1 if failures else 0

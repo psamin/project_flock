@@ -8,6 +8,8 @@ Phase 3 (Aug 3): the fleet — lifter and medic, leased claiming, sector claims,
 planning at plan boundaries, battery and kit logistics, replan-on-aftershock.
 Phase 4 (Aug 3): the demo — pixel-art renderer, fog of war in both modes, thought
 bubbles you can click for provenance, the coordination ON/OFF toggle and scoreboard.
+Phase 5 (Aug 5): orchestration — lost-marking, the commander console's five read-only
+questions, the aftershock retuned so it actually fires, and the changefeed spike.
 
 ## Start here
 
@@ -15,7 +17,7 @@ bubbles you can click for provenance, the coordination ON/OFF toggle and scorebo
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 394 tests
+make test     # 617 tests
 ```
 
 To exercise CockroachDB Cloud, the 3-node chaos rig or live Bedrock, see
@@ -51,6 +53,10 @@ so a broken cluster can't masquerade as a green run.
 | [`agents/logistics.py`](agents/logistics.py) | Battery, charging and supply kits (§3.3) |
 | [`client/app.js`](client/app.js) | Renderer: layers per §4.8, fog, bubbles, ticker, scoreboard |
 | [`client/atlas.js`](client/atlas.js) | The sprite sheet, drawn in code — no downloads, no licences |
+| [`orchestrator/lost.py`](orchestrator/lost.py) | The heartbeat scan, and why it stays off the recovery path |
+| [`console/questions.py`](console/questions.py) | The commander console's five canned questions (FR-10) |
+| [`console/reader.py`](console/reader.py) | The read-only execution path the console cannot write through |
+| [`fleetmem/changefeed.py`](fleetmem/changefeed.py) | P1 spike: waking on unblocks instead of polling (§4.4) |
 
 ## Interface contracts (§5.2 — all four frozen Aug 3)
 
@@ -93,14 +99,21 @@ Canvas 2D with no CDN and no WebGL requirement, and the sprites are drawn in cod
 | `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
 | `S` | the exploration sector grid (FR-16) |
 
-Three read-only-ish endpoints back it, and the commander console (lane 4) can use
-the first one for FR-10's "why did robot X do Y":
+| the console panel | five canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
+
+The endpoints behind it — everything except the restart is a read:
 
 ```
-GET  /api/plans/{robot_id}?limit=5
-POST /api/mission/restart      {"coordinated": false}
-GET  /api/runs                 final numbers per mode
+GET  /api/plans/{robot_id}?limit=5   rationale + trigger + source + resolved based_on
+GET  /api/console/questions          the five canned questions and which memory each reads
+POST /api/console/ask                {"question": "why_did_robot", "robot_id": "s1"}
+POST /api/mission/restart            {"coordinated": false}
+GET  /api/runs                       final numbers per mode
 ```
+
+The console answers with its own SQL alongside the rows, on purpose: FR-10 claims
+these answers come out of fleet memory, and the query beside the result is what
+makes that checkable rather than asserted.
 
 `COLONY_MAP=path/to/map.json make sim` runs a different map — a playtest variant,
 or a copy with the escalation moved earlier to rehearse the aftershock beat.
