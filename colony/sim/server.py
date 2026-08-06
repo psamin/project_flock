@@ -18,12 +18,16 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agents.planning import Planner
 from bedrock.adapter import adapter_from_env
+from console import questions as console_questions
+from console.reader import NotReadOnly, ReadOnlyReader
+from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
 from sim.mission import build_fleet
 from sim.world import World
@@ -37,6 +41,10 @@ QUEUE_FRAMES = 8
 # §4.7's metrics are derived from the whole event log, so they are recomputed
 # once a second rather than four times (see Mission.metrics).
 METRICS_EVERY_TICKS = TICK_HZ
+# The lost scan is one indexed read and is measured in wall-clock seconds, so
+# running it four times a second would ask the same question four times for the
+# same answer.
+LOST_SCAN_EVERY_TICKS = TICK_HZ
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
@@ -130,7 +138,26 @@ class Mission:
         # The tick loop, when one is running. Held so a restart can tell a
         # finished mission from a live one.
         self._loop: asyncio.Task | None = None
+        # The commander console's own connection, opened on first use (FR-10).
+        # Separate from `self.mem` on purpose: the sim writes and the console
+        # does not, so they are different identities against the same cluster.
+        self._reader: ReadOnlyReader | None = None
         self._build(coordinated=True)
+
+    # --- the commander console (FR-10) ------------------------------------
+
+    @property
+    def console_available(self) -> bool:
+        """The console reads SQL out of fleet memory, so it needs fleet memory
+        to be a database. On the fake it would answer every question with
+        nothing, which reads as "the fleet did not do that" rather than as
+        "there is no cluster here"."""
+        return self.memory_kind == "cockroach"
+
+    def reader(self) -> ReadOnlyReader:
+        if self._reader is None:
+            self._reader = ReadOnlyReader()
+        return self._reader
 
     # --- mission lifecycle ------------------------------------------------
 
@@ -151,6 +178,13 @@ class Mission:
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
+        # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
+        # has no mission_id — see LostWatch. Live only: `run_mission` is the
+        # seeded, deterministic path §3.5 records the golden run from, and
+        # lostness is measured against a wall clock, so wiring it in there would
+        # make an identical seed produce a different event log on a slow laptop.
+        self.lost_watch = LostWatch(self.mem, self.mission_id, self.agents)
+        self._lost_at = -1
 
     async def reset(self, *, coordinated: bool) -> None:
         """Restart the mission in the other coordination mode (FR-9).
@@ -248,9 +282,42 @@ class Mission:
             self.mem.log_event(
                 self.mission_id, event["actor"], event["verb"], event["detail"]
             )
+        frame.lost = self._scan_for_lost(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
+
+    def _scan_for_lost(self, frame: Any) -> list[str]:
+        """Run the heartbeat scan on its own cadence and put the edges on the
+        ticker (§5.1 lane 4).
+
+        `LostWatch` has already written both transitions to `events`, so they
+        are appended to the frame here rather than logged again — the ticker
+        prints the frame, the commander console reads the table, and a verb
+        written twice would be counted twice by anything aggregating the log.
+        """
+        if self.world.tick - self._lost_at >= LOST_SCAN_EVERY_TICKS:
+            self._lost_at = self.world.tick
+            scan = self.lost_watch.scan()
+            for robot_id in scan.newly_lost:
+                frame.events.append(
+                    {
+                        "tick": self.world.tick,
+                        "actor": robot_id,
+                        "verb": "robot_lost",
+                        "detail": {"silent_for_seconds": self.lost_watch.after_seconds},
+                    }
+                )
+            for robot_id in scan.recovered:
+                frame.events.append(
+                    {
+                        "tick": self.world.tick,
+                        "actor": robot_id,
+                        "verb": "robot_recovered",
+                        "detail": {},
+                    }
+                )
+        return self.lost_watch.lost_ids()
 
     async def run(self) -> None:
         self.running = True
@@ -317,6 +384,9 @@ class Mission:
         """
         payload = self.world.snapshot().to_json()
         payload["metrics"] = self.metrics()
+        # Who is already lost, not who just became lost: a browser joining a
+        # mission in progress never saw the transition go by.
+        payload["lost"] = self.lost_watch.lost_ids()
         return json.dumps(payload)
 
     def detach(self, viewer: Viewer) -> None:
@@ -355,6 +425,7 @@ async def health() -> dict[str, Any]:
         "memory": mission.memory_kind,
         "mode": mission.mode,
         "agents": sorted(mission.agents),
+        "lost": mission.lost_watch.lost_ids(),
         "metrics": mission.metrics(),
     }
 
@@ -386,6 +457,70 @@ async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
         "mode": mission.mode,
         "tick": mission.world.tick,
         "previous": mission.last_runs,
+    }
+
+
+@app.get("/api/console/questions")
+async def console_catalog() -> dict[str, Any]:
+    """The five canned demo questions (§5.1 lane 4, FR-10).
+
+    Canned rather than free-form: §5.4 puts demo reliability first, and a model
+    improvising SQL live is the one part of the console that can fail in a way
+    nobody can recover from on camera.
+    """
+    return {
+        "available": mission.console_available,
+        "memory": mission.memory_kind,
+        "mission_id": str(mission.mission_id),
+        "questions": console_questions.catalog(),
+    }
+
+
+@app.post("/api/console/ask")
+async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Answer one canned question from live fleet memory, read-only.
+
+    The SQL comes back with the answer on purpose. FR-10's claim is that the
+    console reads the fleet's actual memory — showing the query alongside the
+    rows is what lets a judge check that rather than take it on faith.
+    """
+    body = body or {}
+    question_id = body.get("question")
+    if not mission.console_available:
+        return {
+            "error": (
+                f"the console reads SQL from fleet memory, and this mission is "
+                f"running on {mission.memory_kind} memory — start a cluster "
+                f"(make dev) and restart the sim"
+            )
+        }
+    try:
+        result = console_questions.answer(
+            mission.reader(),
+            question_id,
+            mission.mission_id,
+            **{k: v for k, v in body.items() if k != "question"},
+        )
+    except console_questions.UnknownQuestion as exc:
+        return {"error": str(exc)}
+    except NotReadOnly as exc:  # pragma: no cover - the canned set is all reads
+        return {"error": f"refused: {exc}"}
+    except KeyError as exc:
+        return {"error": f"missing parameter {exc}"}
+    except psycopg.Error as exc:
+        # A parameter the cluster could not use — `limit="lots"`, a malformed
+        # id. Values are bound rather than interpolated, so this is a rejected
+        # argument and never a rewritten statement; it should read as a bad
+        # question, not as a crashed console.
+        return {"error": f"the cluster refused that: {str(exc).splitlines()[0]}"}
+
+    return {
+        "question": result.question_id,
+        "prompt": result.prompt,
+        "memory": result.memory,
+        "sql": result.sql,
+        "summary": result.summary,
+        "rows": json.loads(json.dumps(result.rows, default=str)),
     }
 
 

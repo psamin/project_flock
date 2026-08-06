@@ -1,5 +1,13 @@
 .gstack/
 
+# Python build artefacts, repo-wide. `colony/.gitignore` already covered these
+# inside colony/, which is why `infra/__pycache__/*.pyc` were committed and then
+# showed as modified on every test run — the ignore simply did not reach infra/.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
 # Credentials — team-wide, and the one thing here that must stay shared.
 # Personal tooling config belongs in each clone's .git/info/exclude; this does
 # not, because a leaked secret is everyone's problem.

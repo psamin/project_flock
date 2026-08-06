@@ -48,6 +48,11 @@ jobs:
             -e "CREATE DATABASE IF NOT EXISTS colony"
           docker exec -i crdb ./cockroach sql --insecure -d colony \
             --set errexit=true < schema/v1_1.sql
+          # Off by default; a core changefeed cannot start without it. Mirrors
+          # the `schema` target in the Makefile — without this the changefeed
+          # tests (§4.4 P1) fail in CI while passing locally.
+          docker exec -i crdb ./cockroach sql --insecure \
+            -e "SET CLUSTER SETTING kv.rangefeed.enabled = true"
 
       - name: Install dependencies
         run: uv sync --extra dev

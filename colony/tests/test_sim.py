@@ -244,11 +244,17 @@ def test_a_victim_is_lost_when_vitals_run_out():
 
 
 def test_the_aftershock_fires_once_and_changes_the_world(world):
-    for _ in range(299):
+    # Read off the map rather than hardcoded: playtest #1 moved the escalation
+    # off §3.3's tick 300 (see ESCALATION_TICK in build_aftershock.py), and a
+    # test pinned to the old number tests the schedule, not the mechanism.
+    shock_at = next(
+        e["tick"] for e in world.map.escalations if e["kind"] == "aftershock"
+    )
+    for _ in range(shock_at - 1):
         world.step({})
     blocked_before = world.passable(6, 19)
 
-    frame = world.step({})  # tick 300
+    frame = world.step({})  # the tick the shock is scheduled for
 
     assert any(e["verb"] == "aftershock" for e in frame.events)
     assert blocked_before and not world.passable(6, 19), "corridor was not re-blocked"

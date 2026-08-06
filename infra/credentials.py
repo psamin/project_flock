@@ -81,10 +81,28 @@ def grant_statements(robots: list[str]) -> list[str]:
 
 def _sql(statement: str, database: str = DB) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", "-f", str(ROOT / "infra" / "docker-compose.3node.yml"),
-         "-p", "colony3", "exec", "-T", "crdb-1", "./cockroach", "sql",
-         "--insecure", "-d", database, "--format=csv", "-e", statement],
-        capture_output=True, text=True, timeout=120,
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(ROOT / "infra" / "docker-compose.3node.yml"),
+            "-p",
+            "colony3",
+            "exec",
+            "-T",
+            "crdb-1",
+            "./cockroach",
+            "sql",
+            "--insecure",
+            "-d",
+            database,
+            "--format=csv",
+            "-e",
+            statement,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
 
 
@@ -135,8 +153,10 @@ def verify(robots: list[str]) -> int:
             print(f"POSTURE FAILURE: {failure}", file=sys.stderr)
         return 1
 
-    print(f"posture holds: {len(robots)} robots write-but-cannot-escalate, "
-          f"{COMMANDER} is read-only across {len(ALL_TABLES)} tables")
+    print(
+        f"posture holds: {len(robots)} robots write-but-cannot-escalate, "
+        f"{COMMANDER} is read-only across {len(ALL_TABLES)} tables"
+    )
     return 0
 
 
