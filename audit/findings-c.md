@@ -110,3 +110,41 @@ an unseeded random, and that promise holds.
 
 ## Could not verify
 - Whether the displayed `explored` and the store's `tile_visited` count agree on a live cluster — needs X9, now unblocked (cluster is up).
+
+---
+
+## C.6 — CORRECTION: `lost` is reachable, and it is the strongest number in the demo
+
+The original C.6 concluded that victim loss was "mechanically reachable, not
+reachable in practice", because a coordinated run finishes at ~339 ticks and the
+earliest `vitals_deadline` is 470. **That was measured on the coordinated arm
+only, which is exactly the arm that never loses anyone.**
+
+Measured across both arms, 6 seeds:
+
+| arm | ticks | stabilized | **lost** | rescue rate |
+|---|---|---|---|---|
+| coordinated | ~312 | 9 | **0** | 1.000 |
+| baseline | 560 | 4 | **5** | 0.444 |
+
+Baseline runs to tick 560 precisely *because* it fails — the mission does not end
+early, the deadlines arrive, and **five people die, every run**. Total over 6
+baseline runs: 30 victims lost.
+
+**T-19 is not needed. Nothing needs retuning.** The deterioration mechanism
+(`world.py:433-437`) works, `victim_lost` fires, and `metrics.py:71` counts it.
+
+**And this is the most powerful number the project has.** The current headline is
+a rescue-rate delta — 44% against 98%, a percentage a judge has to think about.
+The same runs support:
+
+> Coordination off: **five people die**. Coordination on: **nobody does**.
+
+That is the §4.7 comparison stated in lives rather than percentages, it comes
+from the event log, it reproduces on every seed, and it is already computed and
+already on the scoreboard — just never contrasted. Recommend surfacing
+`victims_lost` in the ON/OFF comparison panel alongside the rescue-rate delta.
+
+**Audit-integrity note.** This is the fourth correction in this audit (after
+A-10, arm E, and arm D). The common cause each time was measuring one arm or one
+metric and generalising. Recorded rather than quietly amended.
