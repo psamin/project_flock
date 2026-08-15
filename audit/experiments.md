@@ -225,3 +225,49 @@ outcome observations, which is a design change and not a refactor.
 No claim is made here about whether B-2 is load-bearing. It is unmeasured.
 
 Harness: `audit/experiment_armd.py`. Raw: `audit/armd-raw.json`.
+
+### Arm D, correction: "free cleanup" was wrong — it measured one metric
+
+I built T-12a on arm D's verdict and the suite rejected it. **8 tests failed**,
+across four independent properties:
+
+```
+tests/test_scout.py::test_a_second_scout_nearly_doubles_coverage        [fake, cockroach]
+tests/test_scout.py::test_sector_claims_add_to_what_shared_memory_gives  [fake, cockroach]
+tests/test_worker.py::test_an_idle_lifter_does_not_park_in_the_doorway   [fake, cockroach]
+tests/test_logistics.py::test_a_returning_robot_gives_its_task_back      [fake, cockroach]
+```
+
+The sharpest one:
+
+```
+AssertionError: 68% of explored ground was covered twice
+assert 0.6764275256222547 < 0.6
+```
+
+That test's docstring calls itself "the product claim in miniature" — two scouts
+locking together and flying in formation is *the* duplicated effort this project
+exists to remove. Blinding pathing reintroduced it.
+
+**Arm D measured `rescue_rate` and nothing else.** Rescue rate is a floor
+metric on this map: the fleet still saves everyone because it has 1200 ticks and
+9 victims. It is insensitive to *how much waste* that took, which is exactly
+what the blinding degraded. An ablation that moves only one number has not shown
+the change is free — it has shown that one number did not move.
+
+**Likely root cause: the blinding has no memory of failure.** A robot that walks
+into an unseen wall discovers it, bumps, and immediately forgets — nothing is
+written, so the next tick it plans the same route again. Real fog-of-war pathing
+remembers what it collided with. Without that, robots re-attempt blocked routes
+and converge on the same ground, which is precisely the 68% overlap.
+
+**Change reverted. Tests untouched.** Not weakening a threshold that encodes the
+product claim to make my own change pass.
+
+**What T-12a actually needs**, and it is more than a gate:
+1. Blind `_passable` / `_landing` to `visible_to` — as attempted.
+2. **Give robots a bump memory**: record a tile discovered impassable, so a
+   failed route is not re-planned. Write it as an observation and it becomes
+   shared terrain knowledge, which is on-thesis rather than a workaround.
+3. Re-measure against **duplicate-effort index and scout overlap**, not just
+   rescue rate.
