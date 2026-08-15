@@ -271,3 +271,44 @@ product claim to make my own change pass.
    shared terrain knowledge, which is on-thesis rather than a workaround.
 3. Re-measure against **duplicate-effort index and scout overlap**, not just
    rescue rate.
+
+### Arm D, bisected: what omniscient pathing is actually load-bearing *for*
+
+Applied the two halves separately.
+
+| change | result |
+|---|---|
+| scout `_landing` blinded, alone | the **4 scout failures**, worker/logistics green |
+| worker `_passable` blinded, alone | the **4 worker/logistics failures** |
+
+Both regress independently, so this is not one bug with a wide blast radius.
+
+**The mechanism, and it is not what "god-mode" suggests.** A scout has vision 6
+and speed 3 — it always sees the tile it is about to enter, so blinding cannot
+be about bumping into things. It is about *multi-step route planning*.
+`find_move_plan` uses `_landing` to predict where each move ends, over routes
+extending well past current vision. With ground truth the planner routes around
+walls it has not seen; blinded, it assumes unseen ground is open and plans naive
+straight lines.
+
+**Walls are what make two scouts' paths diverge.** Remove wall knowledge from
+planning and two scouts from neighbouring spawns plan near-identical straight
+lines to the same frontier — they fly in formation, and overlap goes from under
+60% to 68%. That is precisely the failure
+`test_a_second_scout_nearly_doubles_coverage` was written to catch.
+
+So the sharp statement is: **omniscient pathing is load-bearing for
+de-duplication, not for rescue rate.** Arm D was right that rescue rate does not
+move and wrong that nothing does. `test_sector_claims_add_to_what_shared_memory_already_gives`
+failing alongside it says the same thing from the other side — sector claiming's
+measured benefit shrinks when routing stops distinguishing robots.
+
+**This makes T-12a a memory feature, and an on-thesis one.** The fleet needs
+*shared learned terrain*: a wall discovered by any robot, written as an
+observation, read by every planner. Then scouts diverge for the right reason —
+because the fleet remembers the map together — instead of the wrong one, which
+is that each robot was born knowing it. That is a better demo than the cleanup
+was, and it is the same argument the project already makes about victims,
+applied to terrain.
+
+Reverted; the four tests pass untouched.
