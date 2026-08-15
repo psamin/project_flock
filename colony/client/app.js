@@ -93,6 +93,13 @@ function boot(snapshot) {
     ? "SHARED MEMORY"
     : "PRIVATE MAPS";
   document.getElementById("mode-badge").className = sharedVision ? "on" : "off";
+  // The scenario line. A run nobody can name cannot be reproduced by anyone
+  // watching it, and "run it again" is the first thing a sceptical judge asks.
+  setText(
+    "scenario",
+    `${world.name} · ${victims.length} trapped · ${robots.length} units · ` +
+      `${world.mission_length_ticks} ticks · seed ${world.seed ?? "?"}`,
+  );
   document.getElementById("toggle").textContent = sharedVision
     ? "coordination: ON"
     : "coordination: OFF";

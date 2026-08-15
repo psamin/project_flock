@@ -120,7 +120,11 @@ class World:
     def __init__(self, world_map: WorldMap, seed: int | None = None):
         self.map = world_map
         self.tick = 0
-        self.rng = random.Random(seed if seed is not None else world_map.seed or 0)
+        # Kept as a value, not just fed to the RNG: a run nobody can name cannot
+        # be reproduced by anyone watching it. It rides in the snapshot so the
+        # seed is on screen rather than in whoever-started-the-process's shell.
+        self.seed = seed if seed is not None else world_map.seed or 0
+        self.rng = random.Random(self.seed)
         # Mutable copies; the WorldMap itself stays the pristine initial state.
         self.ground = [row[:] for row in world_map.ground]
         self.objects = [row[:] for row in world_map.objects]
@@ -612,6 +616,7 @@ class World:
                 "zones": self.map.zones,
                 "shared_vision": self.shared_vision,
                 "sectors": self.map.sectors,
+                "seed": self.seed,
             },
         )
 
