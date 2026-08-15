@@ -131,3 +131,44 @@ embeddings. Wrong: 23 of 23 observations carry embeddings. They are produced by
 
 Suite with a cluster: **617 passed, 12 skipped**. Without: 467 passed, 162
 skipped. The database-backed tests genuinely execute.
+
+---
+
+## Third pass — after the determinism fixes (T-08, T-08b)
+
+**X2 now PASSES on its stated condition.** Byte-identical event logs, all three
+seeds:
+
+```
+seed  0  events=  742  byte_identical=True  behaviourally_identical=True
+seed  7  events=  805  byte_identical=True
+seed 19  events=  641  byte_identical=True
+```
+
+Seed sensitivity intact — 4 distinct event logs across 4 different seeds — so
+determinism did not come at the cost of the seed meaning anything.
+
+**X1 re-run on the now-deterministic sim (n=20 per arm).** These are the numbers
+for the deck:
+
+| arm | rescue rate | 95% CI |
+|---|---|---|
+| A coordinated | **0.994** | [0.984, 1.000] |
+| B baseline, as shipped | 0.444 | [0.444, 0.444] |
+| C true isolation | **0.000** | [0.000, 0.000] |
+
+Arm A tightened from 0.978 ± 0.020 to **0.994 ± 0.011** — the earlier spread was
+partly the sector-tiebreak nondeterminism T-08 removed, i.e. the harness rather
+than the fleet. CIs remain disjoint; **X1 PASSES**.
+
+**Arms B and C still have zero variance**, and this is now a finding about the
+*scenario*, not the harness: the shipped baseline rescues exactly 4 of 9 and true
+isolation exactly 0 of 9 on every seed. Both outcomes are structurally pinned by
+the map — the reachable-without-help victim count is fixed — so `n=20` buys no
+confidence for those arms. Reporting them as a mean ± CI would overstate the
+statistical work done. Report them as what they are: constants of this map.
+
+**X10 status:** the mean ± CI machinery now works and arm A is a genuine
+interval. Before putting intervals on B and C in the deck, the map needs enough
+variation for the outcome to move — otherwise the honest statement is "4 of 9,
+every run".
