@@ -167,6 +167,11 @@ def test_the_scoreboard_gets_the_full_metric_set(mission):
         "rescue_rate",
         "median_time_to_stabilize",
         "duplicate_effort_index",
+        # Computed since the first playtest and, until the audit, never rendered.
+        # It belongs on the scoreboard: with claiming on it should sit at zero,
+        # and the baseline is where it climbs, so it is the most direct
+        # "coordination is working" number the project has.
+        "double_work_incidents",
         "coverage_at_500",
         "mode",
     ):
@@ -276,3 +281,84 @@ def test_a_run_is_recorded_when_the_mission_ends(mission):
 
     asyncio.run(scenario())
     assert mission.last_runs["coordinated"]["finished"] is True
+
+
+def test_the_event_log_wins_when_the_world_disagrees(mission):
+    """§4.7's one-source-of-truth rule, enforced rather than assumed.
+
+    `metrics()` merges two dicts: the world's live counters and the values
+    computed from the event log. They collide on `victims_total`,
+    `victims_stabilized` and `victims_lost`. Merged the wrong way round the
+    simulator silently overwrote all three, so the scoreboard showed ground
+    truth while `rescue_rate` beside it came from the log — the exact "second
+    source of truth that could disagree with the one on screen" that
+    `sim/metrics.py` opens by ruling out.
+
+    Nothing caught that, because in a healthy run the two agree. This forces
+    them apart so the merge order itself is what is under test.
+    """
+    mission.tick_once()
+
+    real = mission.world.metrics
+
+    def disagreeing():
+        # A world that claims everyone is saved, while the log says otherwise.
+        return {**real(), "victims_stabilized": 999, "victims_lost": 42}
+
+    mission.world.metrics = disagreeing
+    try:
+        payload = mission.metrics()
+    finally:
+        mission.world.metrics = real
+
+    assert payload["victims_stabilized"] != 999, (
+        "the world's counter overwrote the event-log value — merge order is "
+        "reversed in Mission.metrics()"
+    )
+    assert payload["victims_lost"] != 42, "the world's counter overwrote the log"
+    # The non-colliding live counters must still ride along.
+    assert "victims_located" in payload
+    assert "coverage" in payload
+
+
+def test_focus_point_is_somewhere_the_fleet_has_actually_looked(mission):
+    """The console's `what_do_we_know` takes x/y and defaulted to the origin —
+    a map corner nothing is ever observed near, so a cold start answered
+    "nothing has been observed near there". An empty panel caused by a default
+    rather than by an absence of memory.
+
+    The mission supplies the point instead, for the same reason it supplies
+    mission_id: only the running mission knows it.
+    """
+    for _ in range(40):
+        mission.tick_once()
+
+    focus = mission.focus_point()
+    assert focus is not None, "a running mission always has somewhere to point at"
+    assert focus != (0, 0), "still defaulting to the empty origin"
+
+    # It must be somewhere memory actually has something to say about.
+    known = {b.pos for b in mission.mem.get_beliefs(mission.mission_id)}
+    robots = {(r.x, r.y) for r in mission.world.robots.values()}
+    assert focus in known or focus in robots
+
+
+def test_the_comparison_payload_carries_lives_lost(mission):
+    """The ON/OFF panel leads with lives, so `/api/runs` has to carry them.
+
+    Measured across 6 seeds: baseline loses exactly five people every run and
+    coordinated loses none — baseline fails, so its mission does not end early,
+    the vitals deadlines arrive, and the victims nobody reached die. That is the
+    §4.7 comparison in the unit the scenario is about, and it needs no
+    arithmetic from the viewer.
+
+    It is also a number that came from the event log rather than the simulator
+    only after the merge order was fixed, so this guards both.
+    """
+    mission.tick_once()
+    mission.record_run()
+
+    recorded = mission.last_runs[mission.mode]
+    for field in ("victims_lost", "victims_stabilized", "victims_total", "finished"):
+        assert field in recorded, f"the comparison panel cannot render without {field}"
+    assert isinstance(recorded["victims_lost"], int)

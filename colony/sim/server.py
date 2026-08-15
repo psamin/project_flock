@@ -224,21 +224,54 @@ class Mission:
         Derived from the event log like every other metric (§4.7), which means
         walking the whole mission's events — cheap at a few thousand rows, but
         not four times a second for the life of a mission, so it is cached for a
-        second at a time. The live counters the world already tracks ride along
-        untouched, because the scoreboard wants both.
+        second at a time. The live counters the world already tracks ride along,
+        because the scoreboard wants both.
+
+        **The world's counters go in first so the event-log values win.** They
+        collide on `victims_total`, `victims_stabilized` and `victims_lost`, and
+        merged the other way round the simulator silently overwrote all three —
+        so the scoreboard showed ground truth while `rescue_rate` beside it was
+        computed from the log. That defeats the promise `sim/metrics.py` opens
+        with: one source of truth, and it is the log. `victims_located`,
+        `coverage` and `tick` do not collide and survive either way.
         """
         if self.world.tick - self._metrics_at < METRICS_EVERY_TICKS and self._metrics:
-            return {**self._metrics, **self.world.metrics()}
+            return {**self.world.metrics(), **self._metrics}
         computed = metrics_mod.compute(
             self.mem.events(self.mission_id),
             victims_total=len(self.world.victims),
             coverage_at_500=self.world.coverage(),
             ticks=self.world.tick,
             horizon=self.world.map.mission_length_ticks,
+            # Read back out of fleet memory rather than counted off the
+            # simulator, so the number on the scoreboard is one a judge can
+            # reproduce with a SELECT.
+            victims_located=len(self.mem.get_beliefs(self.mission_id, kind="victim")),
         )
         self._metrics = {**computed.to_json(), "mode": self.mode}
         self._metrics_at = self.world.tick
-        return {**self._metrics, **self.world.metrics()}
+        return {**self.world.metrics(), **self._metrics}
+
+    def focus_point(self) -> tuple[int, int] | None:
+        """Somewhere worth asking "what do we know about here?" about.
+
+        `what_do_we_know` takes x/y, and the console's static defaults are the
+        origin — a corner of the map where nothing is ever observed, so a cold
+        start answered "nothing has been observed near there". That is an empty
+        panel in the demo's best feature, caused by a default rather than by an
+        absence of memory.
+
+        The best-known victim is the honest answer: it is the thing the fleet
+        has the most to say about. The point used is echoed back in the
+        rendered prompt, so the operator always sees which area was answered
+        for rather than being quietly redirected.
+        """
+        beliefs = self.mem.get_beliefs(self.mission_id, kind="victim")
+        if beliefs:
+            best = max(beliefs, key=lambda b: (b.sightings or 0, b.confidence or 0.0))
+            return best.pos
+        robot = next(iter(self.world.robots.values()), None)
+        return None if robot is None else (robot.x, robot.y)
 
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).
@@ -494,12 +527,21 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
                 f"(make dev) and restart the sim"
             )
         }
+    params = {k: v for k, v in body.items() if k != "question"}
+    # A question that asks about a place, asked without one, gets the mission's
+    # own focus rather than the console's static origin default. Supplied here
+    # for the same reason mission_id is: only the running mission knows it.
+    question = console_questions.BY_ID.get(question_id)
+    if question is not None and "x" in question.params and "x" not in params:
+        focus = mission.focus_point()
+        if focus is not None:
+            params["x"], params["y"] = focus
     try:
         result = console_questions.answer(
             mission.reader(),
             question_id,
             mission.mission_id,
-            **{k: v for k, v in body.items() if k != "question"},
+            **params,
         )
     except console_questions.UnknownQuestion as exc:
         return {"error": str(exc)}

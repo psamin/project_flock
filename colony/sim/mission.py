@@ -152,6 +152,9 @@ def run_mission(
             coverage_at_500=coverage_at_500,
             ticks=world.tick,
             horizon=world_map.mission_length_ticks,
+            # From belief rows, not simulator state: how many victims the fleet
+            # itself knows about. In baseline this is the number that stays low.
+            victims_located=len(mem.get_beliefs(mission_id, kind="victim")),
         ),
     )
 

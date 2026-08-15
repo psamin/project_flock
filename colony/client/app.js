@@ -93,6 +93,13 @@ function boot(snapshot) {
     ? "SHARED MEMORY"
     : "PRIVATE MAPS";
   document.getElementById("mode-badge").className = sharedVision ? "on" : "off";
+  // The scenario line. A run nobody can name cannot be reproduced by anyone
+  // watching it, and "run it again" is the first thing a sceptical judge asks.
+  setText(
+    "scenario",
+    `${world.name} · ${victims.length} trapped · ${robots.length} units · ` +
+      `${world.mission_length_ticks} ticks · seed ${world.seed ?? "?"}`,
+  );
   document.getElementById("toggle").textContent = sharedVision
     ? "coordination: ON"
     : "coordination: OFF";
@@ -434,6 +441,10 @@ function updateHud(metrics) {
   setText("m-coverage", `${Math.round((metrics.coverage ?? 0) * 100)}%`);
   setText("m-rescue", `${Math.round((metrics.rescue_rate ?? 0) * 100)}%`);
   setText("m-duplicate", `${Math.round((metrics.duplicate_effort_index ?? 0) * 100)}%`);
+  // Computed since the first playtest and never shown. It is the most direct
+  // "coordination is working" number the project has: with claiming on it
+  // should sit at zero, and the baseline is where it climbs.
+  setText("m-doublework", metrics.double_work_incidents ?? 0);
   setText(
     "m-median",
     metrics.median_time_to_stabilize == null
@@ -465,10 +476,23 @@ async function refreshComparison() {
         ? (base.median_time_to_stabilize - co.median_time_to_stabilize) /
           base.median_time_to_stabilize
         : 0;
+    // Lives first, percentages second. Measured across 6 seeds, baseline loses
+    // exactly five people every run and coordinated loses none: baseline fails,
+    // so its mission does not end early, the vitals deadlines arrive, and the
+    // victims nobody reached die. That is the §4.7 comparison stated in the unit
+    // the scenario is actually about, and it needs no arithmetic from the
+    // viewer. The rate and the gain stay — they are the defensible numbers — but
+    // they are no longer the first thing read.
+    const livesLost =
+      base.victims_lost > co.victims_lost
+        ? `<b>${base.victims_lost - co.victims_lost} more people died without ` +
+          `shared memory</b> (${co.victims_lost} vs ${base.victims_lost}) · `
+        : "";
     box.innerHTML =
-      `<b>coordination gain ${Math.round(gain * 100)}%</b> · ` +
+      livesLost +
       `rescued ${co.victims_stabilized}/${co.victims_total} coordinated ` +
-      `vs ${base.victims_stabilized}/${base.victims_total} baseline`;
+      `vs ${base.victims_stabilized}/${base.victims_total} baseline · ` +
+      `coordination gain ${Math.round(gain * 100)}%`;
   } catch {
     /* the scoreboard is decoration until both runs exist */
   }

@@ -143,3 +143,14 @@ def test_the_frame_survives_json(world, fake, mission):
     datetime — takes the whole broadcast down, not just its own field."""
     frame = _diff(world, fake, mission)
     json.dumps(frame)  # raises if not
+
+
+def test_the_snapshot_carries_the_seed():
+    """A run nobody can name cannot be reproduced by anyone watching it.
+
+    X2 makes the same seed produce the same mission; this is what puts the seed
+    where a sceptical judge can read it before asking to run it again.
+    """
+    world = World(load_map(MAP_PATH), seed=20260815)
+    payload = _snapshot(world)["world"]
+    assert payload["seed"] == 20260815

@@ -444,9 +444,14 @@ class Scout:
                 for t in self.mem.open_tasks(self.mission_id)
                 if t.kind.startswith("explore_sector:")
             ),
+            # Ties break on the sector name, never on the row id. `str(t.id)` is a
+            # freshly generated UUID, so two equidistant sectors were decided by
+            # whichever id happened to sort first — the same seed picked C1 on one
+            # run and A3 on the next, and X2 could not pass. The name is stable
+            # across runs and carries the same "pick one, consistently" intent.
             key=lambda t: (
                 abs((t.target[0] or 0) - robot.x) + abs((t.target[1] or 0) - robot.y),
-                str(t.id),
+                t.kind,
             ),
         )
         if not candidates:
