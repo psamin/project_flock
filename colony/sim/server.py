@@ -248,6 +248,27 @@ class Mission:
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
 
+    def focus_point(self) -> tuple[int, int] | None:
+        """Somewhere worth asking "what do we know about here?" about.
+
+        `what_do_we_know` takes x/y, and the console's static defaults are the
+        origin — a corner of the map where nothing is ever observed, so a cold
+        start answered "nothing has been observed near there". That is an empty
+        panel in the demo's best feature, caused by a default rather than by an
+        absence of memory.
+
+        The best-known victim is the honest answer: it is the thing the fleet
+        has the most to say about. The point used is echoed back in the
+        rendered prompt, so the operator always sees which area was answered
+        for rather than being quietly redirected.
+        """
+        beliefs = self.mem.get_beliefs(self.mission_id, kind="victim")
+        if beliefs:
+            best = max(beliefs, key=lambda b: (b.sightings or 0, b.confidence or 0.0))
+            return best.pos
+        robot = next(iter(self.world.robots.values()), None)
+        return None if robot is None else (robot.x, robot.y)
+
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).
 
@@ -502,12 +523,21 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
                 f"(make dev) and restart the sim"
             )
         }
+    params = {k: v for k, v in body.items() if k != "question"}
+    # A question that asks about a place, asked without one, gets the mission's
+    # own focus rather than the console's static origin default. Supplied here
+    # for the same reason mission_id is: only the running mission knows it.
+    question = console_questions.BY_ID.get(question_id)
+    if question is not None and "x" in question.params and "x" not in params:
+        focus = mission.focus_point()
+        if focus is not None:
+            params["x"], params["y"] = focus
     try:
         result = console_questions.answer(
             mission.reader(),
             question_id,
             mission.mission_id,
-            **{k: v for k, v in body.items() if k != "question"},
+            **params,
         )
     except console_questions.UnknownQuestion as exc:
         return {"error": str(exc)}

@@ -314,3 +314,25 @@ def test_the_event_log_wins_when_the_world_disagrees(mission):
     # The non-colliding live counters must still ride along.
     assert "victims_located" in payload
     assert "coverage" in payload
+
+
+def test_focus_point_is_somewhere_the_fleet_has_actually_looked(mission):
+    """The console's `what_do_we_know` takes x/y and defaulted to the origin —
+    a map corner nothing is ever observed near, so a cold start answered
+    "nothing has been observed near there". An empty panel caused by a default
+    rather than by an absence of memory.
+
+    The mission supplies the point instead, for the same reason it supplies
+    mission_id: only the running mission knows it.
+    """
+    for _ in range(40):
+        mission.tick_once()
+
+    focus = mission.focus_point()
+    assert focus is not None, "a running mission always has somewhere to point at"
+    assert focus != (0, 0), "still defaulting to the empty origin"
+
+    # It must be somewhere memory actually has something to say about.
+    known = {b.pos for b in mission.mem.get_beliefs(mission.mission_id)}
+    robots = {(r.x, r.y) for r in mission.world.robots.values()}
+    assert focus in known or focus in robots
