@@ -33,6 +33,18 @@
 
     #hud { display: flex; gap: 16px; color: #b8b1c4; font-size: 12px; flex-wrap: wrap; }
     #hud b { color: #e8e3d9; font-weight: 600; }
+    #legend { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+              color: #8f8a9c; font-size: 11px; padding: 4px 0 2px; }
+    #legend .key { display: flex; gap: 5px; align-items: center; }
+    #legend em { color: #e8e3d9; font-style: normal; font-weight: 600; }
+    #legend b { color: #d9cfa8; font-weight: 600; }
+    #legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    /* The three fog states, drawn from the same constants app.js renders with:
+       UNSEEN #0e0d12, STALE_ALPHA 0.32, full brightness. */
+    #legend .sw { width: 13px; height: 9px; display: inline-block; border: 1px solid #2a2833; }
+    #legend .sw.live { background: #6b6480; }
+    #legend .sw.stale { background: rgba(107, 100, 128, 0.32); }
+    #legend .sw.unseen { background: #0e0d12; }
     #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
     #comparison b { color: #f2c14e; }
 
@@ -133,6 +145,21 @@
     <span title="Tile visits to ground another robot had already covered, divided by all tile visits. Revisiting your own ground does not count.">duplicate effort <b id="m-duplicate">0%</b></span>
     <span title="Tasks claimed by more than one robot over the mission — one robot walking to work another had already finished. Distinct from the lease guarantee, which is about two robots holding a task at the same instant.">double work <b id="m-doublework">0</b></span>
     <span title="Share of reachable, non-wall tiles any robot has seen. Counts tiles, not victims — a fully seen map can still hold victims nobody has reported yet.">tiles seen <b id="m-coverage">0%</b></span>
+  </div>
+
+  <!--
+    A stranger cannot read `S1 L1 M1`, and the three fog states are the whole
+    thesis on screen — "remembered but not currently observed" is the one a
+    viewer has to be told to look for, because it is the state that only exists
+    because the fleet writes to shared memory.
+  -->
+  <div id="legend">
+    <span class="key"><i class="dot" style="background:#63c5da"></i>scout <em>S</em> — sees 6, flies</span>
+    <span class="key"><i class="dot" style="background:#d9884a"></i>lifter <em>L</em> — clears debris</span>
+    <span class="key"><i class="dot" style="background:#d96a9a"></i>medic <em>M</em> — stabilizes victims</span>
+    <span class="key" title="A robot is looking at this tile right now."><i class="sw live"></i>observed now</span>
+    <span class="key" title="Somebody saw this and wrote it to shared memory. Nobody is looking at it now — the fleet only knows it because it remembers. This is the state the whole project exists to produce."><i class="sw stale"></i><b>remembered</b></span>
+    <span class="key" title="Nobody has ever seen this tile."><i class="sw unseen"></i>unknown</span>
   </div>
   <div id="comparison"></div>
 
