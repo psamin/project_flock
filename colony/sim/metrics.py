@@ -22,6 +22,11 @@ class Metrics:
     the comparison rather than here."""
 
     victims_total: int = 0
+    # How many victims the fleet actually knows about — counted from belief rows,
+    # not from simulator state. The scoreboard's old "located" came only from
+    # World.metrics() and had no store-side definition at all, which made it the
+    # one number a fresh process reading the database could not reproduce.
+    victims_located: int = 0
     victims_stabilized: int = 0
     victims_lost: int = 0
     rescue_rate: float = 0.0
@@ -34,6 +39,7 @@ class Metrics:
     def to_json(self) -> dict[str, Any]:
         return {
             "victims_total": self.victims_total,
+            "victims_located": self.victims_located,
             "victims_stabilized": self.victims_stabilized,
             "victims_lost": self.victims_lost,
             "rescue_rate": round(self.rescue_rate, 3),
@@ -51,6 +57,7 @@ def compute(
     coverage_at_500: float = 0.0,
     ticks: int = 0,
     horizon: int | None = None,
+    victims_located: int = 0,
 ) -> Metrics:
     """Derive §4.7's metrics from a mission's event stream.
 
@@ -77,6 +84,7 @@ def compute(
 
     metrics = Metrics(
         victims_total=victims_total,
+        victims_located=victims_located,
         victims_stabilized=len(stabilized_at),
         victims_lost=len(lost),
         coverage_at_500=coverage_at_500,
