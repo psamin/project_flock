@@ -110,3 +110,24 @@ idle robot re-queries the full open-task set every tick. Harmless against the
 fake; against Cloud with per-call latency it is the first thing that will hurt.
 
 Harness: `audit/experiment_b.py`.
+
+---
+
+## Second pass — against a live CockroachDB cluster
+
+`make dev`, single node, schema applied fresh. Seed 0, coordinated, replay adapter.
+
+| id | pass/fail | measured | notes |
+|---|---|---|---|
+| **X9** | **partial PASS** | `victims_stabilized` 9=9, `victims_lost` 0=0, `victims_total` 9=9 recomputed from SQL | The store-derived `Metrics` object is honest. The *server's merged payload* is not — see C-1 |
+| **cold start** | **PASS** | fresh schema → 617 passed / 12 skipped → full mission → console answers | AUDIT E |
+| **console** | **PASS (4/5)** | `why_did_robot` resolves `based_on` to real observation rows | `what_do_we_know` returns 0 rows on default params (D-2) |
+| **vector index** | **not exercised** | `EXPLAIN` → `observations@observations_pkey, spans: FULL SCAN` | Index is correctly declared `VECTOR INDEX … vector_cosine_ops`; the table holds 23 rows, so a full scan is the optimizer being right. Required tool #2 is never exercised at demo scale (D-3) |
+
+**Correction to A-10.** A-10 claimed the vector path was dead for lack of
+embeddings. Wrong: 23 of 23 observations carry embeddings. They are produced by
+`_offline_embedding` (`adapter.py:139`), not Titan — which is the worse finding
+(D-4).
+
+Suite with a cluster: **617 passed, 12 skipped**. Without: 467 passed, 162
+skipped. The database-backed tests genuinely execute.
