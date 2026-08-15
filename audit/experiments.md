@@ -312,3 +312,74 @@ was, and it is the same argument the project already makes about victims,
 applied to terrain.
 
 Reverted; the four tests pass untouched.
+
+---
+
+## X10 — statistical honesty across generated scenarios: PASS, with a scope condition
+
+X1's zero-variance arms were not an underpowered experiment, they were **one
+fixed problem reseeded**. Aftershock's count of victims reachable without a
+handoff is a property of that layout; changing the RNG seed never moves it. A
+`±` on those arms would have described the harness.
+
+So this varies the *scenario* — size, debris density, victim count, sector size,
+fleet composition — using `tests/test_scenarios.py`'s own generator, paired
+design (both arms on the identical map).
+
+### First result: delta was exactly 0.000, on every scenario
+
+```
+scenario  0  32x18 v=5  coord=1.000 base=1.000 delta=+0.000
+scenario  1  24x22 v=5  coord=1.000 base=1.000 delta=+0.000
+...
+paired delta   +0.000 +/- 0.000      excludes zero: False
+```
+
+**Cause, and it is a real scoping finding.** The generator deliberately clears
+every victim tile — its own comment says "a victim is never buried". So a medic
+can always walk straight to any victim, the `clear_debris -> deliver_kit` chain
+never has to form, and **coordination has nothing to coordinate**.
+
+PRD §5.5 already says the demo map is "designed so ≥2 victims are unreachable
+without handoffs". That is not incidental map dressing — it is the precondition
+for the entire effect.
+
+> **Coordination's measured benefit is not a universal property of the fleet.
+> It is a property of scenarios that require handoffs.** On maps where every
+> victim is directly reachable, shared memory makes no measurable difference to
+> rescue rate.
+
+That is the honest answer to "does this only work on your map?", and it is much
+better said first than discovered by a judge.
+
+### Second result: bury half the victims, and the effect is large and robust
+
+Walling each buried victim in behind debris on its orthogonal neighbours — the
+same property Aftershock has, reproduced across generated maps — **n=40**:
+
+| arm | rescue rate | 95% CI |
+|---|---|---|
+| coordinated | **0.787** | ± 0.091 |
+| baseline | 0.474 | ± 0.040 |
+| **paired delta** | **+0.313** | **[+0.234, +0.393]** |
+
+**Interval excludes zero. X10 PASSES.** 6 and 7 distinct values across the arms,
+so these are genuine intervals rather than restated constants.
+
+Mean victims lost: **0.95 coordinated vs 2.40 baseline**.
+
+### What to put in the deck
+
+Not "98% vs 44%", which is one map. This:
+
+> Across **40 randomly generated disaster scenarios** — varying map size, debris
+> density, victim count and fleet composition — shared memory raises the rescue
+> rate by **31 percentage points (95% CI: 23–39)** and cuts mean victims lost
+> from **2.4 to 0.95**. The effect requires scenarios where victims are trapped
+> behind debris; where every victim is directly reachable, it is zero.
+
+The scope condition belongs in the claim. It costs nothing — the scenario the
+product exists for is the trapped one — and it is the difference between a
+result and a marketing number.
+
+Harness: `audit/experiment_x10.py`. Raw: `audit/x10-raw.json`.
