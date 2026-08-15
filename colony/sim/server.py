@@ -224,11 +224,19 @@ class Mission:
         Derived from the event log like every other metric (§4.7), which means
         walking the whole mission's events — cheap at a few thousand rows, but
         not four times a second for the life of a mission, so it is cached for a
-        second at a time. The live counters the world already tracks ride along
-        untouched, because the scoreboard wants both.
+        second at a time. The live counters the world already tracks ride along,
+        because the scoreboard wants both.
+
+        **The world's counters go in first so the event-log values win.** They
+        collide on `victims_total`, `victims_stabilized` and `victims_lost`, and
+        merged the other way round the simulator silently overwrote all three —
+        so the scoreboard showed ground truth while `rescue_rate` beside it was
+        computed from the log. That defeats the promise `sim/metrics.py` opens
+        with: one source of truth, and it is the log. `victims_located`,
+        `coverage` and `tick` do not collide and survive either way.
         """
         if self.world.tick - self._metrics_at < METRICS_EVERY_TICKS and self._metrics:
-            return {**self._metrics, **self.world.metrics()}
+            return {**self.world.metrics(), **self._metrics}
         computed = metrics_mod.compute(
             self.mem.events(self.mission_id),
             victims_total=len(self.world.victims),
@@ -238,7 +246,7 @@ class Mission:
         )
         self._metrics = {**computed.to_json(), "mode": self.mode}
         self._metrics_at = self.world.tick
-        return {**self._metrics, **self.world.metrics()}
+        return {**self.world.metrics(), **self._metrics}
 
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).

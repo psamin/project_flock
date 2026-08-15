@@ -276,3 +276,41 @@ def test_a_run_is_recorded_when_the_mission_ends(mission):
 
     asyncio.run(scenario())
     assert mission.last_runs["coordinated"]["finished"] is True
+
+
+def test_the_event_log_wins_when_the_world_disagrees(mission):
+    """§4.7's one-source-of-truth rule, enforced rather than assumed.
+
+    `metrics()` merges two dicts: the world's live counters and the values
+    computed from the event log. They collide on `victims_total`,
+    `victims_stabilized` and `victims_lost`. Merged the wrong way round the
+    simulator silently overwrote all three, so the scoreboard showed ground
+    truth while `rescue_rate` beside it came from the log — the exact "second
+    source of truth that could disagree with the one on screen" that
+    `sim/metrics.py` opens by ruling out.
+
+    Nothing caught that, because in a healthy run the two agree. This forces
+    them apart so the merge order itself is what is under test.
+    """
+    mission.tick_once()
+
+    real = mission.world.metrics
+
+    def disagreeing():
+        # A world that claims everyone is saved, while the log says otherwise.
+        return {**real(), "victims_stabilized": 999, "victims_lost": 42}
+
+    mission.world.metrics = disagreeing
+    try:
+        payload = mission.metrics()
+    finally:
+        mission.world.metrics = real
+
+    assert payload["victims_stabilized"] != 999, (
+        "the world's counter overwrote the event-log value — merge order is "
+        "reversed in Mission.metrics()"
+    )
+    assert payload["victims_lost"] != 42, "the world's counter overwrote the log"
+    # The non-colliding live counters must still ride along.
+    assert "victims_located" in payload
+    assert "coverage" in payload
