@@ -167,6 +167,11 @@ def test_the_scoreboard_gets_the_full_metric_set(mission):
         "rescue_rate",
         "median_time_to_stabilize",
         "duplicate_effort_index",
+        # Computed since the first playtest and, until the audit, never rendered.
+        # It belongs on the scoreboard: with claiming on it should sit at zero,
+        # and the baseline is where it climbs, so it is the most direct
+        # "coordination is working" number the project has.
+        "double_work_incidents",
         "coverage_at_500",
         "mode",
     ):

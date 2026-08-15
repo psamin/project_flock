@@ -114,15 +114,24 @@
     <button id="toggle">coordination: ON</button>
   </header>
 
+  <!--
+    Every number carries its definition in a tooltip. The audit found three
+    labels a stranger could not interpret and two that quietly disagreed:
+    "explored" counts tiles while "located" counts victims, so a fully explored
+    map beside unlocated victims reads as a contradiction when it is two
+    different questions; and "median" hides that victims never rescued are
+    counted at the mission horizon rather than dropped from the sample.
+  -->
   <div id="hud">
-    <span>tick <b id="m-tick">0</b></span>
-    <span>located <b id="m-located">0</b></span>
-    <span>stabilized <b id="m-stabilized">0</b></span>
-    <span>lost <b id="m-lost">0</b></span>
-    <span>rescue rate <b id="m-rescue">0%</b></span>
-    <span>median <b id="m-median">—</b></span>
-    <span>duplicate effort <b id="m-duplicate">0%</b></span>
-    <span>explored <b id="m-coverage">0%</b></span>
+    <span title="Simulation tick. The mission horizon is 1200.">tick <b id="m-tick">0</b></span>
+    <span title="Victims the fleet has seen at least once. Live simulator state, not derived from the event log.">victims seen <b id="m-located">0</b></span>
+    <span title="Victims stabilized by a medic. Counted from victim_stabilized rows in the event log.">stabilized <b id="m-stabilized">0</b></span>
+    <span title="Victims who passed their vitals deadline. Counted from victim_lost rows in the event log.">lost <b id="m-lost">0</b></span>
+    <span title="Stabilized divided by total victims on the map.">rescue rate <b id="m-rescue">0%</b></span>
+    <span title="Median ticks from mission start to stabilization. Victims never rescued are counted at the 1200-tick horizon rather than dropped, so this is a whole-mission median and not an average over the lucky ones.">median rescue <b id="m-median">—</b><small> ticks</small></span>
+    <span title="Tile visits to ground another robot had already covered, divided by all tile visits. Revisiting your own ground does not count.">duplicate effort <b id="m-duplicate">0%</b></span>
+    <span title="Tasks claimed by more than one robot over the mission — one robot walking to work another had already finished. Distinct from the lease guarantee, which is about two robots holding a task at the same instant.">double work <b id="m-doublework">0</b></span>
+    <span title="Share of reachable, non-wall tiles any robot has seen. Counts tiles, not victims — a fully seen map can still hold victims nobody has reported yet.">tiles seen <b id="m-coverage">0%</b></span>
   </div>
   <div id="comparison"></div>
 

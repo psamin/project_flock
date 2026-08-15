@@ -434,6 +434,10 @@ function updateHud(metrics) {
   setText("m-coverage", `${Math.round((metrics.coverage ?? 0) * 100)}%`);
   setText("m-rescue", `${Math.round((metrics.rescue_rate ?? 0) * 100)}%`);
   setText("m-duplicate", `${Math.round((metrics.duplicate_effort_index ?? 0) * 100)}%`);
+  // Computed since the first playtest and never shown. It is the most direct
+  // "coordination is working" number the project has: with claiming on it
+  // should sit at zero, and the baseline is where it climbs.
+  setText("m-doublework", metrics.double_work_incidents ?? 0);
   setText(
     "m-median",
     metrics.median_time_to_stabilize == null
