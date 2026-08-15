@@ -172,3 +172,56 @@ statistical work done. Report them as what they are: constants of this map.
 interval. Before putting intervals on B and C in the deck, the map needs enough
 variation for the outcome to move — otherwise the honest statement is "4 of 9,
 every run".
+
+---
+
+## Arm D — is omniscient pathing load-bearing? (prerequisite for T-12)
+
+AUDIT B filed B-1 (`worker._passable`, `scout._landing` read raw terrain) and
+B-2 (`worker._work_is_done` reads `world.objects` / `world.victim_at`), both
+ungated by observation radius. T-12 says remove them. Measure first: if arm A's
+0.994 depends on omniscience, removing it is a capability regression wearing a
+fix's clothes.
+
+Unobserved ground is treated as **passable** in the blinded arms. Pessimism
+would make every unexplored tile a wall and the fleet would never leave home —
+that measures the pessimism, not the god-mode.
+
+| arm | condition | rescue rate (n=20) | 95% CI |
+|---|---|---|---|
+| A | as shipped | 0.994 | [0.984, 1.000] |
+| **D** | **blind pathing** | **0.978** | **[0.958, 0.998]** |
+| E | blind pathing + blind completion checks | 0.111 | — **retracted, see below** |
+
+### Arm D: conclusive — omniscient pathing is NOT load-bearing
+
+**CIs overlap (A [0.984, 1.000] vs D [0.958, 0.998]).** The fleet performs the
+same reading only terrain it has actually seen. **B-1 is a free cleanup**: T-12's
+pathing half can be done without arguing about a performance cost, and the
+"agents cannot reach ground truth" claim becomes true for pathing at no price.
+
+### Arm E: RETRACTED — it measured the harness, twice
+
+Two successive stand-ins for a belief-driven `_work_is_done` both collapsed to
+0.111, and both times the cause was the stand-in rather than the design:
+
+1. First attempt queried `kind="debris"` beliefs. Agents write exactly two
+   observation kinds — `hazard` and `victim` (grep of `report_observation` call
+   sites under `agents/`). **There is no debris belief.** The query returned
+   empty, so every clear looked finished the instant it was claimed.
+2. Second attempt kept debris on ground truth and blinded only the victim
+   branch, checking `payload.state in ("stabilized","lost")`. Inspected live:
+   victim beliefs carry `payload = {'victim_id': 'v1', 'state': 'located',
+   'note': 'sighted by scout'}` — **`state` is written once at sighting and
+   never updated.**
+
+**The finding is the gap, not the number.** Episodic memory records *what was
+seen*, not *what happened next*. No belief row ever says a victim was
+stabilized or a tile was cleared; those outcomes live in `world` (ground truth)
+and in `events`. So **B-2 cannot be fixed by "read beliefs instead"** — there is
+nothing to read. Fixing it means reading `events`/`tasks.status`, or writing
+outcome observations, which is a design change and not a refactor.
+
+No claim is made here about whether B-2 is load-bearing. It is unmeasured.
+
+Harness: `audit/experiment_armd.py`. Raw: `audit/armd-raw.json`.
