@@ -434,7 +434,11 @@ def test_one_seed_produces_one_mission_byte_for_byte():
             embedder=BedrockAdapter(mode=REPLAY),
         )
         return [
-            (e["actor"], e["verb"], json.dumps(e["detail"], sort_keys=True, default=str))
+            (
+                e["actor"],
+                e["verb"],
+                json.dumps(e["detail"], sort_keys=True, default=str),
+            )
             for e in run.mem.events(run.mission_id)
         ]
 
