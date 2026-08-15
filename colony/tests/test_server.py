@@ -341,3 +341,24 @@ def test_focus_point_is_somewhere_the_fleet_has_actually_looked(mission):
     known = {b.pos for b in mission.mem.get_beliefs(mission.mission_id)}
     robots = {(r.x, r.y) for r in mission.world.robots.values()}
     assert focus in known or focus in robots
+
+
+def test_the_comparison_payload_carries_lives_lost(mission):
+    """The ON/OFF panel leads with lives, so `/api/runs` has to carry them.
+
+    Measured across 6 seeds: baseline loses exactly five people every run and
+    coordinated loses none — baseline fails, so its mission does not end early,
+    the vitals deadlines arrive, and the victims nobody reached die. That is the
+    §4.7 comparison in the unit the scenario is about, and it needs no
+    arithmetic from the viewer.
+
+    It is also a number that came from the event log rather than the simulator
+    only after the merge order was fixed, so this guards both.
+    """
+    mission.tick_once()
+    mission.record_run()
+
+    recorded = mission.last_runs[mission.mode]
+    for field in ("victims_lost", "victims_stabilized", "victims_total", "finished"):
+        assert field in recorded, f"the comparison panel cannot render without {field}"
+    assert isinstance(recorded["victims_lost"], int)
