@@ -12,10 +12,11 @@ claiming under thread contention and unblock-only-when-all-dependencies-done.
 from __future__ import annotations
 
 import math
+import random
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fleetmem.types import (
     BLOCKED,
@@ -35,6 +36,18 @@ LEASE_SECONDS = 15  # mirrors fleetmem.client (§4.4)
 
 
 class FakeFleetMem:
+    # Row ids are drawn from a per-instance seeded generator rather than
+    # `uuid4()`. The cluster uses `gen_random_uuid()` and always will; the fake
+    # is a test double, and a test double that produces different ids on every
+    # run makes X2's condition — byte-identical event logs for one seed —
+    # impossible to meet even when the fleet behaved identically. Two runs of
+    # the same program now produce the same ids.
+    #
+    # The generator is seeded from a class-level instance counter, not a
+    # constant, so two stores alive at once (compare_modes runs two, the X1
+    # ablation runs one per robot) never hand out the same id.
+    _instances = 0
+
     def __init__(self, dsn: str | None = None):
         self._lock = threading.Lock()  # stands in for serializable isolation
         self._obs: dict[UUID, dict[str, Any]] = {}
@@ -43,6 +56,21 @@ class FakeFleetMem:
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
         self._victims: dict[UUID, dict[str, Any]] = {}
+        FakeFleetMem._instances += 1
+        self._id_rng = random.Random(FakeFleetMem._instances)
+
+    @classmethod
+    def reset_ids(cls) -> None:
+        """Restart id allocation, for a test that wants two runs to match.
+
+        A process comparing two runs has to begin each from the same point, or
+        the second run's stores are numbered after the first's and every id
+        differs for that reason alone.
+        """
+        cls._instances = 0
+
+    def _new_id(self) -> UUID:
+        return UUID(int=self._id_rng.getrandbits(128))
 
     def close(self) -> None:
         pass
@@ -68,7 +96,7 @@ class FakeFleetMem:
                 row["observed_at"] = _now()
                 return match.belief_id
 
-            obs_id = uuid4()
+            obs_id = self._new_id()
             self._obs[obs_id] = {
                 "id": obs_id,
                 "mission_id": mission_id,
@@ -197,7 +225,7 @@ class FakeFleetMem:
                     return existing["id"], []
                 return existing["id"], [*deliver["depends_on"], deliver["id"]]
 
-            victim_id = uuid4()
+            victim_id = self._new_id()
             self._victims[victim_id] = {
                 "id": victim_id,
                 "mission_id": mission_id,
@@ -246,7 +274,7 @@ class FakeFleetMem:
         depends_on: Sequence[UUID] = (),
     ) -> UUID:
         """Caller must already hold `self._lock`."""
-        task_id = uuid4()
+        task_id = self._new_id()
         deps = list(depends_on)
         unknown = [d for d in deps if d not in self._tasks]
         if unknown:
@@ -419,7 +447,7 @@ class FakeFleetMem:
         based_on: Sequence[UUID] = (),
     ) -> UUID:
         with self._lock:
-            plan_id = uuid4()
+            plan_id = self._new_id()
             self._plans.append(
                 {
                     "id": plan_id,

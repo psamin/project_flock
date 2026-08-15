@@ -21,12 +21,15 @@ from world.map_format import load_map
 MAP = Path(__file__).resolve().parent.parent / "colony" / "world" / "maps" / "aftershock.json"
 
 
-def event_log(seed: int, *, coordinated: bool = True) -> list[tuple]:
+def event_log(seed: int, *, coordinated: bool = True) -> list[tuple]:  # noqa: D401
     """The full ordered event log for one run, normalized for comparison.
 
     `at` timestamps and row ids are wall-clock/UUID and would differ between any
     two runs; everything else is the behavioural trace.
     """
+    # Both runs must start id allocation from the same point, or the second is
+    # numbered after the first and every id differs for that reason alone.
+    FakeFleetMem.reset_ids()
     run = run_mission(
         load_map(MAP),
         FakeFleetMem(),

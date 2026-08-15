@@ -10,6 +10,7 @@ Deterministic: each scenario is seeded, so a failure is reproducible from its
 parameters alone.
 """
 
+import json
 import random
 import uuid
 
@@ -403,3 +404,43 @@ def test_the_fleet_explores_the_whole_map():
     reported 116% by counting revealed walls against a wall-free denominator."""
     world, _, _ = _aftershock_mission()
     assert 0.9 <= world.metrics()["coverage"] <= 1.0
+
+
+def test_one_seed_produces_one_mission_byte_for_byte():
+    """X2: same seed, two runs, identical event logs.
+
+    Two defects made this fail. `scout.py` broke ties between equidistant
+    sectors on `str(task.id)` — a random UUID — so the same seed picked a
+    different sector on a rerun. And the fake minted row ids with `uuid4()`, so
+    even an identical mission serialised differently every time.
+
+    Without this, "run it again" in front of a judge is a live grenade, and the
+    confidence intervals in the deck are measuring the harness rather than the
+    fleet.
+    """
+    from bedrock.adapter import REPLAY
+    from sim.mission import run_mission
+    from world.map_format import load_map
+
+    from tests.test_map import MAP_PATH
+
+    def once() -> list[tuple]:
+        FakeFleetMem.reset_ids()
+        run = run_mission(
+            load_map(MAP_PATH),
+            FakeFleetMem(),
+            coordinated=True,
+            seed=3,
+            embedder=BedrockAdapter(mode=REPLAY),
+        )
+        return [
+            (e["actor"], e["verb"], json.dumps(e["detail"], sort_keys=True, default=str))
+            for e in run.mem.events(run.mission_id)
+        ]
+
+    first, second = once(), once()
+    assert first, "a mission that logs nothing proves nothing"
+    assert first == second, (
+        "same seed, different event log — determinism regressed; check for a "
+        "sort keyed on a row id or an unseeded RNG"
+    )
