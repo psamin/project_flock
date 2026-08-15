@@ -219,3 +219,24 @@ def test_an_unknown_mission_answers_empty_rather_than_erroring(db_client):
     assert "error" not in body, body
     assert body["rows"] == []
     assert "nothing is claimed" in body["summary"]
+
+
+def test_the_memory_rail_counts_every_memory_type(monkeypatch):
+    """§3.6: the data layer has to be visible, and honestly.
+
+    Without a cluster the rail says so rather than reporting zeros, because
+    "0 rows" and "no database here" mean very different things to anyone
+    watching — and the second one is exactly what the audit found the demo
+    was silently doing.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from fastapi.testclient import TestClient
+
+    from sim import server
+
+    server.mission = server.Mission()
+    with TestClient(server.app) as client:
+        body = client.get("/api/memory").json()
+
+    assert body["available"] is False, "the fake has no SQL to count"
+    assert body["memory"] == "fake"

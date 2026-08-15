@@ -453,6 +453,43 @@ function updateHud(metrics) {
   );
 }
 
+/** §3.6: put the memory on screen.
+ *
+ * The data layer is the thesis and it was the one part of the demo with nothing
+ * to look at — a viewer saw robots moving and had to take on faith that any of
+ * it went through a database. This shows live row counts grouped by the four
+ * memory types the schema is organised around, so "the fleet is writing to
+ * CockroachDB right now" is watchable rather than asserted.
+ *
+ * It also shows the empty tables honestly. `hazards 0` and `mission_memories 0`
+ * are real — nothing writes to either — and that is better on screen than
+ * discovered.
+ */
+async function refreshMemoryRail() {
+  const box = document.getElementById("memory-rail");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/memory")).json();
+    if (!data.available) {
+      box.textContent = `fleet memory: ${data.memory} — no cluster, counts unavailable`;
+      return;
+    }
+    const groups = Object.entries(data.counts)
+      .map(([group, tables]) => {
+        const cells = Object.entries(tables)
+          .map(([t, n]) => `<span class="${n ? "" : "zero"}">${t} <b>${n}</b></span>`)
+          .join(" ");
+        return `<span class="grp"><em>${group}</em> ${cells}</span>`;
+      })
+      .join("");
+    box.innerHTML =
+      `<span class="grp"><em>cockroachdb</em> <b>${data.total}</b> rows</span>` +
+      groups;
+  } catch {
+    /* the rail is decoration; never let it break the render loop */
+  }
+}
+
 /** §4.7's one number the video ends on, once both modes have run. */
 async function refreshComparison() {
   try {
@@ -592,6 +629,7 @@ function connect() {
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
+        refreshMemoryRail();
       }
       // A diff can arrive before the snapshot: the server registers a viewer
       // before sending it, deliberately, so no frame is skipped. Without a

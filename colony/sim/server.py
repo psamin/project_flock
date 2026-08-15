@@ -509,6 +509,60 @@ async def console_catalog() -> dict[str, Any]:
     }
 
 
+@app.get("/api/memory")
+async def memory_rail() -> dict[str, Any]:
+    """Row counts per memory table, for this mission (§3.6, §4.0).
+
+    The data layer is the thesis and it is the one part of the demo with nothing
+    on screen: a judge watching sees robots moving and has to take on faith that
+    any of it is going through a database. This is the cheapest possible answer —
+    live counts, grouped by the four memory types the schema is organised around,
+    so "the fleet is writing to CockroachDB right now" is something you can watch
+    rather than something you are told.
+
+    Read-only, and it goes through the same `ReadOnlyReader` the console uses, so
+    it inherits the `commander` grant rather than opening a second write-capable
+    path for the sake of a HUD.
+    """
+    if not mission.console_available:
+        return {"available": False, "memory": mission.memory_kind}
+
+    # Grouped as §4.0 groups them. `mission_memories` is cross-mission by
+    # definition, so it is counted whole rather than scoped to this run.
+    scoped = {
+        "working": ("tasks", "victims", "hazards"),
+        "episodic": ("observations",),
+        "provenance": ("plans", "events"),
+    }
+    counts: dict[str, dict[str, int]] = {}
+    try:
+        reader = mission.reader()
+        for group, tables in scoped.items():
+            counts[group] = {
+                table: reader.read(
+                    f"SELECT count(*) AS n FROM {table} WHERE mission_id = %s",
+                    (mission.mission_id,),
+                )[0]["n"]
+                for table in tables
+            }
+        counts["semantic"] = {
+            "mission_memories": reader.read(
+                "SELECT count(*) AS n FROM mission_memories", ()
+            )[0]["n"]
+        }
+    except psycopg.Error as exc:
+        return {"available": False, "memory": mission.memory_kind, "error": str(exc)}
+
+    return {
+        "available": True,
+        "memory": mission.memory_kind,
+        "mission_id": str(mission.mission_id),
+        "tick": mission.world.tick,
+        "counts": counts,
+        "total": sum(n for group in counts.values() for n in group.values()),
+    }
+
+
 @app.post("/api/console/ask")
 async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
     """Answer one canned question from live fleet memory, read-only.

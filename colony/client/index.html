@@ -45,6 +45,16 @@
     #legend .sw.live { background: #6b6480; }
     #legend .sw.stale { background: rgba(107, 100, 128, 0.32); }
     #legend .sw.unseen { background: #0e0d12; }
+    /* §3.6: the data layer, on screen. A zero renders dimmer rather than being
+       hidden — hazards and mission_memories genuinely have no writer, and that
+       is worth seeing rather than papering over. */
+    #memory-rail { display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+                   color: #8f8a9c; font-size: 11px; padding: 3px 0; }
+    #memory-rail .grp { display: flex; gap: 7px; align-items: center; }
+    #memory-rail em { color: #7fa8c9; font-style: normal; text-transform: uppercase;
+                      letter-spacing: 0.06em; font-size: 10px; }
+    #memory-rail b { color: #e8e3d9; font-weight: 600; }
+    #memory-rail .zero b { color: #6b6480; }
     #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
     #comparison b { color: #f2c14e; }
 
@@ -161,6 +171,7 @@
     <span class="key" title="Somebody saw this and wrote it to shared memory. Nobody is looking at it now — the fleet only knows it because it remembers. This is the state the whole project exists to produce."><i class="sw stale"></i><b>remembered</b></span>
     <span class="key" title="Nobody has ever seen this tile."><i class="sw unseen"></i>unknown</span>
   </div>
+  <div id="memory-rail"></div>
   <div id="comparison"></div>
 
   <div id="layout">
