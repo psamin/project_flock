@@ -747,6 +747,46 @@ buildConsole();
 setInterval(refreshComparison, 4000);
 
 document.getElementById("toggle").addEventListener("click", toggleMode);
+
+/** §3.6's first failure beat: kill a robot, watch its work get taken over.
+ *
+ * AUDIT B measured zero contended claims across a whole normal run, so the
+ * lease-takeover branch — the entire "why a database and not a queue" argument
+ * — never fires on its own. This is the button that fires it.
+ *
+ * The answer names the orphaned task so a viewer knows what to watch, and says
+ * how long the lease has left, because the fifteen seconds of nothing happening
+ * is the part that needs narrating.
+ */
+document.getElementById("kill-robot").addEventListener("click", async () => {
+  const button = document.getElementById("kill-robot");
+  button.disabled = true;
+  try {
+    const res = await (
+      await fetch("/api/failure/kill-robot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      })
+    ).json();
+    const box = document.getElementById("comparison");
+    if (res.error) {
+      box.textContent = res.error;
+    } else {
+      const orphan = res.orphaned_tasks?.[0];
+      box.innerHTML =
+        `<b>${res.killed} is down</b> at tick ${res.tick}` +
+        (orphan
+          ? ` — holding ${orphan.kind} at ${orphan.target.join(",")}. ` +
+            `Its lease lapses in ${res.lease_seconds}s, then anyone can claim it.`
+          : " — it was not holding any work.");
+    }
+  } catch {
+    /* the button is a demo aid; never let it break the render loop */
+  } finally {
+    button.disabled = false;
+  }
+});
 document.getElementById("panel-close").addEventListener("click", closePanel);
 window.addEventListener("keydown", (e) => {
   if (e.key === "s") showSectors = !showSectors;   // FR-16's grid, on demand

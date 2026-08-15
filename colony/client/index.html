@@ -135,6 +135,7 @@
     <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. The seed is what makes a run reproducible — same seed, same mission."></span>
     <span id="mode-badge" class="on">SHARED MEMORY</span>
     <button id="toggle">coordination: ON</button>
+    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
   </header>
 
   <!--

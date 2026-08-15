@@ -27,6 +27,7 @@ from agents.planning import Planner
 from bedrock.adapter import adapter_from_env
 from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
+from fleetmem.client import LEASE_SECONDS
 from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
 from sim.mission import build_fleet
@@ -142,6 +143,10 @@ class Mission:
         # Separate from `self.mem` on purpose: the sim writes and the console
         # does not, so they are different identities against the same cluster.
         self._reader: ReadOnlyReader | None = None
+        # Robots killed on cue (§3.6). They stay in `agents` — a killed robot is
+        # not gone, it has stopped answering, and the difference is the point:
+        # its rows are still in fleet memory and its lease is still ticking down.
+        self.disabled: set[str] = set()
         self._build(coordinated=True)
 
     # --- the commander console (FR-10) ------------------------------------
@@ -178,6 +183,8 @@ class Mission:
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
+        # A restart is a new mission; nobody is dead in it yet.
+        self.disabled = set()
         # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
         # has no mission_id — see LostWatch. Live only: `run_mission` is the
         # seeded, deterministic path §3.5 records the golden run from, and
@@ -252,6 +259,63 @@ class Mission:
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
 
+    def _held_by(self, robot_id: str) -> Any:
+        """The task this robot is working, or None.
+
+        Workers hold `task`; scouts hold `sector_task`. Neither is visible in
+        `open_tasks` while its lease is live, which is the whole point of the
+        lease — so the agent is the only place to ask.
+        """
+        agent = self.agents.get(robot_id)
+        return getattr(agent, "task", None) or getattr(agent, "sector_task", None)
+
+    def kill_robot(self, robot_id: str) -> dict[str, Any]:
+        """Stop a robot dead, mid-task, on cue (§3.6, FR-5).
+
+        Nothing is released and nothing is reassigned. The robot simply stops
+        stepping, which stops its heartbeat, which stops its lease renewals —
+        and 15 seconds later `claim_task`'s expiry predicate makes its work
+        claimable by anyone. Recovery is the absence of a mechanism, and this
+        button is the only honest way to show that.
+
+        AUDIT B measured 0 contended claims in 31 across a normal run (B-5), so
+        the takeover branch — the whole "why a database and not a queue"
+        argument — never executes on its own. This is what makes it execute in
+        front of someone.
+
+        Deliberately not `release_task`: releasing would be a second recovery
+        path racing the lease, and the claim this demonstrates is that there is
+        no second path.
+        """
+        if robot_id not in self.agents:
+            return {"error": f"no robot {robot_id!r} in this mission"}
+        if robot_id in self.disabled:
+            return {"error": f"{robot_id} is already down"}
+
+        self.disabled.add(robot_id)
+        # Asked of the agent, not of `open_tasks`. `open_tasks` returns what is
+        # *claimable* — open, or claimed on a lapsed lease — so a task being
+        # actively held on a live lease is deliberately absent from it. Looking
+        # there for the robot's current work finds nothing, every time.
+        held = [t for t in (self._held_by(robot_id),) if t is not None]
+        self.mem.log_event(
+            self.mission_id,
+            robot_id,
+            "robot_killed",
+            {"held_tasks": [str(t.id) for t in held], "tick": self.world.tick},
+        )
+        return {
+            "killed": robot_id,
+            "tick": self.world.tick,
+            # What is now sitting on an un-renewed lease, so a viewer knows what
+            # to watch for someone else to pick up.
+            "orphaned_tasks": [
+                {"id": str(t.id), "kind": t.kind, "target": list(t.target)}
+                for t in held
+            ],
+            "lease_seconds": LEASE_SECONDS,
+        }
+
     def focus_point(self) -> tuple[int, int] | None:
         """Somewhere worth asking "what do we know about here?" about.
 
@@ -308,7 +372,9 @@ class Mission:
         """One pass of the pipeline. Split out from the loop so tests can drive
         the mission without asyncio or wall-clock time."""
         actions = {
-            robot_id: agent.step(self.world) for robot_id, agent in self.agents.items()
+            robot_id: agent.step(self.world)
+            for robot_id, agent in self.agents.items()
+            if robot_id not in self.disabled
         }
         frame = self.world.step(actions)
         for event in frame.events:
@@ -507,6 +573,29 @@ async def console_catalog() -> dict[str, Any]:
         "mission_id": str(mission.mission_id),
         "questions": console_questions.catalog(),
     }
+
+
+@app.post("/api/failure/kill-robot")
+async def kill_robot(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Stop one robot, on cue (§3.6's first failure beat, FR-5).
+
+    With no `robot` named, kills whichever robot currently holds work — the only
+    choice that produces the beat worth showing, since killing an idle robot
+    orphans nothing and looks like nothing happened.
+    """
+    body = body or {}
+    robot_id = body.get("robot")
+    if robot_id is None:
+        # Whoever is actually mid-job. Asked of the agents, because a task on a
+        # live lease is deliberately absent from `open_tasks`.
+        live = [r for r in mission.agents if r not in mission.disabled]
+        robot_id = next(
+            (r for r in live if mission._held_by(r) is not None),
+            next(iter(live), None),
+        )
+    if robot_id is None:
+        return {"error": "every robot in this mission is already down"}
+    return mission.kill_robot(robot_id)
 
 
 @app.get("/api/memory")

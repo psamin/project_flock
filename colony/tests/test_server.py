@@ -362,3 +362,55 @@ def test_the_comparison_payload_carries_lives_lost(mission):
     for field in ("victims_lost", "victims_stabilized", "victims_total", "finished"):
         assert field in recorded, f"the comparison panel cannot render without {field}"
     assert isinstance(recorded["victims_lost"], int)
+
+
+def test_killing_a_robot_leaves_its_work_on_an_expiring_lease(mission):
+    """FR-5, and §3.6's first failure beat.
+
+    A killed robot is not removed and its task is not released. It simply stops
+    stepping, which stops its heartbeat, which stops its lease renewals — and
+    the claiming predicate does the rest 15 seconds later. Recovery here is the
+    *absence* of a mechanism, so the test asserts the absence: nothing was
+    reassigned, nothing was released, the row still says the dead robot owns it.
+
+    AUDIT B measured 0 contended claims in 31 across a normal run, so this path
+    never executes on its own. This is what makes it executable on demand.
+    """
+    # Long enough for a scout to find someone and a worker to claim the job.
+    # A skip here would prove nothing, so the test fails rather than skips if
+    # the fleet never claims: that would itself be a regression worth seeing.
+    # Asked of the agents, not of `open_tasks`. `open_tasks` returns what is
+    # *claimable* — open, or claimed on a lapsed lease — so a task held on a
+    # live lease is deliberately absent from it, and looking there for the
+    # current holder finds nothing every time. That mistake was in the endpoint
+    # too until this test caught it.
+    holders: list = []
+    for _ in range(200):
+        mission.tick_once()
+        holders = [r for r in mission.agents if mission._held_by(r) is not None]
+        if holders:
+            break
+    assert holders, "no robot claimed any work in 200 ticks"
+    victim_robot = holders[0]
+
+    result = mission.kill_robot(victim_robot)
+    assert result["killed"] == victim_robot
+    assert result["lease_seconds"] > 0
+
+    # Still a member of the fleet: it stopped answering, it did not vanish.
+    assert victim_robot in mission.agents
+    assert victim_robot in mission.disabled
+
+    # And crucially, nothing tidied up after it: the agent still holds its task
+    # and no release was issued on its behalf. Recovery is the lease lapsing,
+    # and nothing else.
+    assert mission._held_by(victim_robot) is not None, (
+        "the task was released — that is a second recovery path racing the lease"
+    )
+
+    # It stops acting from the next tick on.
+    before = mission.world.robots[victim_robot].x, mission.world.robots[victim_robot].y
+    for _ in range(5):
+        mission.tick_once()
+    after = mission.world.robots[victim_robot].x, mission.world.robots[victim_robot].y
+    assert before == after, "a killed robot kept moving"
