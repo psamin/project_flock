@@ -81,6 +81,26 @@ CLUSTER_RADIUS = 4
 # belief reads (~1s = 4 ticks at 4 Hz) rather than every tick.
 STAGING_REFRESH_TICKS = 4
 
+# How often the robot writes its status row. `robots.heartbeat_at` feeds one
+# reader — the lost scan (§5.1 lane 4), which itself runs every 4 ticks against
+# a 10s staleness window — so a write every tick told it nothing it did not
+# already know, and against a Cloud cluster it was the most expensive statement
+# in the tick. Once a second still leaves ten inside the window.
+HEARTBEAT_EVERY_TICKS = 4  # 1s at 4 Hz
+
+# How often it renews the leases on the tasks it holds. fleetmem states the
+# lease contract as a 15s TTL renewed every 5s, so three renewals can be missed
+# before one lapses (§4.4); renewing every tick was 20x the design cadence.
+RENEW_EVERY_TICKS = 20  # 5s at 4 Hz
+
+# `open_tasks` is deliberately NOT cached, though it is the next most expensive
+# read in the tick. Caching it for 4 ticks measured a full second of delay
+# between a scout creating a task and a worker seeing it, and the coordinated
+# run stabilized fewer victims than the baseline over the same 40 ticks
+# (tests/test_metrics.py::test_the_two_modes_do_not_share_fleet_memory) — the
+# claim race is safe to read stale, but the *arrival* of new work is not, and
+# that latency is the coordination story the ON/OFF toggle exists to show.
+
 
 @dataclass
 class Worker:
@@ -127,6 +147,10 @@ class Worker:
     _staging: tuple[int, tuple[int, int] | None] | None = field(default=None)
     # (tick, map) — the shared hazard picture routing is done against.
     _belief_cache: tuple[int, Any] | None = field(default=None)
+    # Ticks the status write and the lease renewal last went out. None means
+    # "never", so both fire on the robot's first tick.
+    _heartbeat_at: int | None = field(default=None)
+    _renew_at: int | None = field(default=None)
 
     # --- the loop ---------------------------------------------------------
 
@@ -134,13 +158,12 @@ class Worker:
         robot = world.robots[self.robot_id]
         here = (robot.x, robot.y)
 
-        # Heartbeat renews the lease on whatever this robot holds (§4.4). Sent
-        # every tick: a robot that stops heart-beating mid-clear has its work
-        # taken over, which is exactly what we want when it is genuinely dead
-        # and a disaster when it is merely busy.
-        self.mem.heartbeat(
-            self.robot_id, pos=here, battery=robot.battery, status=robot.status
-        )
+        # Status and lease renewal, each on its own cadence (§4.3, §4.4). A
+        # robot that stops heart-beating mid-clear has its work taken over,
+        # which is what we want when it is genuinely dead and a disaster when
+        # it is merely busy — so what matters is staying comfortably inside the
+        # 10s staleness window and the 15s lease, not writing every tick.
+        self._report_status(world, robot, here)
 
         self.last_tick = world.tick
         if robot.work_left > 0:
@@ -175,6 +198,39 @@ class Worker:
             return Action.act(TASK_VERB[self.task.kind], target)
 
         return self._advance(world, here, target)
+
+    def _report_status(
+        self, world: World, robot: Any, here: tuple[int, int]
+    ) -> None:
+        """Write the status row and renew leases, each on its own cadence.
+
+        Two statements, two round trips, two different deadlines — so they are
+        asked for separately. The renewal cadence is the wider of the two, and
+        the branches do not assume one is a multiple of the other: a renewal
+        that comes due on a tick with no status write still goes out alone.
+        """
+        tick = world.tick
+        beat_due = (
+            self._heartbeat_at is None
+            or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
+        )
+        renew_due = (
+            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
+        )
+        if beat_due:
+            self.mem.heartbeat(
+                self.robot_id,
+                pos=here,
+                battery=robot.battery,
+                status=robot.status,
+                renew=renew_due,
+            )
+            self._heartbeat_at = tick
+            if renew_due:
+                self._renew_at = tick
+        elif renew_due:
+            self.mem.renew_leases(self.robot_id)
+            self._renew_at = tick
 
     # --- battery and kits (§3.3) ------------------------------------------
 

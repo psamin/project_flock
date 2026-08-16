@@ -433,12 +433,19 @@ class CockroachFleetMem:
         battery: int | None = None,
         status: str | None = None,
         lease_seconds: int = LEASE_SECONDS,
+        renew: bool = True,
     ) -> None:
         """Report status **and renew every lease this robot holds** (§4.3, §4.4).
 
         The renewal is the load-bearing half. `robots.heartbeat_at` now exists
         only so the orchestrator can mark a robot `lost` for the UI and event
         log; nothing reads it to recover work.
+
+        The two are separate statements — two round trips — and they are wanted
+        on different cadences: the status write feeds a 10s staleness window and
+        the renewal a 15s lease. `renew=False` sends the status write alone, so
+        a caller on the faster cadence does not pay for the slower one. Against
+        a Cloud cluster at ~40ms RTT the pair was over half the tick budget.
         """
         self.conn.execute(
             "UPDATE robots SET heartbeat_at = now(),"
@@ -453,7 +460,8 @@ class CockroachFleetMem:
                 robot_id,
             ),
         )
-        self.renew_leases(robot_id, lease_seconds)
+        if renew:
+            self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -528,9 +536,29 @@ class CockroachFleetMem:
     ) -> None:
         """Append to the mission log. Every §4.7 metric is derived from these, so
         log the transition, not the intention."""
+        self.log_events(mission_id, [(actor, verb, detail)])
+
+    def log_events(
+        self,
+        mission_id: UUID,
+        rows: Sequence[tuple[str, str, dict[str, Any] | None]],
+    ) -> None:
+        """Append many events in one round trip.
+
+        A tick emits several events and they were inserted one statement at a
+        time, which on a Cloud cluster is several times the latency of the
+        insert itself. The rows are independent appends to the same log, so
+        nothing about the order or the content changes by sending them together.
+        """
+        if not rows:
+            return
+        values = ", ".join(["(%s, %s, %s, %s)"] * len(rows))
+        params: list[Any] = []
+        for actor, verb, detail in rows:
+            params += [mission_id, actor, verb, json.dumps(detail or {})]
         self.conn.execute(
-            "INSERT INTO events (mission_id, actor, verb, detail) VALUES (%s, %s, %s, %s)",
-            (mission_id, actor, verb, json.dumps(detail or {})),
+            f"INSERT INTO events (mission_id, actor, verb, detail) VALUES {values}",
+            params,
         )
 
     def events(self, mission_id: UUID) -> list[dict[str, Any]]:

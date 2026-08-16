@@ -21,6 +21,9 @@ SDK_METHODS = [
     "heartbeat",
     "log_plan",
     "log_event",
+    # the batched form: a tick's events in one round trip, which is what the
+    # sim loop uses. log_event() is the single-row convenience on top of it.
+    "log_events",
     # lease mechanics (§4.4) — recovery lives here, so the fake must match
     "renew_leases",
     "release_task",

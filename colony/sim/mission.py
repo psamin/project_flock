@@ -130,8 +130,9 @@ def run_mission(
     coverage_at_500 = 0.0
     for _ in range(limit):
         frame = world.step({a.robot_id: a.step(world) for a in agents})
-        for event in frame.events:
-            mem.log_event(mission_id, event["actor"], event["verb"], event["detail"])
+        mem.log_events(
+            mission_id, [(e["actor"], e["verb"], e["detail"]) for e in frame.events]
+        )
         if world.tick == COVERAGE_AT_TICK:
             coverage_at_500 = world.coverage()
         if world.finished:
