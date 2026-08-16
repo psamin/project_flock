@@ -535,9 +535,13 @@ mission = Mission()
 async def lifespan(_: FastAPI):
     """Start the tick loop with the app and stop it cleanly on shutdown."""
     task = asyncio.create_task(mission.run())
+    # "N robots", not "N scouts": the fleet is 2 scouts, a lifter and a medic,
+    # and the heterogeneity is the premise. Also says what was recalled, so the
+    # cold run and the remembering run are distinguishable from the log alone.
     print(
         f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-        f"({mission.memory_kind} memory, {len(mission.agents)} scouts)"
+        f"({mission.memory_kind} memory, {len(mission.agents)} robots, "
+        f"{len(mission.recalled)} recalled)"
     )
     try:
         yield
