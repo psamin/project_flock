@@ -59,7 +59,19 @@ def _make_memory():
     """CockroachDB when it is reachable, the in-memory fake otherwise.
 
     The walking skeleton has to run on a laptop with no cluster — if the sim
-    refused to start without one, nobody could work on the renderer.
+    refused to start without one, nobody could work on the renderer. So an
+    unreachable cluster degrades to the fake.
+
+    **But only when nobody named a cluster.** Setting `COLONY_DSN` is a
+    statement that fleet memory lives at a specific address, and falling back
+    from that is the most expensive failure this file can have: the mission
+    runs, the UI looks perfect, and every claim the demo makes is quietly
+    false — no serializable claiming, no vector index, no reconcile gate, and
+    nothing persisted for the console or the next mission to read. A typo in a
+    Cloud DSN would look exactly like a working demo. So when `COLONY_DSN` is
+    set, a connection failure is fatal and says why.
+
+    `COLONY_MEMORY=fake` remains the way to ask for the fake on purpose.
     """
     if os.environ.get("COLONY_MEMORY") == "fake":
         from fleetmem.fake import FakeFleetMem
@@ -70,6 +82,14 @@ def _make_memory():
 
         return CockroachFleetMem(), "cockroach"
     except Exception as exc:  # noqa: BLE001 - any failure means no cluster
+        if os.environ.get("COLONY_DSN"):
+            raise RuntimeError(
+                f"COLONY_DSN is set but the cluster is unreachable "
+                f"({type(exc).__name__}: {exc}).\n"
+                "Refusing to start on in-memory memory: the mission would run and "
+                "look healthy while writing nothing to CockroachDB.\n"
+                "Fix the DSN, or set COLONY_MEMORY=fake to ask for the fake."
+            ) from exc
         from fleetmem.fake import FakeFleetMem
 
         print(
