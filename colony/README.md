@@ -46,6 +46,8 @@ so a broken cluster can't masquerade as a green run.
 | [`sim/protocol.py`](sim/protocol.py) | Action API + websocket state frame (contracts 2 and 3) |
 | [`sim/world.py`](sim/world.py) | Authoritative world state and the tick pipeline (§4.8) |
 | [`sim/server.py`](sim/server.py) | 4 Hz tick loop, websocket broadcast, serves the client |
+| [`sim/recall.py`](sim/recall.py) | Semantic memory: summarize a finished mission, recall it in the next (§4.0) |
+| [`sim/seed_memory.py`](sim/seed_memory.py) | Runs the cold mission headless so the demo is genuinely the second |
 | [`agents/scout.py`](agents/scout.py) | Scout loop: sense → sync → think → act → report |
 | [`agents/worker.py`](agents/worker.py) | Lifter and medic: claim, path, work, complete |
 | [`agents/planning.py`](agents/planning.py) | Bedrock at plan boundaries: role cards, digest, rate cap (§4.3, §3.5) |
@@ -54,7 +56,7 @@ so a broken cluster can't masquerade as a green run.
 | [`client/app.js`](client/app.js) | Renderer: layers per §4.8, fog, bubbles, ticker, scoreboard |
 | [`client/atlas.js`](client/atlas.js) | The sprite sheet, drawn in code — no downloads, no licences |
 | [`orchestrator/lost.py`](orchestrator/lost.py) | The heartbeat scan, and why it stays off the recovery path |
-| [`console/questions.py`](console/questions.py) | The commander console's five canned questions (FR-10) |
+| [`console/questions.py`](console/questions.py) | The commander console's six canned questions (FR-10) |
 | [`console/reader.py`](console/reader.py) | The read-only execution path the console cannot write through |
 | [`fleetmem/changefeed.py`](fleetmem/changefeed.py) | P1 spike: waking on unblocks instead of polling (§4.4) |
 
@@ -98,14 +100,14 @@ Canvas 2D with no CDN and no WebGL requirement, and the sprites are drawn in cod
 | click a robot | its latest decisions — rationale, trigger, whether Bedrock or rules chose, and the memories behind it (FR-17) |
 | `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
 | `S` | the exploration sector grid (FR-16) |
-
-| the console panel | five canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
+| the console panel | six canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
+| the scoreboard | `memory` — earlier missions on this map recalled through the vector index — and `bedrock` mode plus live call count |
 
 The endpoints behind it — everything except the restart is a read:
 
 ```
 GET  /api/plans/{robot_id}?limit=5   rationale + trigger + source + resolved based_on
-GET  /api/console/questions          the five canned questions and which memory each reads
+GET  /api/console/questions          the six canned questions and which memory each reads
 POST /api/console/ask                {"question": "why_did_robot", "robot_id": "s1"}
 POST /api/mission/restart            {"coordinated": false}
 GET  /api/runs                       final numbers per mode
@@ -175,6 +177,37 @@ log_plan(mission_id, robot_id, trigger, chosen, rationale, based_on=()) -> UUID
 plans_for(mission_id, robot_id=None) -> list[Plan]
 ```
 
+## Semantic memory — the fleet remembers the map
+
+When a coordinated mission finishes, what it learned is summarized from *belief
+rows* (never from simulator state — the fleet may only record what it actually
+found), embedded with Titan V2, and written to `mission_memories`. When a mission
+starts on the same map, those rows are found by cosine search over
+`mm_embedding_idx` and the sectors earlier runs found victims in are seeded at a
+higher priority, so they get swept first.
+
+```bash
+make seed-memory                     # run the cold mission headless, needs COLONY_DSN
+COLONY_RECALL=0 make sim             # kill switch: run as if nothing was ever learned
+```
+
+Measured on Aftershock, same seed both ways: **312 ticks cold, 291 ticks with one
+memory recalled.** Run it both ways before scripting a demo around it — the prior
+is only as sharp as the map, and on a map where victims are spread across half
+the sectors "sweep the hot ones first" buys less than it sounds like.
+
+Three things this deliberately does **not** do:
+
+- **It does not tell the fleet where victims are.** It biases search *order*.
+  Every victim is still found by a scout that flies over it, which is checkable:
+  `victims_located` is counted off belief rows, so a fleet that knew at tick 0
+  would show it on the scoreboard.
+- **It does not run in the baseline.** An uncoordinated run neither reads nor
+  writes memories, or the ON/OFF comparison would be measuring its own history.
+- **It does not enter the prompt digest.** Recall shapes task priorities instead,
+  because `plans.based_on` is resolved against `observations` in two places and a
+  `mission_memories` id put there is silently dropped by both.
+
 ## AWS Bedrock
 
 Defaults to `replay` — deterministic, offline, no credentials. That keeps lanes unblocked
@@ -195,10 +228,16 @@ with no cassette entry, the planner declines and the robot uses the rules it alw
 had. `plans.chosen->>'source'` records which one decided, so "the LLM is driving this"
 is a SQL query rather than a claim.
 
-**Not yet done:** nobody has run a live Bedrock call. Titan V2 embedding width (512) and
-the request/response shapes are written to the documented API but are unverified against
-the real service. Whoever wires credentials first should run in `record` mode and commit
-the cassette — [`docs/setup-testing.md`](../docs/setup-testing.md) §3 has the exact steps.
+**Verified live (Aug 15–16, 2026):** Titan V2 at 512 dims and Claude Haiku both answer
+against the real service, and [`cassettes/golden-run.json`](cassettes/golden-run.json)
+holds the recorded responses. `bedrock_calls` on the scoreboard counts calls that
+actually reached AWS — cassette hits and the offline fallback do not increment it, so
+that number is the honest answer to "is the LLM really deciding".
+
+One caveat worth knowing before relying on similarity: the *offline* embedding
+(`_offline_embedding`, used in replay on a cassette miss) gives the same text the same
+vector but similar text an unrelated one. It exercises the merge path and it is not
+semantic. Anything claiming semantic similarity needs live or recorded Titan.
 
 ## Notes for whoever touches the schema
 
@@ -209,3 +248,17 @@ the cassette — [`docs/setup-testing.md`](../docs/setup-testing.md) §3 has the
   and prefix columns only engage on an exact-value constraint.
 - Don't batch large `VECTOR` inserts, and note `IMPORT INTO` is unsupported on tables
   carrying a vector index — relevant when seeding demo data.
+- `mission_memories` prefixes on `map_key`, **not** `mission_id`: its search crosses
+  missions by design. Same rule, opposite scope.
+- **Do not add a secondary b-tree index that covers a vector index's prefix.** One was
+  added on `(map_key, created_at DESC)` to serve the no-embedding recall path, and the
+  optimizer then preferred scanning it and top-k-sorting over probing the vector index —
+  a defensible choice at this row count, and the wrong one when the cosine search *is*
+  the capability. Verified by `EXPLAIN` both ways: with both indexes the plan names
+  `mm_map_recent_idx` and no `vector search` node appears. It is now dropped in the
+  migration block.
+- Both vector-index tests assert the **`EXPLAIN` plan**, not the results, because every
+  failure mode above returns perfectly plausible rows.
+- CockroachDB Cloud creates tables with `schema_locked = true`; migrations unlock and
+  relock around themselves. That statement must be sent on its own, which is why
+  `schema/apply.py` executes statement by statement rather than sending the file whole.

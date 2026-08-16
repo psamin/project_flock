@@ -18,7 +18,7 @@ rescuing people.
 | **Working** | `robots`, `tasks`, `victims`, `hazards` | what is true right now |
 | **Episodic** | `observations` (512-dim `VECTOR`) | what we experienced |
 | **Provenance** | `plans`, `events` | why we acted |
-| **Semantic** | `mission_memories` | what we learned across missions |
+| **Semantic** | `mission_memories` (512-dim `VECTOR`) | what we learned across missions |
 
 Read [`colony/schema/v1_1.sql`](colony/schema/v1_1.sql) first — it is commented
 as an argument, not as DDL.
@@ -69,7 +69,7 @@ rank open work and claim it themselves — dependency unblocking happens inside
 `complete_task`'s transaction, and recovery is lease-native. The only job left
 without another owner is telling the UI that a robot went quiet.
 
-## The three ideas worth reading the code for
+## The four ideas worth reading the code for
 
 **Ownership is a lease.** A claim stamps `lease_expires_at`; the owner renews it
 while it works; an expired lease is claimable by anyone *inside the same
@@ -92,6 +92,15 @@ rows that were in the prompt digest, so "why did robot X do that" is answered by
 a join rather than by a plausible story. Click any robot in the UI, or ask the
 commander console.
 
+**The fleet remembers the map between missions.** When a mission ends, what it
+learned is summarized, embedded, and written to `mission_memories`; when a new
+mission starts on the same map, that row is found by cosine search and the
+sectors earlier runs found victims in are swept first. Same map, same seed, same
+code — the only difference between run 1 and run 2 is that run 2 has been here
+before. Recall sets a prior on search *order* and nothing more: no victim is
+ever known before a scout flies over it, which is checkable, because the
+scoreboard counts located victims off belief rows.
+
 ## Repo map
 
 | Path | What it is |
@@ -103,16 +112,31 @@ commander console.
 | [`colony/sim/`](colony/sim/) | Authoritative world, 4 Hz tick server, websocket protocol |
 | [`colony/client/`](colony/client/) | Renderer, fog of war, thought bubbles, scoreboard |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
-| [`colony/console/`](colony/console/) | The commander console's five questions, read-only |
+| [`colony/console/`](colony/console/) | The commander console's six questions, read-only |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |
 | [`docs/`](docs/) | Setup, lane handoffs, the changefeed spike |
 | [`PRD.md`](PRD.md) | The specification everything above cites by section |
 
 ## Tools
 
-**CockroachDB** — serializable claiming, `VECTOR(512)` columns with a cosine
-index behind the reconcile gate, survival of a node kill, and the Managed MCP
-Server behind the commander console (read-only by grant, not merely by setting).
+**CockroachDB** — serializable claiming, survival of a node kill, and the Managed
+MCP Server behind the commander console (read-only by grant, not merely by
+setting).
+
+Distributed vector indexing carries weight in **two** places, which is worth
+separating because they pull in opposite directions:
+
+| | scope | index | what it answers |
+|---|---|---|---|
+| reconcile gate | *within* one mission | `obs_embedding_idx (mission_id, …)` | is this the victim we already know about? |
+| semantic recall | *across* missions | `mm_embedding_idx (map_key, …)` | what did we learn last time we ran this map? |
+
+Both are cosine (`vector_cosine_ops`, `<=>`), and in both the scope is the index
+*prefix* rather than a `WHERE` filter — a prefixed vector index is only used when
+the prefix is constrained to an exact value, and a filter that is not a prefix
+column is applied *after* the top-k. Get that wrong and the query still returns
+plausible rows. `tests/test_schema.py` and `tests/test_recall.py` assert the
+`EXPLAIN` plan, not the results, for exactly that reason.
 
 **AWS Bedrock** — Claude for planning at decision boundaries, Titan Text
 Embeddings V2 at 512 dims for observations. Rate-capped per §3.5, with rules as
