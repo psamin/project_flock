@@ -113,12 +113,22 @@ def build_fleet(
         # the priority ordering is unreachable by construction, not by flag.
         hot: list[str] = []
         if recall_enabled:
-            memories = recall_mod.recall(mem, embedder, world.map)
-            hot = recall_mod.hot_sectors(memories)
-            if recalled is not None:
-                recalled.extend(memories)
-            if memories:
-                _log_recall(mem, mission_id, world.map, memories, hot)
+            # Never allowed to stop a mission starting. Recall costs one Bedrock
+            # embed and one indexed read, and both are on the path between
+            # pressing "restart" and the first tick — so a throttled model or a
+            # network blip would otherwise mean no mission at all, trading a
+            # fleet that rescues nobody for a fleet that starts slightly worse
+            # informed. A mission that has forgotten still works; that is the
+            # whole point of the rules being the floor.
+            try:
+                memories = recall_mod.recall(mem, embedder, world.map)
+                hot = recall_mod.hot_sectors(memories)
+                if recalled is not None:
+                    recalled.extend(memories)
+                if memories:
+                    _log_recall(mem, mission_id, world.map, memories, hot)
+            except Exception as exc:  # noqa: BLE001 - a demo must not die here
+                print(f"[sim] could not recall earlier missions: {exc!r}")
         seed_sector_tasks(mem, mission_id, world.map, hot_sectors=hot)
 
     scouts = [r for r in world.robots.values() if r.role == "scout"]

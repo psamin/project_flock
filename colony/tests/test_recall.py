@@ -18,6 +18,7 @@ import pytest
 from agents.scout import seed_sector_tasks
 from bedrock.adapter import BedrockAdapter
 from sim import recall as recall_mod
+from sim.world import World
 from world.map_format import load_map
 
 from tests.conftest import needs_db
@@ -253,3 +254,26 @@ def test_semantic_recall_uses_the_vector_index(db):
         assert "mm_embedding_idx" in plan, plan
     finally:
         db.conn.execute("DELETE FROM mission_memories WHERE map_key = 'idxtest'")
+
+
+def test_a_broken_recall_does_not_stop_the_mission(mem, monkeypatch):
+    """Recall sits between "restart" and the first tick, and costs a Bedrock
+    call. A throttled model must not mean no mission — that trades a fleet that
+    starts slightly worse informed for a fleet that rescues nobody."""
+    from sim import mission as mission_mod
+
+    world_map = load_map(MAP)
+    world = World(world_map, seed=world_map.seed)
+
+    def explode(*a, **kw):
+        raise RuntimeError("bedrock is having a day")
+
+    monkeypatch.setattr(mission_mod.recall_mod, "recall", explode)
+    agents = mission_mod.build_fleet(
+        world, mem, uuid.uuid4(), coordinated=True, recall_enabled=True
+    )
+
+    assert agents, "the fleet must still be built"
+    # And the sectors are still seeded, just without a prior.
+    tasks = [t for t in mem.open_tasks(list(agents.values())[0].mission_id)]
+    assert any(t.kind.startswith("explore_sector:") for t in tasks)
