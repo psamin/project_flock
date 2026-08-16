@@ -281,7 +281,17 @@ class Mission:
             # reproduce with a SELECT.
             victims_located=len(self.mem.get_beliefs(self.mission_id, kind="victim")),
         )
-        self._metrics = {**computed.to_json(), "mode": self.mode}
+        self._metrics = {
+            **computed.to_json(),
+            "mode": self.mode,
+            # Semantic memory and Bedrock, on the scoreboard rather than only in
+            # /health. Both are claims the demo makes out loud — "the fleet has
+            # done this before", "the LLM is deciding" — and a claim nobody can
+            # see on screen is a claim a judge has to take on trust.
+            "recalled_memories": len(self.recalled),
+            "bedrock_mode": self.embedder.mode,
+            "bedrock_calls": self.embedder.calls,
+        }
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
 
@@ -352,9 +362,37 @@ class Mission:
             [(e["actor"], e["verb"], e["detail"]) for e in frame.events],
         )
         frame.lost = self._scan_for_lost(frame)
+        self._announce_recall(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
+
+    def _announce_recall(self, frame: Any) -> None:
+        """Put what the fleet remembered on the ticker, once, on tick 1.
+
+        Recall happens in `build_fleet`, before the first tick and before any
+        viewer is attached, so without this it is invisible: the mission simply
+        starts, and the fact that it started *knowing something* never reaches
+        the screen. `memory_recalled` is already in the event log — this is the
+        same append-to-frame treatment `_scan_for_lost` gives the lost edges,
+        for the same reason, and is likewise not re-logged.
+        """
+        if self.world.tick != 1 or not self.recalled:
+            return
+        top = self.recalled[0]
+        sectors = recall_mod.hot_sectors(self.recalled)
+        frame.events.append(
+            {
+                "tick": self.world.tick,
+                "actor": "fleet",
+                "verb": "memory_recalled",
+                "detail": {
+                    "memories": len(self.recalled),
+                    "distance": round(top.distance, 3),
+                    "sectors": sectors,
+                },
+            }
+        )
 
     def _scan_for_lost(self, frame: Any) -> list[str]:
         """Run the heartbeat scan on its own cadence and put the edges on the
