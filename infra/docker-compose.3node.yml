@@ -58,12 +58,21 @@ services:
 
   # Runs once and exits. `init` is idempotent in practice: a second run against
   # an initialised cluster fails harmlessly, which is why the script tolerates it.
+  #
+  # Keep every continuation line at the same indent as the first. A folded
+  # scalar preserves the newline before any *more*-indented line, so indenting
+  # the `-e` under its own command split this into three shell lines: the sql
+  # ran without its statement and bash tried to execute `-e` as a command. It
+  # failed every time, and `restart: on-failure` turned that into a permanent
+  # restart loop that only stayed invisible because cluster3.sh creates the
+  # database itself.
   init:
     image: cockroachdb/cockroach:v26.2.5
     depends_on: [crdb-1, crdb-2, crdb-3]
     entrypoint: ["/bin/bash", "-c"]
     command: >
       "./cockroach init --insecure --host=crdb-1 || true;
-       ./cockroach sql --insecure --host=crdb-1
-         -e 'CREATE DATABASE IF NOT EXISTS colony'"
-    restart: on-failure
+      ./cockroach sql --insecure --host=crdb-1 -e 'CREATE DATABASE IF NOT EXISTS colony'"
+    # Bounded: a retry covers a node that is not ready yet, but a command that
+    # can never succeed must not spin forever.
+    restart: on-failure:3

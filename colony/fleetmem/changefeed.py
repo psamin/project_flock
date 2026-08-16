@@ -49,7 +49,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from fleetmem.client import DEFAULT_DSN
+from fleetmem.client import resolve_dsn
 from fleetmem.types import OPEN
 
 # How often the feed emits a resolved timestamp. Only a liveness signal for us —
@@ -83,10 +83,19 @@ class TaskChange:
 def ensure_enabled(conn: Any) -> None:
     """Turn on rangefeeds, without which a changefeed cannot start.
 
-    Off by default on a fresh cluster. Failing here is better than failing
-    inside the feed thread, where the only symptom is that no wakeups arrive.
+    Off by default on a fresh self-hosted cluster. Failing here is better than
+    failing inside the feed thread, where the only symptom is that no wakeups
+    arrive.
+
+    On CockroachDB Cloud the setting is operator-owned and already on, and the
+    SET is rejected outright ("only settable by the operator"). That rejection
+    says the cluster is managed, not that rangefeeds are off, so it is not a
+    reason to fail — the feed still has to start, and that is the real check.
     """
-    conn.execute("SET CLUSTER SETTING kv.rangefeed.enabled = true")
+    try:
+        conn.execute("SET CLUSTER SETTING kv.rangefeed.enabled = true")
+    except psycopg.errors.InsufficientPrivilege:
+        pass
 
 
 def _parse(row: dict[str, Any]) -> TaskChange | None:
@@ -125,7 +134,7 @@ class TaskFeed:
         resolved: str = RESOLVED_EVERY,
     ) -> None:
         self.mission_id = mission_id
-        self.dsn = dsn or DEFAULT_DSN
+        self.dsn = resolve_dsn(dsn)
         self.resolved = resolved
         self.queue: queue.Queue[TaskChange] = queue.Queue()
         self.error: Exception | None = None

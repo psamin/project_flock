@@ -31,6 +31,17 @@ MERGE_RADIUS_TILES = 5
 # missed before a task frees itself; the longest atomic action (a rubble-heavy
 # clear, 6 ticks at 4 Hz = 1.5s) sits comfortably inside one lease.
 LEASE_SECONDS = 15
+
+def resolve_dsn(dsn: str | None = None) -> str:
+    """Where fleet memory lives: explicit argument, else `COLONY_DSN`, else local.
+
+    One function because every connection in the process has to agree. A second
+    opinion is not a second connection to the same cluster, it is a connection to
+    a different one — and against the local dev cluster both happen to be right,
+    so the disagreement only surfaces on Cloud.
+    """
+    return dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN)
+
 RENEW_SECONDS = 5
 
 # CockroachDB runs SERIALIZABLE and aborts transactions that would violate it,
@@ -68,7 +79,7 @@ class CockroachFleetMem:
         tests can open one connection per identity.
         """
         self.conn = psycopg.connect(
-            dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN),
+            resolve_dsn(dsn),
             autocommit=True,
             row_factory=dict_row,
         )
