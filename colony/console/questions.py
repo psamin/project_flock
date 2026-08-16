@@ -14,6 +14,10 @@ They are chosen so that between them they interrogate all four memory systems
     what_do_we_know      EPISODIC     observations, with the merge count visible
     who_holds_what       WORKING      tasks x robots, and the lease on each
     aftershock_response  PROVENANCE   what the fleet re-decided, and when
+    what_did_we_learn    SEMANTIC     mission_memories, across runs on this map
+
+The last one is the only question here scoped by map rather than by mission,
+because it is the only one no single mission can answer.
 
 "Why did robot X do Y" is the one §5.1 names explicitly, and it is the reason
 `plans.based_on` exists: it answers with the rows that were in the prompt, not
@@ -243,6 +247,41 @@ def _render_aftershock(rows: list[dict[str, Any]]) -> str:
     )
 
 
+# --- SEMANTIC: the only question no single mission can answer ----------------
+
+# Scoped by map rather than by mission, because crossing missions is the point.
+# `map_key` is injected by the server from the running mission's map, the same
+# way `mission_id` is everywhere else — a console caller cannot ask about a map
+# the fleet is not on.
+WHAT_DID_WE_LEARN = """
+SELECT m.created_at,
+       m.summary,
+       m.outcome->'victim_sectors'     AS victim_sectors,
+       m.outcome->'metrics'->>'ticks'  AS ticks,
+       m.outcome->'metrics'->>'victims_stabilized' AS rescued
+  FROM mission_memories m
+ WHERE m.map_key = %s
+ ORDER BY m.created_at DESC
+ LIMIT 5
+"""
+
+
+def _render_learned(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return (
+            "nothing yet — no mission on this map has finished and been written "
+            "to semantic memory"
+        )
+    sectors = sorted(
+        {s for r in rows for s in (r["victim_sectors"] or [])}
+    )
+    return (
+        f"{len(rows)} earlier mission(s) on this map. Across them victims turned "
+        f"up in sectors {', '.join(sectors) or '(none recorded)'}. "
+        f"Most recent: {rows[0]['summary']}"
+    )
+
+
 QUESTIONS: tuple[Question, ...] = (
     Question(
         id="why_did_robot",
@@ -283,6 +322,14 @@ QUESTIONS: tuple[Question, ...] = (
         sql=AFTERSHOCK_RESPONSE,
         params=("mission_id",),
         render=_render_aftershock,
+    ),
+    Question(
+        id="what_did_we_learn",
+        prompt="What did earlier missions on this map teach the fleet?",
+        memory="semantic",
+        sql=WHAT_DID_WE_LEARN,
+        params=("map_key",),
+        render=_render_learned,
     ),
 )
 

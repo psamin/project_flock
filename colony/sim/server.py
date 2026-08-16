@@ -612,6 +612,12 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
         focus = mission.focus_point()
         if focus is not None:
             params["x"], params["y"] = focus
+    # Semantic memory is scoped by map, not by mission, and only the running
+    # mission knows which map it is on — the same reason mission_id is injected
+    # rather than accepted. It is also what stops the console being asked about
+    # a map the fleet is not on.
+    if question is not None and "map_key" in question.params:
+        params["map_key"] = recall_mod.map_key(mission.world.map)
     try:
         result = console_questions.answer(
             mission.reader(),
