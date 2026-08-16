@@ -22,6 +22,7 @@ Three roles, derived from what each actually does:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,6 +81,21 @@ def grant_statements(robots: list[str]) -> list[str]:
 
 
 def _sql(statement: str, database: str = DB) -> subprocess.CompletedProcess:
+    """Run one statement, against Cloud if a DSN names it and Docker otherwise.
+
+    The grants are the deliverable (§3.5), and until this had a Cloud path they
+    existed only on the local chaos rig — so `commander` being SELECT-only was
+    true on a laptop and simply absent on the cluster the Managed MCP Server
+    actually points at. "Read-only by grant, not merely by setting" has to hold
+    where the setting is.
+
+    A CompletedProcess either way so `apply` and `verify` do not have to care;
+    the psycopg path fills in the same returncode/stdout/stderr contract, with
+    CSV output to match what the CLI's --format=csv produces.
+    """
+    dsn = os.environ.get("COLONY_DSN")
+    if dsn:
+        return _sql_over_dsn(statement, dsn, database)
     return subprocess.run(
         [
             "docker",
@@ -103,6 +119,34 @@ def _sql(statement: str, database: str = DB) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=120,
+    )
+
+
+def _sql_over_dsn(
+    statement: str, dsn: str, database: str = DB
+) -> subprocess.CompletedProcess:
+    """The Cloud path. Same shape of result as shelling into the container."""
+    import csv
+    import io
+    from urllib.parse import urlparse, urlunparse
+
+    import psycopg
+
+    target = urlunparse(urlparse(dsn)._replace(path=f"/{database}"))
+    out = io.StringIO()
+    try:
+        with psycopg.connect(target, autocommit=True, connect_timeout=30) as conn:
+            cur = conn.execute(statement)
+            if cur.description is not None:
+                writer = csv.writer(out)
+                writer.writerow([c.name for c in cur.description])
+                writer.writerows(cur.fetchall())
+    except psycopg.Error as exc:
+        return subprocess.CompletedProcess(
+            args=[statement], returncode=1, stdout="", stderr=str(exc)
+        )
+    return subprocess.CompletedProcess(
+        args=[statement], returncode=0, stdout=out.getvalue(), stderr=""
     )
 
 
