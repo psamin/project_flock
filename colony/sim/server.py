@@ -29,6 +29,7 @@ from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
 from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
+from sim import recall as recall_mod
 from sim.mission import build_fleet
 from sim.world import World
 from world.map_format import load_map
@@ -45,6 +46,13 @@ METRICS_EVERY_TICKS = TICK_HZ
 # running it four times a second would ask the same question four times for the
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
+
+# Semantic memory (§4.0): read what earlier missions on this map learned, and
+# write this one down when it ends. A kill switch rather than a code change,
+# because the one place this could misbehave is in front of an audience — and
+# `COLONY_RECALL=0` also gives the demo a way to show the cold-start run and the
+# remembering run back to back on the same binary.
+RECALL_ENABLED = os.environ.get("COLONY_RECALL", "1") != "0"
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
@@ -187,6 +195,9 @@ class Mission:
         self.world = World(load_map(self.map_path), seed=self.seed)
         self.world.shared_vision = coordinated
         self.mission_id = uuid.uuid4()
+        # What earlier missions on this map taught us, for the ticker and the
+        # HUD. Populated by build_fleet, which is where recall is read.
+        self.recalled: list[Any] = []
         self.agents = build_fleet(
             self.world,
             self.mem,
@@ -195,6 +206,8 @@ class Mission:
             seed=self.seed,
             embedder=self.embedder,
             planner=self.planner,
+            recall_enabled=RECALL_ENABLED,
+            recalled=self.recalled,
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
@@ -395,6 +408,33 @@ class Mission:
             **self.metrics(),
             "finished": self.world.finished,
         }
+        if self.world.finished and self.coordinated:
+            self._remember()
+
+    def _remember(self) -> None:
+        """Write what this mission learned into semantic memory (§4.0).
+
+        Finished, coordinated runs only. An unfinished run has nothing settled
+        to teach, and a baseline run is a control condition — a memory it wrote
+        would be read by a later coordinated run and leak across the very
+        comparison the ON/OFF toggle exists to make.
+
+        Never allowed to fail loudly. This runs at the exact moment a mission
+        ends, which is the moment somebody is watching the screen; a summarizer
+        that raises would take the scoreboard down with it. `remember_mission`
+        is idempotent per mission, so the second call this makes on a toggle
+        away from an already-finished run is a no-op rather than a duplicate.
+        """
+        try:
+            recall_mod.write_memory(
+                self.mem,
+                self.embedder,
+                self.mission_id,
+                self.world.map,
+                self.metrics(),
+            )
+        except Exception as exc:  # noqa: BLE001 - a demo must not die here
+            print(f"[sim] could not write mission memory: {type(exc).__name__}: {exc}")
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         """Hand one frame to every viewer's queue. Never touches a socket.

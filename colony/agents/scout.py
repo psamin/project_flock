@@ -476,12 +476,24 @@ class Scout:
                 for t in self.mem.open_tasks(self.mission_id)
                 if t.kind.startswith("explore_sector:")
             ),
+            # Priority first, then distance. Priority is what semantic memory
+            # sets (seed_sector_tasks): sectors earlier missions found victims
+            # in get swept before empty ground. Without this term the priority
+            # bump changes nothing and recall is inert while appearing to work —
+            # the same failure shape as an l2 index answering a cosine query.
+            #
+            # Safe by construction on a cold database: with no memories every
+            # sector is priority 1, `-1` is constant, and this key is
+            # order-identical to the distance-only one it replaces. X2's
+            # byte-identical-log condition holds unless memories exist.
+            #
             # Ties break on the sector name, never on the row id. `str(t.id)` is a
             # freshly generated UUID, so two equidistant sectors were decided by
             # whichever id happened to sort first — the same seed picked C1 on one
             # run and A3 on the next, and X2 could not pass. The name is stable
             # across runs and carries the same "pick one, consistently" intent.
             key=lambda t: (
+                -t.priority,
                 abs((t.target[0] or 0) - robot.x) + abs((t.target[1] or 0) - robot.y),
                 t.kind,
             ),
@@ -686,19 +698,25 @@ class Scout:
         return (x, y)
 
 
-def seed_sector_tasks(mem, mission_id, world_map) -> list:
+def seed_sector_tasks(mem, mission_id, world_map, hot_sectors=()) -> list:
     """One `explore_sector` task per sector at mission bootstrap (FR-16).
 
     The sector id rides in the task kind so a scout can read it back without a
     second lookup, and so the event ticker says `explore_sector:C2` rather than
     an opaque uuid — legible to a judge watching the demo.
+
+    `hot_sectors` is where semantic memory enters the mission: sectors earlier
+    runs on this map found victims in are seeded at a higher priority, so the
+    fleet sweeps them first. Setting priority at creation rather than bumping it
+    afterwards keeps this to one parameter instead of a new SDK method.
     """
+    hot = set(hot_sectors)
     return [
         mem.create_task(
             mission_id,
             f"explore_sector:{sector['id']}",
             (sector["x"], sector["y"]),
-            priority=1,
+            priority=2 if sector["id"] in hot else 1,
         )
         for sector in world_map.sectors
     ]
