@@ -36,6 +36,10 @@ SDK_METHODS = [
     "stale_robots",
     "events",
     "plans_for",
+    # semantic memory (§4.0): the only search in the SDK that crosses missions
+    "remember_lesson",
+    "recall_lessons",
+    "mark_recalled",
     "close",
 ]
 

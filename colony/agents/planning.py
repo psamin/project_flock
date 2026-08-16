@@ -25,6 +25,7 @@ URL with rule fallback", implemented as one code path rather than two.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -167,6 +168,7 @@ class Planner:
         tick: int,
         digest: Digest,
         open_tasks: list[Any],
+        tactics: Sequence[str] = (),
     ) -> Plan | None:
         """A plan, or None to mean "use your own rules this tick".
 
@@ -182,18 +184,33 @@ class Planner:
             return None
 
         card, tasks = role_card(robot), task_lines(open_tasks)
+
+        if self.adapter.mode == RECORD:
+            # Recorded synchronously, unlike live. A live call is submitted to a
+            # thread and collected some ticks later (§3.5: a robot keeps acting
+            # while a plan is in flight), so the tick a decision lands on depends
+            # on network latency. Replay answers immediately, so a cassette
+            # recorded through the async path traces a mission that replay can
+            # never retrace: the first decision lands on a different tick, the
+            # world diverges, and every prompt after it misses.
+            #
+            # Recording is an offline activity, so paying full latency inline
+            # here costs nothing and is what makes the cassette reproducible.
+            self._record_call(robot.id, tick)
+            return self.adapter.plan(card, digest.text, tasks, tactics)
+
         if not self.live:
             # Replay: a cassette hit is a real recorded decision and is worth
             # replaying. A miss is not — the adapter would answer from the same
             # rules the agent already has, and pretending that came from Bedrock
             # would put a fabricated rationale in front of a judge.
-            if not self.adapter.knows_plan(card, digest.text, tasks):
+            if not self.adapter.knows_plan(card, digest.text, tasks, tactics):
                 return None
             self._record_call(robot.id, tick)
-            return self.adapter.plan(card, digest.text, tasks)
+            return self.adapter.plan(card, digest.text, tasks, tactics)
 
         self._record_call(robot.id, tick)
-        self._pending[robot.id] = self._submit(card, digest.text, tasks)
+        self._pending[robot.id] = self._submit(card, digest.text, tasks, tactics)
         return None
 
     def _collect(self, robot_id: str) -> Plan | None:
@@ -210,12 +227,18 @@ class Planner:
             # take down a tick loop that is running a rescue.
             return None
 
-    def _submit(self, card: str, digest: str, tasks: list[dict[str, Any]]) -> Future:
+    def _submit(
+        self,
+        card: str,
+        digest: str,
+        tasks: list[dict[str, Any]],
+        tactics: Sequence[str] = (),
+    ) -> Future:
         if self._pool is None:
             self._pool = ThreadPoolExecutor(
                 max_workers=self.max_workers, thread_name_prefix="plan"
             )
-        return self._pool.submit(self.adapter.plan, card, digest, tasks)
+        return self._pool.submit(self.adapter.plan, card, digest, tasks, tactics)
 
     def _within_cap(self, robot_id: str, tick: int) -> bool:
         recent = [

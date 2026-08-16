@@ -55,15 +55,16 @@ def db_client(monkeypatch):
 # --- the catalog ------------------------------------------------------------
 
 
-def test_the_catalog_lists_the_five_questions(client):
+def test_the_catalog_lists_the_six_questions(client):
     c, _ = client
     body = c.get("/api/console/questions").json()
 
-    assert len(body["questions"]) == 5
+    assert len(body["questions"]) == 6
     assert {q["id"] for q in body["questions"]} >= {
         "why_did_robot",
         "unreached_victims",
         "who_holds_what",
+        "what_did_we_learn",
     }
 
 
@@ -72,7 +73,12 @@ def test_the_catalog_says_which_memory_each_question_reads(client):
     which one it is interrogating rather than leaving it to the writeup."""
     c, _ = client
     body = c.get("/api/console/questions").json()
-    assert {q["memory"] for q in body["questions"]} >= {"provenance", "working"}
+    assert {q["memory"] for q in body["questions"]} >= {
+        "provenance",
+        "working",
+        "episodic",
+        "semantic",
+    }
 
 
 # --- the honest failure -----------------------------------------------------

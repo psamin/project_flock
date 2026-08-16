@@ -24,6 +24,7 @@ from agents.scout import Scout, seed_sector_tasks, split_sectors
 from agents.worker import Worker
 from bedrock.adapter import BedrockAdapter
 from sim import metrics as metrics_mod
+from sim import recall as recall_mod
 from sim.metrics import COVERAGE_AT_TICK, Comparison, Metrics
 from sim.world import World
 from world.map_format import WorldMap
@@ -65,6 +66,12 @@ def build_fleet(
     if coordinated:
         # Baseline explores on private frontier bias only (§3.3), so it gets no
         # sector tasks to claim.
+        #
+        # Semantic memory used to be read here, to bias which sectors got swept
+        # first. It is not any more: what it recalled was where victims had been
+        # on this map, which transfers to no other disaster and reads as the
+        # fleet being handed the answer. Tactics are retrieved per plan boundary
+        # instead, in Worker._consult, where they can actually inform reasoning.
         seed_sector_tasks(mem, mission_id, world.map)
 
     scouts = [r for r in world.robots.values() if r.role == "scout"]
@@ -90,6 +97,7 @@ def build_fleet(
                 mem=mem,
                 coordinated=coordinated,
                 planner=planner,
+                embedder=embedder,
             )
             for robot in world.robots.values()
             if robot.role in ("lifter", "medic")
@@ -109,8 +117,15 @@ def run_mission(
     max_ticks: int | None = None,
     embedder: Any = None,
     planner: Any = None,
+    remember: bool = False,
 ) -> MissionRun:
-    """Run one mission to completion and return it with its §4.7 metrics."""
+    """Run one mission to completion and return it with its §4.7 metrics.
+
+    `remember` defaults off: deriving lessons is an extra LLM call, and it makes
+    a run leave state behind that a later run in the same process would read.
+    The metrics, Bedrock and determinism suites all need to opt into that rather
+    than inherit it.
+    """
     world = World(world_map, seed=seed)
     world.shared_vision = coordinated
     mission_id = uuid.uuid4()
@@ -143,21 +158,26 @@ def run_mission(
     if world.tick < COVERAGE_AT_TICK:
         coverage_at_500 = world.coverage()
 
-    return MissionRun(
-        world=world,
-        mem=mem,
-        mission_id=mission_id,
-        metrics=metrics_mod.compute(
-            mem.events(mission_id),
-            victims_total=len(world.victims),
-            coverage_at_500=coverage_at_500,
-            ticks=world.tick,
-            horizon=world_map.mission_length_ticks,
-            # From belief rows, not simulator state: how many victims the fleet
-            # itself knows about. In baseline this is the number that stays low.
-            victims_located=len(mem.get_beliefs(mission_id, kind="victim")),
-        ),
+    metrics = metrics_mod.compute(
+        mem.events(mission_id),
+        victims_total=len(world.victims),
+        coverage_at_500=coverage_at_500,
+        ticks=world.tick,
+        horizon=world_map.mission_length_ticks,
+        # From belief rows, not simulator state: how many victims the fleet
+        # itself knows about. In baseline this is the number that stays low.
+        victims_located=len(mem.get_beliefs(mission_id, kind="victim")),
     )
+
+    # Coordinated runs only: a baseline is a control, and a memory it wrote
+    # would be read by a later coordinated run — contaminating the comparison
+    # from the other direction to the read guard in build_fleet.
+    if remember and coordinated:
+        recall_mod.learn(
+            mem, embedder or BedrockAdapter(), mission_id, world, metrics.to_json()
+        )
+
+    return MissionRun(world=world, mem=mem, mission_id=mission_id, metrics=metrics)
 
 
 def compare_modes(

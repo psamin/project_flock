@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -163,22 +164,27 @@ class BedrockAdapter:
     # --- planning ---------------------------------------------------------
 
     def plan(
-        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+        self,
+        role_card: str,
+        beliefs_digest: str,
+        open_tasks: list[dict[str, Any]],
+        tactics: Sequence[str] = (),
     ) -> Plan:
         """Ask for one decision. Prompt stays under ~1.5k tokens by design (§4.3)."""
         # Sorted before the prompt is built, because the prompt text is the
         # cassette key. `open_tasks()` orders by priority alone, so two equal
         # priority tasks can arrive in either order, producing two different
-        # prompts for the same mission state — a cassette miss, and a seeded run
-        # that is no longer reproducible. The id tiebreak makes it total.
-        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
-        prompt = _plan_prompt(role_card, beliefs_digest, tasks)
+        # prompts for the same mission state. The tiebreak is the *handle*, not
+        # the row id — see task_handle: ids are random per run, so tiebreaking
+        # on one made the ordering random too.
+        tasks = _ordered(open_tasks)
+        prompt = _plan_prompt(role_card, beliefs_digest, tasks, tactics)
         key = _key("plan", prompt)
 
         if self.mode == REPLAY:
             cached = self._cassette.get(key)
             if cached is not None:
-                return Plan.parse(cached)
+                return _resolve(Plan.parse(cached), tasks)
             return _offline_plan(tasks)
 
         body = json.dumps(
@@ -201,10 +207,59 @@ class BedrockAdapter:
         self.calls += 1
         if self.mode == RECORD:
             self._remember(key, text)
-        return Plan.parse(text)
+        return _resolve(Plan.parse(text), tasks)
+
+    def derive_lessons(self, run_digest: str, limit: int = 3) -> list[dict[str, str]]:
+        """Turn one mission's figures into tactics that transfer to other maps.
+
+        The second place an LLM earns its keep here, and for the opposite reason
+        to planning: this is not a decision under time pressure, it is the one
+        job in the system that is genuinely about generalising from experience.
+        Rules can rank tasks; rules cannot look at a run and notice that waiting
+        for a clear to finish before dispatching the medic was what cost it.
+
+        The prompt forbids coordinates and sector names explicitly. A "lesson"
+        naming a tile is a fact about one map — it transfers nowhere, and a
+        fleet recalling victim positions is a fleet handed the answer. That
+        constraint is the whole reason this call exists rather than a template.
+
+        Returns `[{"situation": ..., "lesson": ...}]`; empty on any failure,
+        because a mission that ends without learning anything is a mission that
+        still ended.
+        """
+        prompt = _lessons_prompt(run_digest, limit)
+        key = _key("lessons", prompt)
+
+        if self.mode == REPLAY:
+            cached = self._cassette.get(key)
+            return _parse_lessons(cached, limit) if cached is not None else []
+
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 600,
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        )
+        try:
+            response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
+        except _BOTO_ERRORS as exc:
+            if not _is_transient(exc):
+                raise
+            return []
+        text = json.loads(response["body"].read())["content"][0]["text"]
+        self.calls += 1
+        if self.mode == RECORD:
+            self._remember(key, text)
+        return _parse_lessons(text, limit)
 
     def knows_plan(
-        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+        self,
+        role_card: str,
+        beliefs_digest: str,
+        open_tasks: list[dict[str, Any]],
+        tactics: Sequence[str] = (),
     ) -> bool:
         """Whether the cassette can answer this prompt without inventing one.
 
@@ -214,8 +269,8 @@ class BedrockAdapter:
         perfectly good at *deciding*, but a rule-based choice presented as a
         Bedrock rationale is a claim we cannot support in front of a judge.
         """
-        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
-        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks)) in (
+        tasks = _ordered(open_tasks)
+        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks, tactics)) in (
             self._cassette
         )
 
@@ -249,19 +304,83 @@ def _key(kind: str, payload: str) -> str:
     return f"{kind}:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
 
+def _resolve(plan: Plan, open_tasks: list[dict[str, Any]]) -> Plan:
+    """Turn the handle the model answered with back into a row id.
+
+    The prompt names tasks by handle so it is reproducible, but every caller
+    downstream matches on `tasks.id`. Unresolvable is not an error: a stale or
+    invented handle costs one lost claim race and the robot's own ranking
+    carries it, which is the same tolerance the id path always had.
+    """
+    if plan.task_id is None:
+        return plan
+    for task in open_tasks:
+        if plan.task_id == task_handle(task):
+            plan.task_id = str(task["id"])
+            return plan
+    return plan
+
+
+def _ordered(open_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Total, content-derived order — the same list on every run.
+
+    The row id is the last tiebreak rather than the first, and only decides
+    between tasks whose handles are identical. Real missions do not produce
+    those — one explore per sector, one clear per blocking tile, one delivery
+    per victim — but an order that depends on input order is a non-determinism
+    waiting to happen, so the ordering stays total either way.
+    """
+    return sorted(
+        open_tasks,
+        key=lambda t: (-t.get("priority", 1), task_handle(t), str(t["id"])),
+    )
+
+
+def task_handle(task: dict[str, Any]) -> str:
+    """A name for a task that is the same on every run of the same mission.
+
+    Row ids cannot be used here, and this is the subtle one. `tasks.id` is
+    `gen_random_uuid()`, so it differs on every run against a real cluster —
+    which means a prompt containing ids can never match a recorded one, the
+    cassette misses every single time, and the whole fleet silently runs on
+    rules while `/health` reports a loaded cassette. Worse, the sort tiebreak
+    was `str(id)` too, so even the *order* of the task list was random.
+
+    Kind and target are content, not identity: one explore task per sector, one
+    clear per blocking tile, one delivery per victim. So they name a task
+    stably, and the model gets something more legible than a uuid into the
+    bargain.
+    """
+    return f"{task['kind']}@{task.get('target_x')},{task.get('target_y')}"
+
+
 def _plan_prompt(
-    role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+    role_card: str,
+    beliefs_digest: str,
+    open_tasks: list[dict[str, Any]],
+    tactics: Sequence[str] = (),
 ) -> str:
     tasks = (
         "\n".join(
-            f"- {t['id']} {t['kind']} at ({t.get('target_x')},{t.get('target_y')})"
-            f" priority={t.get('priority', 1)}"
-            for t in open_tasks
+            f"- {task_handle(t)} priority={t.get('priority', 1)}" for t in open_tasks
         )
         or "- (none)"
     )
+    # Tactics come *before* the current situation on purpose: they are standing
+    # knowledge, and the model should read the moment in their light rather than
+    # decide first and rationalise afterwards. Omitted entirely when there are
+    # none, so a fleet that has learned nothing produces the exact prompt it
+    # always did — which is what keeps the pre-memory cassette valid.
+    learned = (
+        "What earlier missions learned:\n"
+        + "\n".join(f"- {t}" for t in tactics)
+        + "\n\n"
+        if tactics
+        else ""
+    )
     return (
         f"{role_card}\n\n"
+        f"{learned}"
         f"Shared beliefs:\n{beliefs_digest}\n\n"
         f"Open tasks:\n{tasks}\n\n"
         "Choose exactly one action. Reply with JSON only:\n"
@@ -269,6 +388,50 @@ def _plan_prompt(
         '"task_id": "<id or null>", "sector": "<sector or null>", '
         '"rationale": "<one short sentence>"}'
     )
+
+
+def _lessons_prompt(run_digest: str, limit: int) -> str:
+    return (
+        "You are reviewing a completed search-and-rescue mission run by a fleet "
+        "of autonomous robots, to extract tactics that will help on FUTURE "
+        "missions on DIFFERENT maps.\n\n"
+        f"What happened:\n{run_digest}\n\n"
+        f"Give at most {limit} lessons. Each must be a general tactic, not a "
+        "fact about this map.\n"
+        "Hard rules:\n"
+        "- Never mention coordinates, tile positions, or sector names. A lesson "
+        "naming a place is useless on the next map and will be discarded.\n"
+        "- `situation` describes conditions a robot could recognise mid-mission "
+        "(what it can see, what it is carrying, what is blocking it).\n"
+        "- `lesson` is the action or ordering to prefer when they hold.\n"
+        "- If the run shows nothing worth generalising, return an empty list.\n\n"
+        "Reply with JSON only:\n"
+        '{"lessons": [{"situation": "<when this applies>", '
+        '"lesson": "<what to do>"}]}'
+    )
+
+
+def _parse_lessons(raw: str, limit: int) -> list[dict[str, str]]:
+    """Strict-JSON parse that degrades to nothing rather than to garbage.
+
+    A malformed lesson is worse than no lesson: it is written once and then
+    retrieved into every similar situation forever, so this drops anything that
+    is not a well-formed situation/lesson pair.
+    """
+    match = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if match is None:
+        return []
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for item in (payload.get("lessons") or [])[:limit]:
+        situation = str(item.get("situation", "")).strip()
+        lesson = str(item.get("lesson", "")).strip()
+        if situation and lesson:
+            out.append({"situation": situation, "lesson": lesson})
+    return out
 
 
 # --- offline fallbacks -------------------------------------------------------
@@ -294,7 +457,7 @@ def _offline_embedding(text: str) -> list[float]:
     return [x / norm for x in raw]
 
 
-def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:
+def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:  # noqa: D401
     """Highest-priority open task, else explore. This is the rule-based path the
     agent falls back to whenever Bedrock is unavailable or rate-capped."""
     if not open_tasks:

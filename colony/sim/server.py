@@ -29,6 +29,7 @@ from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
 from orchestrator.lost import LostWatch
 from sim import metrics as metrics_mod
+from sim import recall as recall_mod
 from sim.mission import build_fleet
 from sim.world import World
 from world.map_format import load_map
@@ -46,6 +47,13 @@ METRICS_EVERY_TICKS = TICK_HZ
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
 
+# Semantic memory (§4.0): derive tactics when a mission ends. Retrieval happens
+# per plan boundary inside the agents; this switch governs the write, and gives
+# the demo a way to show a fleet that has learned nothing beside one that has,
+# on the same binary. A kill switch rather than a code change, because the one
+# place this could misbehave is in front of an audience.
+RECALL_ENABLED = os.environ.get("COLONY_RECALL", "1") != "0"
+
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
 # `COLONY_MAP` points the server at another map — a playtest variant, or a
@@ -59,7 +67,19 @@ def _make_memory():
     """CockroachDB when it is reachable, the in-memory fake otherwise.
 
     The walking skeleton has to run on a laptop with no cluster — if the sim
-    refused to start without one, nobody could work on the renderer.
+    refused to start without one, nobody could work on the renderer. So an
+    unreachable cluster degrades to the fake.
+
+    **But only when nobody named a cluster.** Setting `COLONY_DSN` is a
+    statement that fleet memory lives at a specific address, and falling back
+    from that is the most expensive failure this file can have: the mission
+    runs, the UI looks perfect, and every claim the demo makes is quietly
+    false — no serializable claiming, no vector index, no reconcile gate, and
+    nothing persisted for the console or the next mission to read. A typo in a
+    Cloud DSN would look exactly like a working demo. So when `COLONY_DSN` is
+    set, a connection failure is fatal and says why.
+
+    `COLONY_MEMORY=fake` remains the way to ask for the fake on purpose.
     """
     if os.environ.get("COLONY_MEMORY") == "fake":
         from fleetmem.fake import FakeFleetMem
@@ -70,6 +90,14 @@ def _make_memory():
 
         return CockroachFleetMem(), "cockroach"
     except Exception as exc:  # noqa: BLE001 - any failure means no cluster
+        if os.environ.get("COLONY_DSN"):
+            raise RuntimeError(
+                f"COLONY_DSN is set but the cluster is unreachable "
+                f"({type(exc).__name__}: {exc}).\n"
+                "Refusing to start on in-memory memory: the mission would run and "
+                "look healthy while writing nothing to CockroachDB.\n"
+                "Fix the DSN, or set COLONY_MEMORY=fake to ask for the fake."
+            ) from exc
         from fleetmem.fake import FakeFleetMem
 
         print(
@@ -248,9 +276,33 @@ class Mission:
             # reproduce with a SELECT.
             victims_located=len(self.mem.get_beliefs(self.mission_id, kind="victim")),
         )
-        self._metrics = {**computed.to_json(), "mode": self.mode}
+        self._metrics = {
+            **computed.to_json(),
+            "mode": self.mode,
+            # Semantic memory and Bedrock, on the scoreboard rather than only in
+            # /health. Both are claims the demo makes out loud — "the fleet has
+            # done this before", "the LLM is deciding" — and a claim nobody can
+            # see on screen is a claim a judge has to take on trust.
+            "lessons_known": self._lessons_known(),
+            "bedrock_mode": self.embedder.mode,
+            "bedrock_calls": self.embedder.calls,
+        }
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
+
+    def _lessons_known(self) -> int:
+        """How many tactics the fleet is carrying into this mission.
+
+        Reads 0 on a fleet that has never finished a mission, which is the
+        honest number and the one that makes a later run's figure mean
+        something. Counted rather than cached because a mission ending mid-run
+        adds to it, and swallowed on failure because a scoreboard field is not
+        worth a broken tick.
+        """
+        try:
+            return len(self.mem.recall_lessons(None, limit=100))
+        except Exception:  # noqa: BLE001 - a HUD number, not a mission
+            return 0
 
     def focus_point(self) -> tuple[int, int] | None:
         """Somewhere worth asking "what do we know about here?" about.
@@ -375,6 +427,35 @@ class Mission:
             **self.metrics(),
             "finished": self.world.finished,
         }
+        if self.world.finished and self.coordinated:
+            self._remember()
+
+    def _remember(self) -> None:
+        """Derive tactics from this mission and write them down (§4.0).
+
+        Finished, coordinated runs only. An unfinished run has nothing settled
+        to teach, and a baseline run is a control condition — a memory it wrote
+        would be read by a later coordinated run and leak across the very
+        comparison the ON/OFF toggle exists to make.
+
+        Never allowed to fail loudly. This runs at the exact moment a mission
+        ends, which is the moment somebody is watching the screen; a summarizer
+        that raises would take the scoreboard down with it. `remember_mission`
+        is idempotent per mission, so the second call this makes on a toggle
+        away from an already-finished run is a no-op rather than a duplicate.
+        """
+        try:
+            learned = recall_mod.learn(
+                self.mem,
+                self.embedder,
+                self.mission_id,
+                self.world,
+                self.metrics(),
+            )
+            if learned:
+                print(f"[sim] learned {len(learned)} tactic(s) from this mission")
+        except Exception as exc:  # noqa: BLE001 - a demo must not die here
+            print(f"[sim] could not write mission memory: {type(exc).__name__}: {exc}")
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         """Hand one frame to every viewer's queue. Never touches a socket.
@@ -437,9 +518,12 @@ mission = Mission()
 async def lifespan(_: FastAPI):
     """Start the tick loop with the app and stop it cleanly on shutdown."""
     task = asyncio.create_task(mission.run())
+    # "N robots", not "N scouts": the fleet is 2 scouts, a lifter and a medic,
+    # and the heterogeneity is the premise. Also says what was recalled, so the
+    # cold run and the remembering run are distinguishable from the log alone.
     print(
         f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-        f"({mission.memory_kind} memory, {len(mission.agents)} scouts)"
+        f"({mission.memory_kind} memory, {len(mission.agents)} robots)"
     )
     try:
         yield
@@ -552,6 +636,10 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
         focus = mission.focus_point()
         if focus is not None:
             params["x"], params["y"] = focus
+    # Semantic memory is scoped by map, not by mission, and only the running
+    # mission knows which map it is on — the same reason mission_id is injected
+    # rather than accepted. It is also what stops the console being asked about
+    # a map the fleet is not on.
     try:
         result = console_questions.answer(
             mission.reader(),

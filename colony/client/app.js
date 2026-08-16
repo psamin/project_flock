@@ -451,6 +451,15 @@ function updateHud(metrics) {
       ? "—"
       : Math.round(metrics.median_time_to_stabilize),
   );
+  setText("m-recall", metrics.lessons_known ?? 0);
+  // Mode and count together, because either alone misleads: "live" with zero
+  // calls has not decided anything yet, and a count without the mode does not
+  // say whether those calls were AWS or a cassette.
+  const mode = metrics.bedrock_mode;
+  setText(
+    "m-bedrock",
+    mode == null ? "—" : `${mode} · ${metrics.bedrock_calls ?? 0}`,
+  );
 }
 
 /** §4.7's one number the video ends on, once both modes have run. */

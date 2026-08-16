@@ -145,6 +145,19 @@
     <span title="Tile visits to ground another robot had already covered, divided by all tile visits. Revisiting your own ground does not count.">duplicate effort <b id="m-duplicate">0%</b></span>
     <span title="Tasks claimed by more than one robot over the mission — one robot walking to work another had already finished. Distinct from the lease guarantee, which is about two robots holding a task at the same instant.">double work <b id="m-doublework">0</b></span>
     <span title="Share of reachable, non-wall tiles any robot has seen. Counts tiles, not victims — a fully seen map can still hold victims nobody has reported yet.">tiles seen <b id="m-coverage">0%</b></span>
+    <!--
+      The two integration claims the demo makes out loud, on the scoreboard.
+
+      `tactics` is how many lessons the fleet carries into this mission — 0
+      until one has finished and had lessons derived from it, which is the
+      honest reading and the one that makes a later number mean something.
+
+      `bedrock` is mode and live call count. Replay with an empty cassette
+      decides nothing while looking perfectly healthy, so a demo that claims an
+      LLM is driving needs the count where it can be read, not only in /health.
+    -->
+    <span title="Tactics the fleet has learned from earlier missions, stored in mission_memories. Retrieved by cosine similarity to what a robot is facing, at each planning boundary.">tactics <b id="m-recall">0</b></span>
+    <span title="Amazon Bedrock: adapter mode, and calls that actually reached AWS. Cassette hits and the offline fallback do not count, so this is the number that answers 'is the LLM really deciding'.">bedrock <b id="m-bedrock">—</b></span>
   </div>
 
   <!--

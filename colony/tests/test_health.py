@@ -96,6 +96,44 @@ def test_an_empty_cassette_is_distinguishable_from_a_loaded_one(health, tmp_path
     assert loaded["cassette_entries"] == 2
 
 
+def test_a_named_cluster_that_is_unreachable_refuses_to_start(monkeypatch):
+    """The most expensive failure this project has, and the reason it is not a
+    fallback: with COLONY_DSN set and the cluster down, the old behaviour ran
+    the whole mission on in-memory memory. Nothing persisted, no vector index,
+    no serializable claiming — and the UI looked perfect. A typo in a Cloud DSN
+    was indistinguishable from a working demo.
+
+    Naming a cluster has to mean it. The refusal names the cause and the escape
+    hatch, because this fires at the worst possible moment.
+    """
+    monkeypatch.delenv("COLONY_MEMORY", raising=False)
+    # Port 1 is reserved and nothing listens there.
+    monkeypatch.setenv(
+        "COLONY_DSN", "postgresql://root@127.0.0.1:1/colony?sslmode=disable"
+    )
+    with pytest.raises(RuntimeError, match="COLONY_DSN is set"):
+        _fresh_server()
+
+
+def test_asking_for_the_fake_still_works_with_a_dsn_set(monkeypatch):
+    """The escape hatch the refusal points at has to actually exist — a
+    developer with a Cloud DSN in their shell must still be able to work on the
+    renderer offline."""
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    monkeypatch.setenv(
+        "COLONY_DSN", "postgresql://root@127.0.0.1:1/colony?sslmode=disable"
+    )
+    assert _fresh_server().get("/health").json()["memory"] == "fake"
+
+
+def test_no_dsn_still_degrades_quietly_to_the_fake(monkeypatch):
+    """`make sim` on a bare laptop, which is how lanes 2 and 4 were unblocked.
+    Nobody named a cluster, so there is nothing to be wrong about."""
+    monkeypatch.delenv("COLONY_MEMORY", raising=False)
+    monkeypatch.delenv("COLONY_DSN", raising=False)
+    assert _fresh_server().get("/health").json()["memory"] == "fake"
+
+
 def test_the_two_modes_do_not_collide(health):
     """`mode` at the top level is the coordination mode (§4.7) and `bedrock.mode`
     is the adapter's. They are different vocabularies on the same word, which is

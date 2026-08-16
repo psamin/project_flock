@@ -22,6 +22,7 @@ from agents import beliefs, logistics, planning
 from agents.pathing import find_move_plan
 from agents.planning import BEDROCK, RULES
 from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, Task
+from sim import recall as recall_mod
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, World
 from world.map_format import DEBRIS, RUBBLE_HEAVY
@@ -121,6 +122,14 @@ class Worker:
     # Bedrock at plan boundaries (§4.3). None means rules only, which is a
     # complete robot — the planner improves choices, it does not enable them.
     planner: Any = None
+
+    # Titan embeddings, for searching semantic memory at a plan boundary. None
+    # means the robot decides without the benefit of earlier missions — which is
+    # exactly what it did before this existed, so it stays a complete robot.
+    embedder: Any = None
+    # Tactics retrieved for the decision in flight, held so the provenance write
+    # can name them without a second retrieval.
+    recalled: list = field(default_factory=list)
 
     # Whether an orchestrator is pushing assignments (lane 4). While there is
     # none, waiting SELF_CLAIM_AFTER_TICKS for one would leave victims waiting
@@ -375,12 +384,48 @@ class Worker:
         belief ids are `based_on` (FR-17), and a rule-based decision deserves
         the same provenance trail as a Bedrock one — the commander console
         should not go quiet just because the model was rate-capped.
+
+        This is also where semantic memory enters a decision: the robot
+        describes what it is facing, the vector index returns the tactics
+        learned in situations like it, and those ride into the prompt. Retrieval
+        happens here rather than per tick because a plan boundary is the only
+        moment the answer is used, and an embed call per tick would blow both
+        the latency budget and the point.
         """
         digest = planning.build_digest(self.mem, self.mission_id, robot)
         if self.planner is None:
             return None, digest
-        plan = self.planner.plan(robot, world.tick, digest, candidates)
+        lessons = self._recall(robot, candidates)
+        plan = self.planner.plan(
+            robot, world.tick, digest, candidates, recall_mod.as_prompt_lines(lessons)
+        )
         return plan, digest
+
+    def _recall(self, robot: Any, candidates: list[Task]) -> list:
+        """Tactics from earlier missions that match this moment.
+
+        Held on the agent so `_log_choice` can record which ones were in the
+        prompt without retrieving twice, and so a retrieval failure costs this
+        decision its memory rather than costing the fleet a robot.
+        """
+        if not self.coordinated or self.embedder is None:
+            # Baseline is a control condition: it must not read what coordinated
+            # runs learned, or the ON/OFF comparison measures its own history.
+            self.recalled = []
+            return []
+        try:
+            situation = recall_mod.situation_of(
+                robot, self._beliefs_for_recall(), candidates
+            )
+            self.recalled = recall_mod.recall(self.mem, self.embedder, situation)
+            self.mem.mark_recalled([m.id for m in self.recalled])
+        except Exception as exc:  # noqa: BLE001 - a missing memory is not a stall
+            print(f"[{self.robot_id}] could not recall tactics: {exc!r}")
+            self.recalled = []
+        return self.recalled
+
+    def _beliefs_for_recall(self) -> list:
+        return self.mem.get_beliefs(self.mission_id)
 
     def _log_choice(
         self,
@@ -421,6 +466,10 @@ class Worker:
             ),
             rationale=rationale,
             based_on=list(digest.ids),
+            # The other half of FR-17: which remembered tactics were in front of
+            # the robot when it decided. Separate from based_on because they
+            # resolve against a different table.
+            recalled_from=[m.id for m in getattr(self, "recalled", [])],
         )
 
     def _cooling_off(self, task_id, tick: int) -> bool:

@@ -25,6 +25,7 @@ from fleetmem.types import (
     IN_PROGRESS,
     OPEN,
     Belief,
+    Lesson,
     Match,
     Plan,
     Task,
@@ -56,6 +57,11 @@ class FakeFleetMem:
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
         self._victims: dict[UUID, dict[str, Any]] = {}
+        # Semantic memory. Per-instance, deliberately: the sim builds one store
+        # and reuses it across missions, which is all cross-mission recall
+        # needs. A class-level store would instead leak between compare_modes'
+        # two runs, which take a factory precisely to stop that.
+        self._lessons: list[dict[str, Any]] = []
         FakeFleetMem._instances += 1
         self._id_rng = random.Random(FakeFleetMem._instances)
 
@@ -187,6 +193,79 @@ class FakeFleetMem:
                     )
                 )
             return out
+
+    # --- semantic memory --------------------------------------------------
+
+    def remember_lesson(
+        self,
+        mission_id: UUID,
+        situation: str,
+        lesson: str,
+        embedding: Sequence[float] | None = None,
+        evidence: dict[str, Any] | None = None,
+        confidence: float = 0.5,
+    ) -> UUID:
+        with self._lock:
+            row = {
+                "id": self._new_id(),
+                "mission_id": mission_id,
+                "situation": situation,
+                "lesson": lesson,
+                "embedding": list(embedding) if embedding is not None else None,
+                "evidence": evidence or {},
+                "confidence": confidence,
+                "times_recalled": 0,
+                "created_at": _now(),
+            }
+            self._lessons.append(row)
+            return row["id"]
+
+    def recall_lessons(
+        self,
+        embedding: Sequence[float] | None,
+        limit: int = 3,
+    ) -> list[Lesson]:
+        with self._lock:
+            if embedding is None:
+                ranked = [
+                    (0.0, m)
+                    for m in sorted(
+                        self._lessons, key=lambda m: m["created_at"], reverse=True
+                    )
+                ]
+            else:
+                scored = [
+                    (_cosine_distance(embedding, m["embedding"]), m)
+                    for m in self._lessons
+                    if m["embedding"] is not None
+                ]
+                # Ties break on creation order, never on the row id: a seeded id
+                # is still arbitrary, and two equidistant lessons decided by it
+                # would reorder between runs.
+                ranked = sorted(
+                    scored, key=lambda pair: (pair[0], pair[1]["created_at"])
+                )
+            return [
+                Lesson(
+                    id=m["id"],
+                    mission_id=m["mission_id"],
+                    situation=m["situation"],
+                    lesson=m["lesson"],
+                    evidence=m["evidence"],
+                    confidence=m["confidence"],
+                    times_recalled=m["times_recalled"],
+                    distance=dist,
+                    created_at=m["created_at"],
+                )
+                for dist, m in ranked[:limit]
+            ]
+
+    def mark_recalled(self, lesson_ids: Sequence[UUID]) -> None:
+        with self._lock:
+            wanted = set(lesson_ids)
+            for m in self._lessons:
+                if m["id"] in wanted:
+                    m["times_recalled"] += 1
 
     # --- tasks ------------------------------------------------------------
 
@@ -447,6 +526,7 @@ class FakeFleetMem:
         chosen: dict[str, Any],
         rationale: str,
         based_on: Sequence[UUID] = (),
+        recalled_from: Sequence[UUID] = (),
     ) -> UUID:
         with self._lock:
             plan_id = self._new_id()
@@ -459,6 +539,7 @@ class FakeFleetMem:
                     "chosen": chosen,
                     "rationale": rationale,
                     "based_on": list(based_on),
+                    "recalled_from": list(recalled_from),
                     "at": _now(),
                 }
             )
@@ -475,6 +556,7 @@ class FakeFleetMem:
                     chosen=p["chosen"],
                     rationale=p["rationale"],
                     based_on=list(p["based_on"]),
+                    recalled_from=list(p.get("recalled_from") or []),
                     at=p["at"],
                 )
                 for p in self._plans
