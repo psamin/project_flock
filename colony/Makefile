@@ -1,4 +1,4 @@
-.PHONY: up down schema schema-cloud test map dev sim seed-memory \
+.PHONY: up down schema schema-cloud test map dev sim seed-memory reset demo demo-cold \
 	cluster-3 cluster-3-health cluster-3-kill cluster-3-down
 
 # One command to a working dev cluster with the schema applied.
@@ -41,6 +41,32 @@ sim:
 # with the process that wrote it.
 seed-memory:
 	uv run python -m sim.seed_memory
+
+# Empty the mission tables. Asks first — the Cloud cluster is shared.
+reset:
+	uv run python -m schema.reset
+
+# The demo, from a known state every time: wipe everything, run the cold
+# mission headless (~30s), then serve the mission that remembers it. The
+# scoreboard reads `memory 1` and the ticker says which sectors it recalled.
+#
+# Deterministic because the seed is fixed: the two missions are byte-identical
+# worlds with byte-identical fleets, and the only difference is the memory.
+demo:
+	uv run python -m schema.reset --yes
+	uv run python -m sim.seed_memory
+	@echo ""
+	@echo "seeded. starting the mission that remembers it -> http://localhost:8000"
+	@echo ""
+	uv run --extra dev uvicorn sim.server:app --port 8000
+
+# The same starting state with nothing remembered, for showing the contrast.
+demo-cold:
+	uv run python -m schema.reset --yes
+	@echo ""
+	@echo "cold start, nothing remembered -> http://localhost:8000"
+	@echo ""
+	COLONY_RECALL=0 uv run --extra dev uvicorn sim.server:app --port 8000
 
 # --- chaos rig: 3-node cluster (§6.5, FR-11) ---------------------------------
 cluster-3:

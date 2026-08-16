@@ -277,3 +277,28 @@ def test_a_broken_recall_does_not_stop_the_mission(mem, monkeypatch):
     # And the sectors are still seeded, just without a prior.
     tasks = [t for t in mem.open_tasks(list(agents.values())[0].mission_id)]
     assert any(t.kind.startswith("explore_sector:") for t in tasks)
+
+
+# --- reset ------------------------------------------------------------------
+
+
+def test_reset_keeps_semantic_memory_when_asked(mem, map_key):
+    """`--keep-memories` is the state the demo wants: no stale missions
+    cluttering the console, but the fleet still remembers the map."""
+    from schema.reset import MEMORY_TABLE, MISSION_TABLES
+
+    assert MEMORY_TABLE not in MISSION_TABLES, (
+        "mission_memories must not be in the always-wiped list, or "
+        "--keep-memories cannot keep anything"
+    )
+    # Every table the schema defines is accounted for one way or the other.
+    from tests.conftest import SCHEMA
+
+    declared = {
+        line.split()[5].rstrip("(").strip()
+        for line in SCHEMA.read_text().splitlines()
+        if line.startswith("CREATE TABLE IF NOT EXISTS")
+    }
+    assert declared == set(MISSION_TABLES) | {MEMORY_TABLE}, (
+        f"reset does not cover every table: {declared ^ (set(MISSION_TABLES) | {MEMORY_TABLE})}"
+    )
