@@ -219,6 +219,25 @@ class BedrockAdapter:
             self._cassette
         )
 
+    def status(self) -> dict[str, Any]:
+        """What this adapter is actually doing, for `/health`.
+
+        `calls` counts AWS round-trips and nothing else: a replay cassette hit is
+        a real recorded decision but not a call, and `_offline_plan` is not one
+        either. That is the distinction "are we demoing an AWS integration"
+        actually turns on, so it is the one the counter reports.
+
+        `cassette_entries` is here because replay with an empty cassette is the
+        one configuration that looks healthy while never deciding anything: every
+        `knows_plan` misses, so the fleet runs on rules and the mode alone does
+        not say so.
+        """
+        return {
+            "mode": self.mode,
+            "calls": self.calls,
+            "cassette_entries": len(self._cassette),
+        }
+
     def _remember(self, key: str, value: Any) -> None:
         self._cassette[key] = value
         if self.cassette_path:
