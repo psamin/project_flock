@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agents.planning import Planner
-from bedrock.adapter import adapter_from_env
+from bedrock.adapter import REPLAY, adapter_from_env
 from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
 from orchestrator.lost import LostWatch
@@ -460,6 +460,19 @@ async def health() -> dict[str, Any]:
         "agents": sorted(mission.agents),
         "lost": mission.lost_watch.lost_ids(),
         "metrics": mission.metrics(),
+        # Nested rather than flat because `mode` up there is already the
+        # coordination mode (§4.7) and these are two different modes.
+        #
+        # `requested` against `mode` is the whole point of reporting both:
+        # `adapter_from_env` silently downgrades live to replay when no
+        # credentials resolve, which is exactly the failure that leaves the
+        # fleet running on rules while looking perfectly healthy. Read off the
+        # environment rather than stored at build time, so a downgrade shows up
+        # as the disagreement it is.
+        "bedrock": {
+            "requested": os.environ.get("COLONY_BEDROCK_MODE", REPLAY),
+            **mission.embedder.status(),
+        },
     }
 
 
