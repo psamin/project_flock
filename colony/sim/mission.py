@@ -38,42 +38,6 @@ class MissionRun:
     metrics: Metrics
 
 
-def _log_recall(mem, mission_id, world_map, memories, hot) -> None:
-    """Record that memory shaped this mission — as an event and as a plan.
-
-    The plan row is why this is a decision and not a side effect: FR-17 says
-    every choice keeps its sources, and "we swept B2 first because two earlier
-    missions found victims there" is exactly such a choice.
-
-    The source id goes in `chosen` rather than in `based_on`. `based_on` is a
-    UUID[] resolved against `observations` — by Mission.provenance() in Python
-    and by the console's WHY_DID_ROBOT join in SQL — so a mission_memories id
-    put there is silently dropped in two places and the panel would claim more
-    sources than it lists. `chosen` is already the untyped bag carrying
-    `source`, it round-trips whole, and it needs no schema change.
-    """
-    top = memories[0]
-    detail = {
-        "map": recall_mod.map_key(world_map),
-        "memories": len(memories),
-        "distance": round(top.distance, 3),
-        "sectors": hot,
-        "memory_id": str(top.id),
-    }
-    mem.log_event(mission_id, "fleet", "memory_recalled", detail)
-    mem.log_plan(
-        mission_id,
-        "fleet",
-        trigger="idle",
-        chosen={"action": "seed_from_memory", "source": "semantic_memory", **detail},
-        rationale=(
-            f"{len(memories)} earlier mission(s) on {detail['map']} found victims in "
-            f"{', '.join(hot) or 'no recorded sector'}; sweeping those first"
-        ),
-        based_on=(),
-    )
-
-
 def build_fleet(
     world: World,
     mem: Any,
@@ -83,8 +47,6 @@ def build_fleet(
     seed: int | None = None,
     embedder: Any = None,
     planner: Any = None,
-    recall_enabled: bool = False,
-    recalled: list | None = None,
 ) -> dict[str, Any]:
     """Register the robots, seed the sector tasks, and return agents by robot id.
 
@@ -102,34 +64,15 @@ def build_fleet(
     planner = planner or Planner(adapter=embedder)
 
     if coordinated:
-        # Semantic memory enters the mission here and nowhere else. Recall is
-        # read *before* the sector tasks exist so what earlier missions learned
-        # can be baked into their priorities rather than bumped afterwards.
+        # Baseline explores on private frontier bias only (§3.3), so it gets no
+        # sector tasks to claim.
         #
-        # Coordinated only, for the same reason the sector tasks are: a baseline
-        # run is a control condition, and letting it read memories a coordinated
-        # run wrote would leak across the very comparison compare_modes takes a
-        # factory to protect. In baseline there are no sector tasks at all, so
-        # the priority ordering is unreachable by construction, not by flag.
-        hot: list[str] = []
-        if recall_enabled:
-            # Never allowed to stop a mission starting. Recall costs one Bedrock
-            # embed and one indexed read, and both are on the path between
-            # pressing "restart" and the first tick — so a throttled model or a
-            # network blip would otherwise mean no mission at all, trading a
-            # fleet that rescues nobody for a fleet that starts slightly worse
-            # informed. A mission that has forgotten still works; that is the
-            # whole point of the rules being the floor.
-            try:
-                memories = recall_mod.recall(mem, embedder, world.map)
-                hot = recall_mod.hot_sectors(memories)
-                if recalled is not None:
-                    recalled.extend(memories)
-                if memories:
-                    _log_recall(mem, mission_id, world.map, memories, hot)
-            except Exception as exc:  # noqa: BLE001 - a demo must not die here
-                print(f"[sim] could not recall earlier missions: {exc!r}")
-        seed_sector_tasks(mem, mission_id, world.map, hot_sectors=hot)
+        # Semantic memory used to be read here, to bias which sectors got swept
+        # first. It is not any more: what it recalled was where victims had been
+        # on this map, which transfers to no other disaster and reads as the
+        # fleet being handed the answer. Tactics are retrieved per plan boundary
+        # instead, in Worker._consult, where they can actually inform reasoning.
+        seed_sector_tasks(mem, mission_id, world.map)
 
     scouts = [r for r in world.robots.values() if r.role == "scout"]
     shares = split_sectors(world.map.sectors, max(1, len(scouts)))
@@ -154,6 +97,7 @@ def build_fleet(
                 mem=mem,
                 coordinated=coordinated,
                 planner=planner,
+                embedder=embedder,
             )
             for robot in world.robots.values()
             if robot.role in ("lifter", "medic")
@@ -174,15 +118,13 @@ def run_mission(
     embedder: Any = None,
     planner: Any = None,
     remember: bool = False,
-    recall_enabled: bool = False,
 ) -> MissionRun:
     """Run one mission to completion and return it with its §4.7 metrics.
 
-    `remember` and `recall_enabled` default off. Semantic memory calls
-    `embed()`, which bumps the adapter's live call counter and — more to the
-    point — makes a run's outcome depend on what earlier runs in the same
-    process left behind. Both are things the metrics, Bedrock and determinism
-    suites need to opt into rather than inherit.
+    `remember` defaults off: deriving lessons is an extra LLM call, and it makes
+    a run leave state behind that a later run in the same process would read.
+    The metrics, Bedrock and determinism suites all need to opt into that rather
+    than inherit it.
     """
     world = World(world_map, seed=seed)
     world.shared_vision = coordinated
@@ -196,7 +138,6 @@ def run_mission(
             seed=seed,
             embedder=embedder,
             planner=planner,
-            recall_enabled=recall_enabled,
         ).values()
     )
 
@@ -232,8 +173,8 @@ def run_mission(
     # would be read by a later coordinated run — contaminating the comparison
     # from the other direction to the read guard in build_fleet.
     if remember and coordinated:
-        recall_mod.write_memory(
-            mem, embedder or BedrockAdapter(), mission_id, world_map, metrics.to_json()
+        recall_mod.learn(
+            mem, embedder or BedrockAdapter(), mission_id, world, metrics.to_json()
         )
 
     return MissionRun(world=world, mem=mem, mission_id=mission_id, metrics=metrics)

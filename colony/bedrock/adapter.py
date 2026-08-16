@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -163,7 +164,11 @@ class BedrockAdapter:
     # --- planning ---------------------------------------------------------
 
     def plan(
-        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+        self,
+        role_card: str,
+        beliefs_digest: str,
+        open_tasks: list[dict[str, Any]],
+        tactics: Sequence[str] = (),
     ) -> Plan:
         """Ask for one decision. Prompt stays under ~1.5k tokens by design (§4.3)."""
         # Sorted before the prompt is built, because the prompt text is the
@@ -172,7 +177,7 @@ class BedrockAdapter:
         # prompts for the same mission state — a cassette miss, and a seeded run
         # that is no longer reproducible. The id tiebreak makes it total.
         tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
-        prompt = _plan_prompt(role_card, beliefs_digest, tasks)
+        prompt = _plan_prompt(role_card, beliefs_digest, tasks, tactics)
         key = _key("plan", prompt)
 
         if self.mode == REPLAY:
@@ -203,8 +208,57 @@ class BedrockAdapter:
             self._remember(key, text)
         return Plan.parse(text)
 
+    def derive_lessons(self, run_digest: str, limit: int = 3) -> list[dict[str, str]]:
+        """Turn one mission's figures into tactics that transfer to other maps.
+
+        The second place an LLM earns its keep here, and for the opposite reason
+        to planning: this is not a decision under time pressure, it is the one
+        job in the system that is genuinely about generalising from experience.
+        Rules can rank tasks; rules cannot look at a run and notice that waiting
+        for a clear to finish before dispatching the medic was what cost it.
+
+        The prompt forbids coordinates and sector names explicitly. A "lesson"
+        naming a tile is a fact about one map — it transfers nowhere, and a
+        fleet recalling victim positions is a fleet handed the answer. That
+        constraint is the whole reason this call exists rather than a template.
+
+        Returns `[{"situation": ..., "lesson": ...}]`; empty on any failure,
+        because a mission that ends without learning anything is a mission that
+        still ended.
+        """
+        prompt = _lessons_prompt(run_digest, limit)
+        key = _key("lessons", prompt)
+
+        if self.mode == REPLAY:
+            cached = self._cassette.get(key)
+            return _parse_lessons(cached, limit) if cached is not None else []
+
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 600,
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        )
+        try:
+            response = self._client.invoke_model(modelId=PLAN_MODEL, body=body)
+        except _BOTO_ERRORS as exc:
+            if not _is_transient(exc):
+                raise
+            return []
+        text = json.loads(response["body"].read())["content"][0]["text"]
+        self.calls += 1
+        if self.mode == RECORD:
+            self._remember(key, text)
+        return _parse_lessons(text, limit)
+
     def knows_plan(
-        self, role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+        self,
+        role_card: str,
+        beliefs_digest: str,
+        open_tasks: list[dict[str, Any]],
+        tactics: Sequence[str] = (),
     ) -> bool:
         """Whether the cassette can answer this prompt without inventing one.
 
@@ -215,7 +269,7 @@ class BedrockAdapter:
         Bedrock rationale is a claim we cannot support in front of a judge.
         """
         tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
-        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks)) in (
+        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks, tactics)) in (
             self._cassette
         )
 
@@ -250,7 +304,10 @@ def _key(kind: str, payload: str) -> str:
 
 
 def _plan_prompt(
-    role_card: str, beliefs_digest: str, open_tasks: list[dict[str, Any]]
+    role_card: str,
+    beliefs_digest: str,
+    open_tasks: list[dict[str, Any]],
+    tactics: Sequence[str] = (),
 ) -> str:
     tasks = (
         "\n".join(
@@ -260,8 +317,21 @@ def _plan_prompt(
         )
         or "- (none)"
     )
+    # Tactics come *before* the current situation on purpose: they are standing
+    # knowledge, and the model should read the moment in their light rather than
+    # decide first and rationalise afterwards. Omitted entirely when there are
+    # none, so a fleet that has learned nothing produces the exact prompt it
+    # always did — which is what keeps the pre-memory cassette valid.
+    learned = (
+        "What earlier missions learned:\n"
+        + "\n".join(f"- {t}" for t in tactics)
+        + "\n\n"
+        if tactics
+        else ""
+    )
     return (
         f"{role_card}\n\n"
+        f"{learned}"
         f"Shared beliefs:\n{beliefs_digest}\n\n"
         f"Open tasks:\n{tasks}\n\n"
         "Choose exactly one action. Reply with JSON only:\n"
@@ -269,6 +339,50 @@ def _plan_prompt(
         '"task_id": "<id or null>", "sector": "<sector or null>", '
         '"rationale": "<one short sentence>"}'
     )
+
+
+def _lessons_prompt(run_digest: str, limit: int) -> str:
+    return (
+        "You are reviewing a completed search-and-rescue mission run by a fleet "
+        "of autonomous robots, to extract tactics that will help on FUTURE "
+        "missions on DIFFERENT maps.\n\n"
+        f"What happened:\n{run_digest}\n\n"
+        f"Give at most {limit} lessons. Each must be a general tactic, not a "
+        "fact about this map.\n"
+        "Hard rules:\n"
+        "- Never mention coordinates, tile positions, or sector names. A lesson "
+        "naming a place is useless on the next map and will be discarded.\n"
+        "- `situation` describes conditions a robot could recognise mid-mission "
+        "(what it can see, what it is carrying, what is blocking it).\n"
+        "- `lesson` is the action or ordering to prefer when they hold.\n"
+        "- If the run shows nothing worth generalising, return an empty list.\n\n"
+        "Reply with JSON only:\n"
+        '{"lessons": [{"situation": "<when this applies>", '
+        '"lesson": "<what to do>"}]}'
+    )
+
+
+def _parse_lessons(raw: str, limit: int) -> list[dict[str, str]]:
+    """Strict-JSON parse that degrades to nothing rather than to garbage.
+
+    A malformed lesson is worse than no lesson: it is written once and then
+    retrieved into every similar situation forever, so this drops anything that
+    is not a well-formed situation/lesson pair.
+    """
+    match = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if match is None:
+        return []
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for item in (payload.get("lessons") or [])[:limit]:
+        situation = str(item.get("situation", "")).strip()
+        lesson = str(item.get("lesson", "")).strip()
+        if situation and lesson:
+            out.append({"situation": situation, "lesson": lesson})
+    return out
 
 
 # --- offline fallbacks -------------------------------------------------------

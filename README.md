@@ -92,14 +92,23 @@ rows that were in the prompt digest, so "why did robot X do that" is answered by
 a join rather than by a plausible story. Click any robot in the UI, or ask the
 commander console.
 
-**The fleet remembers the map between missions.** When a mission ends, what it
-learned is summarized, embedded, and written to `mission_memories`; when a new
-mission starts on the same map, that row is found by cosine search and the
-sectors earlier runs found victims in are swept first. Same map, same seed, same
-code — the only difference between run 1 and run 2 is that run 2 has been here
-before. Recall sets a prior on search *order* and nothing more: no victim is
-ever known before a scout flies over it, which is checkable, because the
-scoreboard counts located victims off belief rows.
+**The fleet learns tactics, not places.** When a mission ends, Claude reads its
+figures and derives what would transfer — *"when a robot has cleared debris to
+reach a victim and a medic is not yet present, bring the medic rather than
+continuing to explore"* — and each lesson is embedded and stored in
+`mission_memories`. At the next plan boundary a robot describes what it is
+facing, cosine search returns the tactics learned in situations like it, and
+those ride into the planning prompt.
+
+Deliberately **not** where the victims were. The same disaster does not recur on
+the same tiles, so a remembered coordinate transfers to nothing — and a fleet
+recalling victim positions is a fleet handed the answer. The lesson prompt
+forbids coordinates and sector names outright, and the run digest it reads is
+built without them so the temptation is never offered.
+
+This is also what makes retrieval real rather than decorative: lessons are
+global across every mission and every map, so the index ranks many rows against
+"what does this moment resemble?" rather than filtering to a handful.
 
 ## Repo map
 
@@ -129,14 +138,18 @@ separating because they pull in opposite directions:
 | | scope | index | what it answers |
 |---|---|---|---|
 | reconcile gate | *within* one mission | `obs_embedding_idx (mission_id, …)` | is this the victim we already know about? |
-| semantic recall | *across* missions | `mm_embedding_idx (map_key, …)` | what did we learn last time we ran this map? |
+| tactical recall | *across every mission and map* | `mm_situation_idx (embedding)` | what do we know about a moment like this? |
 
-Both are cosine (`vector_cosine_ops`, `<=>`), and in both the scope is the index
-*prefix* rather than a `WHERE` filter — a prefixed vector index is only used when
-the prefix is constrained to an exact value, and a filter that is not a prefix
-column is applied *after* the top-k. Get that wrong and the query still returns
-plausible rows. `tests/test_schema.py` and `tests/test_recall.py` assert the
-`EXPLAIN` plan, not the results, for exactly that reason.
+Both are cosine (`vector_cosine_ops`, `<=>`) and they scope in opposite
+directions, which is the whole reason they are worth reading together. The gate
+prefixes on `mission_id`, and a prefixed vector index is used *only* when the
+prefix is constrained to an exact value — a filter that is not a prefix column
+is applied after the top-k. Tactical recall has no prefix at all, because any
+scope would partition exactly the knowledge it exists to generalise.
+
+Get either wrong and the query still returns perfectly plausible rows, which is
+why `tests/test_schema.py` and `tests/test_recall.py` assert the `EXPLAIN` plan
+rather than the results.
 
 **AWS Bedrock** — Claude for planning at decision boundaries, Titan Text
 Embeddings V2 at 512 dims for observations. Rate-capped per §3.5, with rules as

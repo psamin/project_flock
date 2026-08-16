@@ -46,8 +46,8 @@ so a broken cluster can't masquerade as a green run.
 | [`sim/protocol.py`](sim/protocol.py) | Action API + websocket state frame (contracts 2 and 3) |
 | [`sim/world.py`](sim/world.py) | Authoritative world state and the tick pipeline (§4.8) |
 | [`sim/server.py`](sim/server.py) | 4 Hz tick loop, websocket broadcast, serves the client |
-| [`sim/recall.py`](sim/recall.py) | Semantic memory: summarize a finished mission, recall it in the next (§4.0) |
-| [`sim/seed_memory.py`](sim/seed_memory.py) | Runs the cold mission headless so the demo is genuinely the second |
+| [`sim/recall.py`](sim/recall.py) | Semantic memory: derive tactics from a finished mission, retrieve them in the next (§4.0) |
+| [`sim/seed_memory.py`](sim/seed_memory.py) | Runs missions headless so the fleet has experience before anyone watches |
 | [`agents/scout.py`](agents/scout.py) | Scout loop: sense → sync → think → act → report |
 | [`agents/worker.py`](agents/worker.py) | Lifter and medic: claim, path, work, complete |
 | [`agents/planning.py`](agents/planning.py) | Bedrock at plan boundaries: role cards, digest, rate cap (§4.3, §3.5) |
@@ -101,7 +101,7 @@ Canvas 2D with no CDN and no WebGL requirement, and the sprites are drawn in cod
 | `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
 | `S` | the exploration sector grid (FR-16) |
 | the console panel | six canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
-| the scoreboard | `memory` — earlier missions on this map recalled through the vector index — and `bedrock` mode plus live call count |
+| the scoreboard | `tactics` — lessons the fleet carries in, retrieved per decision through the vector index — and `bedrock` mode plus live call count |
 
 The endpoints behind it — everything except the restart is a read:
 
@@ -177,36 +177,55 @@ log_plan(mission_id, robot_id, trigger, chosen, rationale, based_on=()) -> UUID
 plans_for(mission_id, robot_id=None) -> list[Plan]
 ```
 
-## Semantic memory — the fleet remembers the map
+## Semantic memory — the fleet learns tactics
 
-When a coordinated mission finishes, what it learned is summarized from *belief
-rows* (never from simulator state — the fleet may only record what it actually
-found), embedded with Titan V2, and written to `mission_memories`. When a mission
-starts on the same map, those rows are found by cosine search over
-`mm_embedding_idx` and the sectors earlier runs found victims in are seeded at a
-higher priority, so they get swept first.
+When a coordinated mission finishes, its figures are summarised from the event
+log and Claude is asked what would transfer to a *different* map. Each lesson is
+a `situation` and what to do when it holds; the situation is embedded with Titan
+V2 and stored in `mission_memories`. At every plan boundary a robot describes
+what it is facing, cosine search over `mm_situation_idx` returns the tactics
+learned in moments like it, and those go into the planning prompt.
+
+Real output, derived live from one Aftershock run:
+
+> **when** a robot has cleared debris to reach a victim and a medic is not yet
+> present at that location — **then** immediately signal or move to bring the
+> medic to the victim rather than continuing exploration, since response time to
+> victims is critical and medics have limited capacity
+
+In the following mission, **14 of 30 logged decisions cited a recalled tactic**,
+and `plans.recalled_from` names which ones.
 
 ```bash
-make seed-memory                     # run the cold mission headless, needs COLONY_DSN
-COLONY_RECALL=0 make sim             # kill switch: run as if nothing was ever learned
+make seed-memory                     # run missions headless to build experience
+COLONY_RECALL=0 make sim             # kill switch: derive nothing this run
 ```
 
-Measured on Aftershock, same seed both ways: **312 ticks cold, 291 ticks with one
-memory recalled.** Run it both ways before scripting a demo around it — the prior
-is only as sharp as the map, and on a map where victims are spread across half
-the sectors "sweep the hot ones first" buys less than it sounds like.
+What this deliberately does **not** store is where the victims were. The same
+disaster does not recur on the same tiles, so a coordinate transfers to nothing,
+and a fleet recalling victim positions is a fleet handed the answer. Two
+mechanisms enforce it rather than one: the lesson prompt forbids coordinates and
+sector names outright, and `run_digest` — the model's only view of the run — is
+built from counts and outcomes so a place-shaped lesson has nothing to be built
+from. `tests/test_recall.py` asserts both.
 
-Three things this deliberately does **not** do:
+Three further properties worth knowing:
 
-- **It does not tell the fleet where victims are.** It biases search *order*.
-  Every victim is still found by a scout that flies over it, which is checkable:
-  `victims_located` is counted off belief rows, so a fleet that knew at tick 0
-  would show it on the scoreboard.
-- **It does not run in the baseline.** An uncoordinated run neither reads nor
-  writes memories, or the ON/OFF comparison would be measuring its own history.
-- **It does not enter the prompt digest.** Recall shapes task priorities instead,
-  because `plans.based_on` is resolved against `observations` in two places and a
-  `mission_memories` id put there is silently dropped by both.
+- **Retrieval is global.** No mission scope, no map scope. A tactic learned
+  clearing rubble on one map is exactly what should surface while clearing
+  rubble on another, so the vector index is unprefixed and always engages.
+- **The baseline never reads it.** An uncoordinated run is a control condition;
+  if it recalled what coordinated runs learned, the ON/OFF comparison would be
+  measuring its own history.
+- **Both halves fail soft.** A throttled model costs one decision its memory,
+  and a mission that ends without deriving anything is a mission that still
+  ended. The rules floor (§5.4) carries the fleet either way.
+
+Provenance is split across two columns because they resolve against two tables:
+`plans.based_on` holds `observations` — what the robot could see — and
+`plans.recalled_from` holds `mission_memories` — what it had learned. Merged
+into one `UUID[]`, half the ids would resolve to nothing, which is how a
+decision trace quietly turns back into a plausible story.
 
 ## AWS Bedrock
 
@@ -248,8 +267,9 @@ semantic. Anything claiming semantic similarity needs live or recorded Titan.
   and prefix columns only engage on an exact-value constraint.
 - Don't batch large `VECTOR` inserts, and note `IMPORT INTO` is unsupported on tables
   carrying a vector index — relevant when seeding demo data.
-- `mission_memories` prefixes on `map_key`, **not** `mission_id`: its search crosses
-  missions by design. Same rule, opposite scope.
+- `mission_memories` has **no prefix at all**: a tactic learned on one map is meant to
+  apply on the next, so any scope would partition the knowledge it exists to
+  generalise. An unprefixed vector index engages unconditionally.
 - **Do not add a secondary b-tree index that covers a vector index's prefix.** One was
   added on `(map_key, created_at DESC)` to serve the no-embedding recall path, and the
   optimizer then preferred scanning it and top-k-sorting over probing the vector index —

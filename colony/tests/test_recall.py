@@ -1,12 +1,14 @@
-"""Semantic memory: what one mission learns, and what the next one does with it.
+"""Semantic memory: tactics learned from one mission, applied in the next.
 
 Run against both the fake and CockroachDB via the `mem` fixture, because this is
 the second place the vector index carries real weight and the fake's hand-rolled
 cosine has to agree with `<=>` about ordering.
 
-The tests that matter most here are the negative ones. Recall can fail in two
-ways that look like success: a duplicate memory that crowds a real one out of
-the top-k, and a priority bump that nothing ever reads.
+The tests that matter most here are the ones about what a lesson may *contain*.
+A lesson naming a coordinate is not knowledge, it is a fact about one map — it
+transfers to no other disaster, and a fleet recalling victim positions is a
+fleet handed the answer. That failure is invisible from the outside: the rows
+look fine either way.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ import uuid
 
 import pytest
 
-from agents.scout import seed_sector_tasks
 from bedrock.adapter import BedrockAdapter
 from sim import recall as recall_mod
 from sim.world import World
@@ -27,202 +28,262 @@ MAP = "world/maps/aftershock.json"
 
 
 @pytest.fixture
-def map_key(mem):
-    """A map scope nobody else is using, removed afterwards.
-
-    Against the fake each test gets a fresh store, but against a real cluster
-    `mission_memories` persists for the session — and recall is deliberately
-    *not* scoped to a mission, so one test's memories are visible to the next
-    unless the map differs. This is the semantic-memory equivalent of the
-    `mission` fixture.
-
-    It also cleans up, which `mission` does not need to: mission ids are unique
-    per test, but this table is the one the demo reads across runs, and a
-    session's worth of `testmap-` rows sitting in it is litter in the one place
-    a judge is invited to look.
+def clean(mem):
+    """Semantic memory is deliberately global — no mission and no map scope — so
+    against a real cluster one test's lessons are visible to every other. This
+    is the equivalent of the `mission` fixture for a table that has no mission.
     """
-    key = f"testmap-{uuid.uuid4()}"
-    yield key
     conn = getattr(mem, "conn", None)
     if conn is not None:
-        conn.execute("DELETE FROM mission_memories WHERE map_key LIKE %s", (key + "%",))
+        conn.execute("DELETE FROM mission_memories")
+    yield
+    if conn is not None:
+        conn.execute("DELETE FROM mission_memories")
 
 
-def _memory(mem, mission_id, map_key, summary="victims in B2", **kw):
-    vec = BedrockAdapter().embed(summary)
-    return mem.remember_mission(
-        mission_id, map_key, summary, embedding=vec, outcome=kw or {}
+def _lesson(mem, situation, lesson="stage the medic early", mission=None):
+    return mem.remember_lesson(
+        mission or uuid.uuid4(),
+        situation,
+        lesson,
+        embedding=BedrockAdapter().embed(situation),
+        evidence={"run": "test"},
     )
 
 
 # --- the round trip ---------------------------------------------------------
 
 
-def test_a_mission_memory_comes_back(mem, map_key):
+def test_a_lesson_comes_back(mem, clean):
     mission = uuid.uuid4()
-    written = _memory(mem, mission, map_key, victim_sectors=["B2", "C2"])
-    assert written is not None
+    written = _lesson(mem, "victim behind rubble", "stage the medic", mission)
 
-    got = mem.recall_missions(map_key, BedrockAdapter().embed("victims in B2"))
+    got = mem.recall_lessons(BedrockAdapter().embed("victim behind rubble"))
     assert [m.id for m in got] == [written]
-    assert got[0].outcome["victim_sectors"] == ["B2", "C2"]
+    assert got[0].lesson == "stage the medic"
     assert got[0].mission_id == mission
 
 
-def test_recall_is_scoped_to_the_map(mem, map_key):
-    """The whole point of the index prefix. Knowledge about one map must not
-    leak into a mission on another."""
-    other = f"{map_key}-other"
-    _memory(mem, uuid.uuid4(), map_key, summary="victims in B2")
-    _memory(mem, uuid.uuid4(), other, summary="victims in B2")
+def test_recall_crosses_missions_and_maps(mem, clean):
+    """The point of the redesign. A tactic learned on one map is meant to apply
+    on the next, so there is deliberately no scope argument to pass."""
+    a = _lesson(mem, "fire near a located victim", "prioritise by hazard")
+    b = _lesson(mem, "rubble blocking the only route", "clear before dispatch")
 
-    got = mem.recall_missions(other, BedrockAdapter().embed("victims in B2"))
-    assert len(got) == 1
-    assert got[0].map_key == other
+    got = mem.recall_lessons(None, limit=5)
+    assert {m.id for m in got} == {a, b}
 
 
-def test_writing_the_same_mission_twice_is_a_no_op(mem, map_key):
-    """The sim records a run when it ends and again on reset. Without the guard
-    the same lesson lands twice and crowds a genuinely different memory out of
-    the top-k — while every row still looks correct."""
-    mission = uuid.uuid4()
-    assert _memory(mem, mission, map_key) is not None
-    assert _memory(mem, mission, map_key) is None
-
-    got = mem.recall_missions(map_key, BedrockAdapter().embed("victims in B2"))
-    assert len(got) == 1
-
-
-def test_recall_without_an_embedding_degrades_to_recent(mem, map_key):
+def test_recall_without_an_embedding_degrades_to_recent(mem, clean):
     """No Bedrock credentials must not mean no recall — it means recall stops
     being semantic. Anything else makes the whole feature credential-gated."""
-    first = _memory(mem, uuid.uuid4(), map_key, summary="one")
-    second = _memory(mem, uuid.uuid4(), map_key, summary="two")
-
-    got = mem.recall_missions(map_key, None, limit=2)
+    first = _lesson(mem, "one")
+    second = _lesson(mem, "two")
+    got = mem.recall_lessons(None, limit=2)
     assert [m.id for m in got] == [second, first]
 
 
-def test_limit_is_applied(mem, map_key):
+def test_limit_is_applied(mem, clean):
     for i in range(5):
-        _memory(mem, uuid.uuid4(), map_key, summary=f"mission {i}")
-    assert len(mem.recall_missions(map_key, None, limit=3)) == 3
+        _lesson(mem, f"situation {i}")
+    assert len(mem.recall_lessons(None, limit=3)) == 3
 
 
-def test_an_empty_map_recalls_nothing(mem):
-    assert mem.recall_missions("never-run", None) == []
+def test_an_empty_memory_recalls_nothing(mem, clean):
+    assert mem.recall_lessons(None) == []
 
 
-# --- the read path ----------------------------------------------------------
+def test_retrieval_is_counted(mem, clean):
+    """A lesson nothing ever retrieves is dead weight, and the console's claim
+    that the fleet *leans on* a tactic rests on this number."""
+    written = _lesson(mem, "victim behind rubble")
+    assert mem.recall_lessons(None)[0].times_recalled == 0
+
+    mem.mark_recalled([written])
+    mem.mark_recalled([written])
+    assert mem.recall_lessons(None)[0].times_recalled == 2
 
 
-def test_hot_sectors_are_seeded_at_a_higher_priority(mem):
+def test_marking_nothing_is_harmless(mem, clean):
+    mem.mark_recalled([])  # a decision that recalled nothing still logs
+
+
+# --- what a lesson may contain ----------------------------------------------
+
+
+def test_the_run_digest_names_no_places(mem, clean):
+    """The digest is the model's only view of the run, so anything place-shaped
+    in it comes back as a place-shaped lesson. Not offering the temptation is
+    stronger than forbidding it in the prompt — which we also do."""
     world_map = load_map(MAP)
-    mission = uuid.uuid4()
-    hot = ["B2", "C2"]
-    seed_sector_tasks(mem, mission, world_map, hot_sectors=hot)
-
-    by_kind = {t.kind: t for t in mem.open_tasks(mission)}
-    for sector in world_map.sectors:
-        task = by_kind[f"explore_sector:{sector['id']}"]
-        expected = 2 if sector["id"] in hot else 1
-        assert task.priority == expected, sector["id"]
-
-
-def test_seeding_without_memory_leaves_every_sector_equal(mem):
-    """The cold-start path, and the reason the new sort key is safe: with no
-    memories every priority is 1, so `-priority` is constant and the scout's
-    ordering is identical to the distance-only one it replaces."""
-    world_map = load_map(MAP)
-    mission = uuid.uuid4()
-    seed_sector_tasks(mem, mission, world_map)
-    assert {t.priority for t in mem.open_tasks(mission)} == {1}
-
-
-def test_the_scout_prefers_a_remembered_sector_over_a_nearer_one(mem):
-    """Without the `-t.priority` term in scout.py's sort this passes only by
-    accident of distance — which is exactly the inert-but-plausible failure
-    this test exists to catch."""
-    world_map = load_map(MAP)
-    mission = uuid.uuid4()
-    seed_sector_tasks(mem, mission, world_map, hot_sectors=["C3"])
-
-    tasks = [t for t in mem.open_tasks(mission) if t.kind.startswith("explore_sector:")]
-
-    class _Robot:
-        x = y = 0
-
-    robot = _Robot()
-    ordered = sorted(
-        tasks,
-        key=lambda t: (
-            -t.priority,
-            abs((t.target[0] or 0) - robot.x) + abs((t.target[1] or 0) - robot.y),
-            t.kind,
-        ),
-    )
-    assert ordered[0].kind == "explore_sector:C3"
-    # ...and it is genuinely not the nearest, or the assertion above proves
-    # nothing about priority.
-    nearest = min(tasks, key=lambda t: (t.target[0] or 0) + (t.target[1] or 0))
-    assert nearest.kind != "explore_sector:C3"
-
-
-# --- the summarizer ---------------------------------------------------------
-
-
-def test_the_summary_describes_what_the_fleet_saw_not_the_world(mem):
-    """Facts come out of fleet memory. A summary built from World.victims would
-    describe victims nobody found, and the next mission would 'remember'
-    knowledge that was never earned."""
-    world_map = load_map(MAP)
+    world = World(world_map, seed=world_map.seed)
     mission = uuid.uuid4()
     vec = BedrockAdapter().embed("victim under rubble")
     mem.report_observation(mission, "s1", "victim", (12, 10), embedding=vec)
+    mem.log_event(mission, "l1", "debris_cleared", {"x": 12, "y": 9})
 
-    summary, outcome = recall_mod.summarize(mem, mission, world_map)
+    digest = recall_mod.run_digest(mem, mission, world, {"ticks": 300})
 
-    assert "(12,10)" in summary
-    assert outcome["victim_sites"] == [[12, 10]]
-    assert outcome["victim_sectors"] == [world_map.sector_at(12, 10)]
-    # Every other sector is recorded as empty, which is knowledge too.
-    assert world_map.sector_at(12, 10) not in outcome["empty_sectors"]
+    for banned in ("(12,10)", "12,10", "B2", "sector"):
+        assert banned not in digest, f"{banned!r} leaked into the digest:\n{digest}"
 
 
-def test_the_summary_carries_no_run_specific_numbers(mem):
-    """The cassette key is a hash of this string. A tick count or a rescue
-    tally in it means a miss on every rerun and a silent fall back to the
-    offline embedding, which is not semantically meaningful."""
-    world_map = load_map(MAP)
-    first, second = uuid.uuid4(), uuid.uuid4()
-    vec = BedrockAdapter().embed("victim under rubble")
-    for mission in (first, second):
-        mem.report_observation(mission, "s1", "victim", (12, 10), embedding=vec)
+def test_the_lessons_prompt_forbids_coordinates():
+    """The instruction is load-bearing, so it is asserted rather than trusted."""
+    from bedrock.adapter import _lessons_prompt
 
-    assert (
-        recall_mod.summarize(mem, first, world_map)[0]
-        == recall_mod.summarize(mem, second, world_map)[0]
+    prompt = _lessons_prompt("rescued 5 of 8", limit=3)
+    assert "coordinates" in prompt
+    assert "sector" in prompt
+    assert "DIFFERENT maps" in prompt
+
+
+def test_malformed_lessons_are_dropped_not_stored():
+    """A malformed lesson is worse than no lesson: written once, then retrieved
+    into every similar situation forever."""
+    from bedrock.adapter import _parse_lessons
+
+    assert _parse_lessons("not json at all", 3) == []
+    assert _parse_lessons('{"lessons": [{"situation": "x"}]}', 3) == []
+    assert _parse_lessons('{"lessons": [{"lesson": "y"}]}', 3) == []
+    assert _parse_lessons('{"lessons": []}', 3) == []
+    good = _parse_lessons('{"lessons": [{"situation": "a", "lesson": "b"}]}', 3)
+    assert good == [{"situation": "a", "lesson": "b"}]
+
+
+def test_lessons_are_capped():
+    """A run that produced eight insights produced none."""
+    from bedrock.adapter import _parse_lessons
+
+    payload = (
+        '{"lessons": ['
+        + ",".join(f'{{"situation": "s{i}", "lesson": "l{i}"}}' for i in range(9))
+        + "]}"
+    )
+    assert len(_parse_lessons(payload, 3)) == 3
+
+
+# --- the situation a robot searches with ------------------------------------
+
+
+class _Robot:
+    role = "medic"
+    battery = 180
+    kits = 2
+
+
+def test_the_situation_describes_conditions_not_places(mem, clean):
+    """It is the query vector, so it has to land near the `situation` half of
+    stored lessons — and it must not smuggle coordinates in either."""
+    situation = recall_mod.situation_of(_Robot(), mem.get_beliefs(uuid.uuid4()), [])
+    assert "medic" in situation
+    assert "kits" in situation
+    assert "(" not in situation
+
+
+def test_the_same_predicament_produces_the_same_query(mem, clean):
+    """Determinism, and the reason one recorded embedding serves every rerun:
+    the situation text is a cassette key like any other prompt."""
+    beliefs = mem.get_beliefs(uuid.uuid4())
+    assert recall_mod.situation_of(_Robot(), beliefs, []) == recall_mod.situation_of(
+        _Robot(), beliefs, []
     )
 
 
-def test_the_query_text_is_fixed_for_a_map():
-    """Same reason as above, for the other half of the retrieval."""
-    world_map = load_map(MAP)
-    assert recall_mod.query_text(world_map) == recall_mod.query_text(load_map(MAP))
+def test_prompt_lines_pair_the_condition_with_the_advice(mem, clean):
+    _lesson(mem, "a victim is behind heavy rubble", "stage the medic adjacent")
+    lines = recall_mod.as_prompt_lines(mem.recall_lessons(None))
+    assert lines == ["when a victim is behind heavy rubble — stage the medic adjacent"]
 
 
-def test_map_key_ignores_the_seed():
-    """Two seeds on one scenario are two runs of the same map and should share
-    what was learned about it."""
-    world_map = load_map(MAP)
-    assert recall_mod.map_key(world_map) == "aftershock"
+def test_tactics_only_reach_the_prompt_when_there_are_some():
+    """A fleet that has learned nothing must produce the exact prompt it always
+    did, or every cassette entry recorded before memory existed stops matching.
+    """
+    from bedrock.adapter import _plan_prompt
+
+    without = _plan_prompt("card", "beliefs", [])
+    assert "earlier missions learned" not in without
+    with_tactics = _plan_prompt("card", "beliefs", [], ["when x — do y"])
+    assert "earlier missions learned" in with_tactics
 
 
-def test_hot_sectors_merges_across_memories(mem, map_key):
-    _memory(mem, uuid.uuid4(), map_key, summary="a", victim_sectors=["B2"])
-    _memory(mem, uuid.uuid4(), map_key, summary="b", victim_sectors=["C2", "B2"])
-    memories = mem.recall_missions(map_key, None)
-    assert recall_mod.hot_sectors(memories) == ["B2", "C2"]
+# --- the guards -------------------------------------------------------------
+
+
+def test_the_baseline_never_reads_semantic_memory(mem, clean):
+    """A baseline run is a control condition. If it read what coordinated runs
+    learned, the ON/OFF comparison would be measuring its own history."""
+    from agents.worker import Worker
+
+    _lesson(mem, "anything at all")
+    worker = Worker(
+        robot_id="l1",
+        role="lifter",
+        mission_id=uuid.uuid4(),
+        mem=mem,
+        coordinated=False,
+        embedder=BedrockAdapter(),
+    )
+    assert worker._recall(_Robot(), []) == []
+
+
+def test_a_failed_recall_costs_the_decision_its_memory_not_the_robot(mem, clean):
+    """Retrieval sits on the path between a plan boundary and an action. A
+    throttled model must cost this decision its memory, not stall the fleet."""
+    from agents.worker import Worker
+
+    class _Exploding:
+        def embed(self, text):
+            raise RuntimeError("bedrock is having a day")
+
+    worker = Worker(
+        robot_id="l1",
+        role="lifter",
+        mission_id=uuid.uuid4(),
+        mem=mem,
+        coordinated=True,
+        embedder=_Exploding(),
+    )
+    assert worker._recall(_Robot(), []) == []
+
+
+def test_a_robot_with_no_embedder_is_still_a_complete_robot(mem, clean):
+    """The rules floor (§5.4). Memory improves choices; it does not enable
+    them."""
+    from agents.worker import Worker
+
+    worker = Worker(robot_id="l1", role="lifter", mission_id=uuid.uuid4(), mem=mem)
+    assert worker.planner is None
+    assert worker.embedder is None
+    assert worker._recall(_Robot(), []) == []
+
+
+# --- provenance -------------------------------------------------------------
+
+
+def test_recalled_tactics_are_recorded_separately_from_beliefs(mem, clean):
+    """`based_on` resolves against `observations` and `recalled_from` against
+    `mission_memories`. Merged into one column an id resolves to nothing at all
+    — which is how a decision trace turns back into a plausible story."""
+    mission = uuid.uuid4()
+    tactic = _lesson(mem, "victim behind rubble")
+    belief = mem.report_observation(
+        mission, "s1", "victim", (5, 5), embedding=BedrockAdapter().embed("victim")
+    )
+
+    mem.log_plan(
+        mission,
+        "l1",
+        trigger="idle",
+        chosen={"action": "claim_task", "source": "bedrock"},
+        rationale="because",
+        based_on=[belief],
+        recalled_from=[tactic],
+    )
+    plan = mem.plans_for(mission, "l1")[0]
+    assert plan.based_on == [belief]
+    assert plan.recalled_from == [tactic]
 
 
 # --- the index actually being used ------------------------------------------
@@ -230,75 +291,27 @@ def test_hot_sectors_merges_across_memories(mem, map_key):
 
 @needs_db
 def test_semantic_recall_uses_the_vector_index(db):
-    """The correction that matters: a prefixed vector index is used only when
-    the prefix is constrained to an exact value, so this asserts the plan says
-    `vector search` rather than trusting that the results look right."""
+    """Unprefixed, so unlike the reconcile gate there is no constrain-the-prefix
+    rule to get wrong — but a b-tree covering it would still win the plan, so
+    this asserts the plan rather than trusting that the results look right."""
     vec = "[" + ",".join(["0.01"] * 512) + "]"
-    mission_ids = [uuid.uuid4() for _ in range(10)]
-    for i, mid in enumerate(mission_ids):
+    db.conn.execute("DELETE FROM mission_memories")
+    for i in range(10):
         db.conn.execute(
-            "INSERT INTO mission_memories (mission_id, map_key, summary, embedding)"
-            " VALUES (%s, 'idxtest', %s, %s)",
-            (mid, f"m{i}", vec),
+            "INSERT INTO mission_memories (mission_id, situation, lesson, embedding)"
+            " VALUES (%s, %s, 'l', %s)",
+            (uuid.uuid4(), f"s{i}", vec),
         )
     try:
         plan = "\n".join(
             r["info"]
             for r in db.conn.execute(
-                "EXPLAIN SELECT id FROM mission_memories WHERE map_key = 'idxtest'"
+                "EXPLAIN SELECT id FROM mission_memories WHERE embedding IS NOT NULL"
                 " ORDER BY embedding <=> %s LIMIT 3",
                 (vec,),
             ).fetchall()
         )
         assert "vector search" in plan, plan
-        assert "mm_embedding_idx" in plan, plan
+        assert "mm_situation_idx" in plan, plan
     finally:
-        db.conn.execute("DELETE FROM mission_memories WHERE map_key = 'idxtest'")
-
-
-def test_a_broken_recall_does_not_stop_the_mission(mem, monkeypatch):
-    """Recall sits between "restart" and the first tick, and costs a Bedrock
-    call. A throttled model must not mean no mission — that trades a fleet that
-    starts slightly worse informed for a fleet that rescues nobody."""
-    from sim import mission as mission_mod
-
-    world_map = load_map(MAP)
-    world = World(world_map, seed=world_map.seed)
-
-    def explode(*a, **kw):
-        raise RuntimeError("bedrock is having a day")
-
-    monkeypatch.setattr(mission_mod.recall_mod, "recall", explode)
-    agents = mission_mod.build_fleet(
-        world, mem, uuid.uuid4(), coordinated=True, recall_enabled=True
-    )
-
-    assert agents, "the fleet must still be built"
-    # And the sectors are still seeded, just without a prior.
-    tasks = [t for t in mem.open_tasks(list(agents.values())[0].mission_id)]
-    assert any(t.kind.startswith("explore_sector:") for t in tasks)
-
-
-# --- reset ------------------------------------------------------------------
-
-
-def test_reset_keeps_semantic_memory_when_asked(mem, map_key):
-    """`--keep-memories` is the state the demo wants: no stale missions
-    cluttering the console, but the fleet still remembers the map."""
-    from schema.reset import MEMORY_TABLE, MISSION_TABLES
-
-    assert MEMORY_TABLE not in MISSION_TABLES, (
-        "mission_memories must not be in the always-wiped list, or "
-        "--keep-memories cannot keep anything"
-    )
-    # Every table the schema defines is accounted for one way or the other.
-    from tests.conftest import SCHEMA
-
-    declared = {
-        line.split()[5].rstrip("(").strip()
-        for line in SCHEMA.read_text().splitlines()
-        if line.startswith("CREATE TABLE IF NOT EXISTS")
-    }
-    assert declared == set(MISSION_TABLES) | {MEMORY_TABLE}, (
-        f"reset does not cover every table: {declared ^ (set(MISSION_TABLES) | {MEMORY_TABLE})}"
-    )
+        db.conn.execute("DELETE FROM mission_memories")

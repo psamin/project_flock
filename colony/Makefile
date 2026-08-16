@@ -36,9 +36,9 @@ map:
 sim:
 	uv run --extra dev uvicorn sim.server:app --reload --port 8000
 
-# Run the cold mission headless so the one on screen is genuinely the second
-# (§4.0 semantic memory). Needs COLONY_DSN: a memory in an in-memory store dies
-# with the process that wrote it.
+# Run missions headless so the fleet has tactics before anyone watches (§4.0
+# semantic memory). Needs COLONY_DSN: a lesson written to an in-memory store
+# dies with the process that wrote it.
 seed-memory:
 	uv run python -m sim.seed_memory
 
@@ -46,25 +46,26 @@ seed-memory:
 reset:
 	uv run python -m schema.reset
 
-# The demo, from a known state every time: wipe everything, run the cold
-# mission headless (~30s), then serve the mission that remembers it. The
-# scoreboard reads `memory 1` and the ticker says which sectors it recalled.
+# The demo, from a known state every time: wipe everything, run one mission
+# headless to learn from (~30s), then serve a mission that draws on it. The
+# scoreboard reads `tactics 3`, and clicking a robot shows which of them were in
+# front of it when it decided.
 #
 # Deterministic because the seed is fixed: the two missions are byte-identical
-# worlds with byte-identical fleets, and the only difference is the memory.
+# worlds with byte-identical fleets, and the only difference is the experience.
 demo:
 	uv run python -m schema.reset --yes
 	uv run python -m sim.seed_memory
 	@echo ""
-	@echo "seeded. starting the mission that remembers it -> http://localhost:8000"
+	@echo "seeded. starting a mission that draws on it -> http://localhost:8000"
 	@echo ""
 	uv run --extra dev uvicorn sim.server:app --port 8000
 
-# The same starting state with nothing remembered, for showing the contrast.
+# The same starting state with nothing learned, for showing the contrast.
 demo-cold:
 	uv run python -m schema.reset --yes
 	@echo ""
-	@echo "cold start, nothing remembered -> http://localhost:8000"
+	@echo "cold start, no tactics -> http://localhost:8000"
 	@echo ""
 	COLONY_RECALL=0 uv run --extra dev uvicorn sim.server:app --port 8000
 

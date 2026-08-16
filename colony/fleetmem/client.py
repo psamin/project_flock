@@ -24,7 +24,7 @@ from fleetmem.types import (
     OPEN,
     Belief,
     Match,
-    MissionMemory,
+    Lesson,
     Plan,
     Task,
 )
@@ -236,75 +236,80 @@ class CockroachFleetMem:
 
     # --- semantic memory --------------------------------------------------
 
-    def remember_mission(
+    def remember_lesson(
         self,
         mission_id: UUID,
-        map_key: str,
-        summary: str,
+        situation: str,
+        lesson: str,
         embedding: Sequence[float] | None = None,
-        outcome: dict[str, Any] | None = None,
-    ) -> UUID | None:
-        """Write what one mission learned. None when it is already written.
+        evidence: dict[str, Any] | None = None,
+        confidence: float = 0.5,
+    ) -> UUID:
+        """Write down a tactic this mission learned.
 
-        Idempotent per mission, and it has to be: the sim records a run both
-        when the mission ends and again if an operator toggles away from it, so
-        an unguarded INSERT deposits the same lesson twice and the next mission
-        recalls it twice — with the duplicate crowding a genuinely different
-        memory out of the top-k. The guard is in SQL rather than in a
-        process-local set, so a server restart cannot forget.
+        `situation` is what gets embedded — retrieval asks what the current
+        moment resembles, so the vector has to describe conditions rather than
+        the advice. Storing the lesson text unembedded also means a lesson can
+        be reworded without moving in the index.
         """
         row = self.conn.execute(
             "INSERT INTO mission_memories"
-            "  (mission_id, map_key, summary, embedding, outcome)"
-            " SELECT %s, %s, %s, %s, %s"
-            "  WHERE NOT EXISTS ("
-            "    SELECT 1 FROM mission_memories WHERE mission_id = %s)"
-            " RETURNING id",
+            "  (mission_id, situation, lesson, embedding, evidence, confidence)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 mission_id,
-                map_key,
-                summary,
+                situation,
+                lesson,
                 _vec(embedding),
-                json.dumps(outcome or {}),
-                mission_id,
+                json.dumps(evidence or {}),
+                confidence,
             ),
         ).fetchone()
-        return None if row is None else row["id"]
+        return row["id"]
 
-    def recall_missions(
+    def recall_lessons(
         self,
-        map_key: str,
         embedding: Sequence[float] | None,
         limit: int = 3,
-    ) -> list[MissionMemory]:
-        """The most similar earlier missions on this map, nearest first.
+    ) -> list[Lesson]:
+        """The tactics most like the situation described by `embedding`.
 
         The second place CockroachDB's vector indexing carries real weight, and
-        the only search in the SDK that crosses missions. `map_key` is
-        constrained to an exact value because it is the index prefix — see the
-        comment on mm_embedding_idx; a range or an absent filter would silently
-        demote this to a full scan and post-filter.
+        the only search in the SDK that crosses missions *and* maps. There is no
+        scope argument on purpose: a lesson learned clearing rubble on one map
+        is exactly what should surface while clearing rubble on another, and any
+        filter here would partition the knowledge this is built to generalise.
 
-        Without an embedding this degrades to most-recent-first, the same way
-        find_similar degrades to position and kind. Recall still works with no
-        Bedrock credentials; it just stops being semantic.
+        Without an embedding it degrades to the most recently learned. Recall
+        still works with no Bedrock credentials; it just stops being semantic.
         """
         if embedding is None:
             rows = self.conn.execute(
                 "SELECT *, 0.0 AS distance FROM mission_memories"
-                " WHERE map_key = %s"
                 " ORDER BY created_at DESC LIMIT %s",
-                (map_key, limit),
+                (limit,),
             ).fetchall()
         else:
             vec = _vec(embedding)
             rows = self.conn.execute(
                 "SELECT *, embedding <=> %s AS distance FROM mission_memories"
-                " WHERE map_key = %s AND embedding IS NOT NULL"
+                " WHERE embedding IS NOT NULL"
                 " ORDER BY embedding <=> %s LIMIT %s",
-                (vec, map_key, vec, limit),
+                (vec, vec, limit),
             ).fetchall()
-        return [_memory(r) for r in rows]
+        return [_lesson(r) for r in rows]
+
+    def mark_recalled(self, lesson_ids: Sequence[UUID]) -> None:
+        """Count a retrieval. A lesson nothing ever retrieves is dead weight,
+        and this is what lets the console say which tactics the fleet actually
+        leans on rather than merely which ones it wrote down."""
+        if not lesson_ids:
+            return
+        self.conn.execute(
+            "UPDATE mission_memories SET times_recalled = times_recalled + 1"
+            " WHERE id = ANY(%s)",
+            (list(lesson_ids),),
+        )
 
     # --- tasks ------------------------------------------------------------
 
@@ -586,6 +591,7 @@ class CockroachFleetMem:
         chosen: dict[str, Any],
         rationale: str,
         based_on: Sequence[UUID] = (),
+        recalled_from: Sequence[UUID] = (),
     ) -> UUID:
         """Record a decision and the memories that drove it (FR-17, §4.0).
 
@@ -594,10 +600,17 @@ class CockroachFleetMem:
         into a traceable answer to "why?" — the commander console joins these
         back to `observations`, and clicking a robot in the UI shows rationale
         plus sources.
+
+        `recalled_from` is the same idea for the other kind of memory: the
+        tactics retrieved from `mission_memories` that were in the prompt. Two
+        columns rather than one because they resolve against two tables, and an
+        id in the wrong one resolves to nothing at all — which turns a decision
+        trace back into a plausible story, quietly.
         """
         row = self.conn.execute(
-            "INSERT INTO plans (mission_id, robot_id, trigger, chosen, rationale, based_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO plans"
+            "  (mission_id, robot_id, trigger, chosen, rationale, based_on, recalled_from)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 mission_id,
                 robot_id,
@@ -605,6 +618,7 @@ class CockroachFleetMem:
                 json.dumps(chosen),
                 rationale,
                 list(based_on) or None,
+                list(recalled_from) or None,
             ),
         ).fetchone()
         return row["id"]
@@ -683,13 +697,15 @@ def _belief(r: dict[str, Any]) -> Belief:
     )
 
 
-def _memory(r: dict[str, Any]) -> MissionMemory:
-    return MissionMemory(
+def _lesson(r: dict[str, Any]) -> Lesson:
+    return Lesson(
         id=r["id"],
         mission_id=r.get("mission_id"),
-        map_key=r["map_key"],
-        summary=r["summary"] or "",
-        outcome=r["outcome"] or {},
+        situation=r["situation"] or "",
+        lesson=r["lesson"] or "",
+        evidence=r["evidence"] or {},
+        confidence=float(r["confidence"] or 0.0),
+        times_recalled=int(r["times_recalled"] or 0),
         distance=float(r["distance"]),
         created_at=r.get("created_at"),
     )
@@ -704,6 +720,7 @@ def _plan(r: dict[str, Any]) -> Plan:
         chosen=r["chosen"] or {},
         rationale=r["rationale"] or "",
         based_on=list(r["based_on"] or []),
+        recalled_from=list(r.get("recalled_from") or []),
         at=r["at"],
     )
 

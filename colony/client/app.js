@@ -451,7 +451,7 @@ function updateHud(metrics) {
       ? "—"
       : Math.round(metrics.median_time_to_stabilize),
   );
-  setText("m-recall", metrics.recalled_memories ?? 0);
+  setText("m-recall", metrics.lessons_known ?? 0);
   // Mode and count together, because either alone misleads: "live" with zero
   // calls has not decided anything yet, and a count without the mode does not
   // say whether those calls were AWS or a cassette.
@@ -524,11 +524,6 @@ const TICKER_TEXT = {
   aftershock: () => "AFTERSHOCK — the map just changed",
   robot_lost: (e) => `SIGNAL LOST — silent ${e.detail.silent_for_seconds}s`,
   robot_recovered: () => "back on the air",
-  // The one line that says this fleet has been here before. Names the sectors
-  // so the claim is checkable against where the scouts actually go next.
-  memory_recalled: (e) =>
-    `recalled ${e.detail.memories} earlier mission${e.detail.memories === 1 ? "" : "s"}` +
-    ` (cosine ${e.detail.distance}) — sweeping ${e.detail.sectors.join(", ")} first`,
 };
 
 const TICKER_CLASS = {
@@ -540,7 +535,6 @@ const TICKER_CLASS = {
   sector_swept: "sector",
   robot_lost: "bad",
   robot_recovered: "good",
-  memory_recalled: "sector",
 };
 
 function logEvents(events) {

@@ -134,8 +134,11 @@ def test_every_question_is_scoped_to_something_the_server_supplies():
     """
     for question in QUESTIONS:
         if question.memory == "semantic":
-            assert question.params[0] == "map_key"
-            assert "map_key = %s" in question.sql
+            # Tactics carry no scope at all — not a mission, not a map. One
+            # learned clearing rubble on one map is meant to apply on the next,
+            # so any scope here would defeat the point of storing it. It is
+            # also the only table that holds nothing mission-identifying.
+            assert question.params == ()
         else:
             assert question.params[0] == "mission_id"
             assert "mission_id = %s" in question.sql
@@ -143,7 +146,7 @@ def test_every_question_is_scoped_to_something_the_server_supplies():
 
 def test_semantic_memory_is_the_only_question_that_leaves_the_mission():
     """Guards the exception above from spreading. A second unscoped question
-    would be a bug, not a feature."""
+    would be a bug, not a feature — every other table has a mission in it."""
     unscoped = [q.id for q in QUESTIONS if "mission_id" not in q.params]
     assert unscoped == ["what_did_we_learn"]
 

@@ -1,160 +1,168 @@
-"""Semantic memory: what one mission learned, and how the next one uses it.
+"""Semantic memory: tactics learned from one mission, applied in the next.
 
 The four-memory taxonomy (§4.0) names `mission_memories` as SEMANTIC memory —
-what we learned across runs — and it is the one table whose search deliberately
-crosses missions. This module is both ends of that: the summarizer that writes a
-finished mission down, and the recall that seeds the next one.
+what we learned across runs. The question is what "learned" can honestly mean
+for a fleet that will never see the same disaster twice.
 
-Two rules shape everything here.
+Not where the victims were. The same collapse does not recur on the same tiles,
+so a remembered coordinate transfers to nothing — and a fleet that recalls
+victim positions is a fleet handed the answer, which is worse than useless in
+front of anyone reading carefully.
 
-**Facts come out of fleet memory, never off the simulator.** A summary built
-from `World.victims` would describe victims the fleet never found, and the next
-mission would then "remember" knowledge nobody ever earned. Everything below
-reads `get_beliefs`, the same discipline `sim/metrics.py` opens with.
+What transfers is **technique**. That a victim behind rubble-heavy debris is
+worth staging a medic for before the clear finishes. That fire adjacent to a
+located victim outruns a medic dispatched on distance alone. Those hold on a map
+nobody has walked yet, and they are the kind of thing a fleet can only learn by
+having run missions before.
 
-**The embedding is the retrieval key; the JSONB is the payload.** The summary is
-prose so it embeds to something meaningful, and nothing downstream ever parses
-it — the read path acts on `outcome["victim_sectors"]`. Asking a model to parse
-English back out of its own summary would be a second place to go wrong for no
-gain.
+So the loop is:
 
-A consequence of the first rule that is easy to get wrong: **run-specific
-numbers must stay out of the embedded text**. The cassette key is a hash of the
-exact string (`bedrock/adapter.py:_key`), so a summary carrying "rescued 7 of 8
-in 940 ticks" misses the cassette on every rerun and silently degrades to the
-offline embedding, which is not semantically meaningful. Victim positions are map
-data rather than run data, so a summary built from them is near-identical run to
-run — which is what makes one recorded Titan embedding reusable. Counts and
-timings go in `outcome`, where they belong anyway.
+    mission ends   ->  summarise what happened, in figures rather than places
+                   ->  ask Claude for tactics that would generalise
+                   ->  embed the *situation* each applies to, store both
+
+    plan boundary  ->  describe what this robot is facing right now
+                   ->  cosine-search for the situations most like it
+                   ->  put those tactics in the planning prompt
+
+The embedding is of the situation rather than the advice, because retrieval asks
+"what does this moment resemble?" — which is the whole reason a vector index
+belongs here and a keyword lookup does not.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
-from world.map_format import WorldMap
-
-# How many earlier missions to pull. Small on purpose: the read path only wants
-# a prior on search order, and every extra memory dilutes it.
+# How many tactics to put in front of a planning robot. Small: the digest budget
+# is ~1.5k tokens (§4.3), and a model given twelve maxims applies none of them.
 RECALL_LIMIT = 3
 
-# Victim and hazard sites named in the summary. Enough to characterise the map,
-# short enough to stay well inside the digest budget.
-SITE_LIMIT = 8
+# How many lessons to draw from one mission. A run that produced eight
+# "insights" produced none; this cap is a quality filter, not a cost one.
+LESSON_LIMIT = 3
 
 
-def map_key(world_map: WorldMap) -> str:
-    """One definition of "the same map".
+# --- the write path: what one mission learned --------------------------------
 
-    Name, not path and not seed: two different seeds on Aftershock are two runs
-    of the same scenario and should share what was learned about it. Knowledge
-    about this map's rubble does not transfer to a different map, which is why
-    this is the vector index prefix rather than a filter.
+
+def run_digest(mem: Any, mission_id: Any, world: Any, metrics: dict[str, Any]) -> str:
+    """One mission's outcome, in figures a tactic could be derived from.
+
+    Deliberately free of coordinates. The digest is the LLM's only view of the
+    run, so anything place-shaped in here comes back as a place-shaped lesson —
+    the prompt forbids that, and not offering the temptation is stronger than
+    forbidding it.
+
+    Everything is read from the event log and belief rows rather than simulator
+    state, the same discipline sim/metrics.py opens with: the fleet may only
+    learn from what it actually observed.
     """
-    return (world_map.name or "unknown").strip().lower().replace(" ", "_")
+    events = mem.events(mission_id)
+    verbs = Counter(e["verb"] for e in events)
+    beliefs = mem.get_beliefs(mission_id)
+    victims = [b for b in beliefs if b.kind == "victim"]
+    hazards = [b for b in beliefs if b.kind == "hazard"]
 
-
-def query_text(world_map: WorldMap) -> str:
-    """The text recall embeds to search with.
-
-    Fixed per map, and it has to be: this string is hashed into the cassette
-    key, so anything varying per run (a tick count, a mission id) would miss the
-    cassette on every rerun and fall back to the offline embedding. Kept beside
-    the summary template below so the two stay in sympathy — they are the query
-    and the document of the same retrieval.
-    """
-    return (
-        f"disaster-response mission on the {world_map.name or 'unknown'} map, "
-        f"a {world_map.width}x{world_map.height} collapsed city block; "
-        "locate and stabilize victims trapped behind debris"
-    )
-
-
-def summarize(mem: Any, mission_id: Any, world_map: WorldMap) -> tuple[str, dict]:
-    """What this mission learned: prose to embed, and JSON to act on.
-
-    Returns `(summary, outcome_fragment)`. The caller merges its metrics into
-    the fragment — this function does not compute numbers, it reports places.
-    """
-    victims = sorted(
-        mem.get_beliefs(mission_id, kind="victim"),
-        key=lambda b: (-b.sightings, b.pos),
-    )[:SITE_LIMIT]
-    hazards = sorted({b.pos for b in mem.get_beliefs(mission_id, kind="hazard")})[
-        :SITE_LIMIT
-    ]
-
-    victim_sites = [list(b.pos) for b in victims]
-    hazard_sites = [list(p) for p in hazards]
-    victim_sectors = sorted(
-        {s for s in (world_map.sector_at(*b.pos) for b in victims) if s}
-    )
-    all_sectors = {s["id"] for s in world_map.sectors}
-    empty_sectors = sorted(all_sectors - set(victim_sectors))
+    # How much of the work was unblocking rather than rescuing — the ratio a
+    # lesson about staging or ordering would key off.
+    clears = verbs.get("debris_cleared", 0)
+    rescues = verbs.get("victim_stabilized", 0)
+    lost = verbs.get("victim_lost", 0)
 
     lines = [
-        f"Disaster-response mission on the {world_map.name or 'unknown'} map, "
-        f"a {world_map.width}x{world_map.height} collapsed city block."
+        f"Fleet: {len(world.robots)} robots (scouts, one lifter, one medic) on a "
+        f"{world.map.width}x{world.map.height} grid, {metrics.get('ticks', 0)} ticks.",
+        f"Rescued {rescues} of {metrics.get('victims_total', 0)} victims; {lost} died "
+        f"before a medic arrived.",
+        f"Located {len(victims)} victims and {len(hazards)} hazards.",
+        f"Cleared debris {clears} times to reach them.",
     ]
-    if victim_sites:
-        where = ", ".join(f"({x},{y})" for x, y in victim_sites)
-        lines.append(f"Victims were found at {where}.")
-    if victim_sectors:
-        lines.append(f"Victims clustered in sectors {', '.join(victim_sectors)}.")
-    if hazard_sites:
-        where = ", ".join(f"({x},{y})" for x, y in hazard_sites)
-        lines.append(f"Fire and hazards were reported near {where}.")
-    if empty_sectors:
-        lines.append(f"Sectors {', '.join(empty_sectors)} held no victims.")
-
-    outcome = {
-        "map": map_key(world_map),
-        "victim_sites": victim_sites,
-        "hazard_sites": hazard_sites,
-        # The only field the read path consumes. Everything else is for the
-        # console, the writeup, and anyone reading the table by hand.
-        "victim_sectors": victim_sectors,
-        "empty_sectors": empty_sectors,
-    }
-    return " ".join(lines), outcome
-
-
-def write_memory(
-    mem: Any,
-    embedder: Any,
-    mission_id: Any,
-    world_map: WorldMap,
-    metrics: dict[str, Any] | None = None,
-) -> Any:
-    """Deposit what this mission learned. Returns the row id, or None if already
-    written (see `remember_mission`'s idempotence guard)."""
-    summary, outcome = summarize(mem, mission_id, world_map)
-    outcome["metrics"] = metrics or {}
-    embedding = embedder.embed(summary) if embedder is not None else None
-    return mem.remember_mission(
-        mission_id,
-        map_key(world_map),
-        summary,
-        embedding=embedding,
-        outcome=outcome,
-    )
+    median = metrics.get("median_time_to_stabilize")
+    if median is not None:
+        lines.append(f"Median ticks from mission start to a rescue: {median}.")
+    if metrics.get("double_work_incidents"):
+        lines.append(
+            f"{metrics['double_work_incidents']} tasks were claimed by more than one "
+            "robot over the run — wasted trips."
+        )
+    if metrics.get("duplicate_effort_index"):
+        lines.append(
+            f"{round(metrics['duplicate_effort_index'] * 100)}% of tile visits covered "
+            "ground another robot had already seen."
+        )
+    if verbs.get("fire_spread"):
+        lines.append(f"Fire spread {verbs['fire_spread']} times during the mission.")
+    if verbs.get("aftershock"):
+        lines.append("An aftershock changed the map mid-mission.")
+    if verbs.get("returning_to_base"):
+        lines.append(
+            f"Robots broke off {verbs['returning_to_base']} times to recharge or restock."
+        )
+    return "\n".join(lines)
 
 
-def recall(mem: Any, embedder: Any, world_map: WorldMap, limit: int = RECALL_LIMIT):
-    """Earlier missions on this map, nearest first."""
-    embedding = embedder.embed(query_text(world_map)) if embedder is not None else None
-    return mem.recall_missions(map_key(world_map), embedding, limit=limit)
+def learn(mem: Any, embedder: Any, mission_id: Any, world: Any, metrics: dict) -> list:
+    """Derive tactics from a finished mission and write them down.
 
-
-def hot_sectors(memories) -> list[str]:
-    """Sectors earlier missions found victims in.
-
-    This is a prior on search *order* and nothing more. It does not tell the
-    fleet where victims are — that would be sensing without a sensor, and the
-    scoreboard counts located victims off belief rows, so a fleet that "knew"
-    at tick 0 would be visibly cheating. Every victim still has to be found by a
-    scout that flies over it.
+    Returns the ids written. Empty is a normal outcome: a run with nothing to
+    generalise should add nothing, and a table of vacuous maxims is worse than
+    an empty one — every lesson stored is a lesson retrieved into every similar
+    situation from then on.
     """
-    return sorted(
-        {s for m in memories for s in (m.outcome.get("victim_sectors") or [])}
-    )
+    digest = run_digest(mem, mission_id, world, metrics)
+    lessons = embedder.derive_lessons(digest, limit=LESSON_LIMIT)
+    written = []
+    for item in lessons:
+        written.append(
+            mem.remember_lesson(
+                mission_id,
+                item["situation"],
+                item["lesson"],
+                embedding=embedder.embed(item["situation"]),
+                evidence={"run": digest, "metrics": metrics},
+            )
+        )
+    return written
+
+
+# --- the read path: what this moment resembles -------------------------------
+
+
+def situation_of(robot: Any, beliefs: list, open_tasks: list) -> str:
+    """What this robot is facing, as the text recall searches with.
+
+    Written to describe conditions rather than places, so it lands near the
+    `situation` half of stored lessons. Deterministic given the same state:
+    counts and categories only, no ids and no coordinates, so the same
+    predicament produces the same query vector — which is what lets one recorded
+    embedding serve every rerun.
+    """
+    kinds = Counter(b.kind for b in beliefs)
+    waiting = Counter(t.kind.split(":", 1)[0] for t in open_tasks)
+    parts = [
+        f"{getattr(robot, 'role', 'robot')} with battery {getattr(robot, 'battery', 0)}",
+        f"{kinds.get('victim', 0)} victims and {kinds.get('hazard', 0)} hazards known",
+    ]
+    if waiting:
+        parts.append(
+            "open work: "
+            + ", ".join(f"{n} {kind}" for kind, n in sorted(waiting.items()))
+        )
+    else:
+        parts.append("no open work")
+    if getattr(robot, "kits", None):
+        parts.append(f"carrying {robot.kits} kits")
+    return "; ".join(parts)
+
+
+def recall(mem: Any, embedder: Any, situation: str, limit: int = RECALL_LIMIT) -> list:
+    """The tactics most like this situation, nearest first."""
+    embedding = embedder.embed(situation) if embedder is not None else None
+    return mem.recall_lessons(embedding, limit=limit)
+
+
+def as_prompt_lines(lessons: list) -> list[str]:
+    """Render lessons for the planning prompt: the condition, then the advice."""
+    return [f"when {m.situation} — {m.lesson}" for m in lessons]

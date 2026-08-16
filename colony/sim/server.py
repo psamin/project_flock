@@ -47,11 +47,11 @@ METRICS_EVERY_TICKS = TICK_HZ
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
 
-# Semantic memory (§4.0): read what earlier missions on this map learned, and
-# write this one down when it ends. A kill switch rather than a code change,
-# because the one place this could misbehave is in front of an audience — and
-# `COLONY_RECALL=0` also gives the demo a way to show the cold-start run and the
-# remembering run back to back on the same binary.
+# Semantic memory (§4.0): derive tactics when a mission ends. Retrieval happens
+# per plan boundary inside the agents; this switch governs the write, and gives
+# the demo a way to show a fleet that has learned nothing beside one that has,
+# on the same binary. A kill switch rather than a code change, because the one
+# place this could misbehave is in front of an audience.
 RECALL_ENABLED = os.environ.get("COLONY_RECALL", "1") != "0"
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,9 +195,6 @@ class Mission:
         self.world = World(load_map(self.map_path), seed=self.seed)
         self.world.shared_vision = coordinated
         self.mission_id = uuid.uuid4()
-        # What earlier missions on this map taught us, for the ticker and the
-        # HUD. Populated by build_fleet, which is where recall is read.
-        self.recalled: list[Any] = []
         self.agents = build_fleet(
             self.world,
             self.mem,
@@ -206,8 +203,6 @@ class Mission:
             seed=self.seed,
             embedder=self.embedder,
             planner=self.planner,
-            recall_enabled=RECALL_ENABLED,
-            recalled=self.recalled,
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
@@ -288,12 +283,26 @@ class Mission:
             # /health. Both are claims the demo makes out loud — "the fleet has
             # done this before", "the LLM is deciding" — and a claim nobody can
             # see on screen is a claim a judge has to take on trust.
-            "recalled_memories": len(self.recalled),
+            "lessons_known": self._lessons_known(),
             "bedrock_mode": self.embedder.mode,
             "bedrock_calls": self.embedder.calls,
         }
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
+
+    def _lessons_known(self) -> int:
+        """How many tactics the fleet is carrying into this mission.
+
+        Reads 0 on a fleet that has never finished a mission, which is the
+        honest number and the one that makes a later run's figure mean
+        something. Counted rather than cached because a mission ending mid-run
+        adds to it, and swallowed on failure because a scoreboard field is not
+        worth a broken tick.
+        """
+        try:
+            return len(self.mem.recall_lessons(None, limit=100))
+        except Exception:  # noqa: BLE001 - a HUD number, not a mission
+            return 0
 
     def focus_point(self) -> tuple[int, int] | None:
         """Somewhere worth asking "what do we know about here?" about.
@@ -362,37 +371,9 @@ class Mission:
             [(e["actor"], e["verb"], e["detail"]) for e in frame.events],
         )
         frame.lost = self._scan_for_lost(frame)
-        self._announce_recall(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
-
-    def _announce_recall(self, frame: Any) -> None:
-        """Put what the fleet remembered on the ticker, once, on tick 1.
-
-        Recall happens in `build_fleet`, before the first tick and before any
-        viewer is attached, so without this it is invisible: the mission simply
-        starts, and the fact that it started *knowing something* never reaches
-        the screen. `memory_recalled` is already in the event log — this is the
-        same append-to-frame treatment `_scan_for_lost` gives the lost edges,
-        for the same reason, and is likewise not re-logged.
-        """
-        if self.world.tick != 1 or not self.recalled:
-            return
-        top = self.recalled[0]
-        sectors = recall_mod.hot_sectors(self.recalled)
-        frame.events.append(
-            {
-                "tick": self.world.tick,
-                "actor": "fleet",
-                "verb": "memory_recalled",
-                "detail": {
-                    "memories": len(self.recalled),
-                    "distance": round(top.distance, 3),
-                    "sectors": sectors,
-                },
-            }
-        )
 
     def _scan_for_lost(self, frame: Any) -> list[str]:
         """Run the heartbeat scan on its own cadence and put the edges on the
@@ -450,7 +431,7 @@ class Mission:
             self._remember()
 
     def _remember(self) -> None:
-        """Write what this mission learned into semantic memory (§4.0).
+        """Derive tactics from this mission and write them down (§4.0).
 
         Finished, coordinated runs only. An unfinished run has nothing settled
         to teach, and a baseline run is a control condition — a memory it wrote
@@ -464,13 +445,15 @@ class Mission:
         away from an already-finished run is a no-op rather than a duplicate.
         """
         try:
-            recall_mod.write_memory(
+            learned = recall_mod.learn(
                 self.mem,
                 self.embedder,
                 self.mission_id,
-                self.world.map,
+                self.world,
                 self.metrics(),
             )
+            if learned:
+                print(f"[sim] learned {len(learned)} tactic(s) from this mission")
         except Exception as exc:  # noqa: BLE001 - a demo must not die here
             print(f"[sim] could not write mission memory: {type(exc).__name__}: {exc}")
 
@@ -540,8 +523,7 @@ async def lifespan(_: FastAPI):
     # cold run and the remembering run are distinguishable from the log alone.
     print(
         f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-        f"({mission.memory_kind} memory, {len(mission.agents)} robots, "
-        f"{len(mission.recalled)} recalled)"
+        f"({mission.memory_kind} memory, {len(mission.agents)} robots)"
     )
     try:
         yield
@@ -658,8 +640,6 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
     # mission knows which map it is on — the same reason mission_id is injected
     # rather than accepted. It is also what stops the console being asked about
     # a map the fleet is not on.
-    if question is not None and "map_key" in question.params:
-        params["map_key"] = recall_mod.map_key(mission.world.map)
     try:
         result = console_questions.answer(
             mission.reader(),
