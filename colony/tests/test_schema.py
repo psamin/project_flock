@@ -80,10 +80,18 @@ def test_cosine_query_actually_uses_the_index(db, mission):
 
 
 def test_schema_is_idempotent(db):
-    """`make dev` re-runs this on every start; it must not fail on a live db."""
+    """`make dev` re-runs this on every start; it must not fail on a live db.
+
+    Applied statement by statement, the way schema.apply does it. Sent as one
+    string the file becomes a single implicit transaction, and CockroachDB
+    rejects `ALTER TABLE ... SET (schema_locked = ...)` in that form — so a
+    whole-file execute here would fail on a statement that is correct.
+    """
+    from schema.apply import statements
     from tests.conftest import SCHEMA
 
-    db.conn.execute(SCHEMA.read_text())
+    for stmt in statements(SCHEMA.read_text()):
+        db.conn.execute(stmt)
 
 
 @pytest.mark.parametrize("table", TABLES)

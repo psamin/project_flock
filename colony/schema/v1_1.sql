@@ -143,15 +143,47 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 
 
--- ═══ SEMANTIC MEMORY — what we learned across missions (P1) ══════════════════
-
+-- ═══ SEMANTIC MEMORY — what we learned across missions ═══════════════════════
+--
+-- The one table whose search is deliberately NOT scoped to a mission: recalling
+-- across runs is the entire point. It is scoped to a *map*, and that scoping is
+-- the index prefix rather than a WHERE clause, for the mirror image of the
+-- reason documented on obs_embedding_idx above.
+--
+-- A vector index is used only when every prefix column is constrained to a
+-- specific value, and a filter is accelerated only when it matches a prefix
+-- column. So a bare `WHERE map_key = ...` against an unprefixed vector index is
+-- applied *after* the top-k: a memory of this map sitting behind `limit`
+-- memories of another map is silently never returned. Correct-looking, wrong,
+-- and the same shape of mistake as building an l2 index for a cosine query.
+--
+-- `map_key` is NOT NULL because a prefix column has to be constrained to an
+-- exact value for the index to engage at all — a NULL map_key would be a row
+-- that can be written and never recalled.
 CREATE TABLE IF NOT EXISTS mission_memories (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  summary     STRING,
-  embedding   VECTOR(512),
-  outcome     JSONB,
-  created_at  TIMESTAMPTZ DEFAULT now()
+  mission_id  UUID,                  -- the run that learned this; joins to events/plans
+  map_key     STRING NOT NULL DEFAULT 'unknown',
+  summary     STRING,                -- the text that was embedded; human-readable
+  embedding   VECTOR(512),           -- Titan V2 @ 512 dims
+  outcome     JSONB,                 -- the machine-readable half the read path uses
+  created_at  TIMESTAMPTZ DEFAULT now(),
+  VECTOR INDEX mm_embedding_idx (map_key, embedding vector_cosine_ops)
 );
+-- There is deliberately NO secondary index on (map_key, created_at). One was
+-- added here for the degraded no-embedding recall path and measured: it wins
+-- the plan and the vector index stops running. Given a b-tree that already
+-- satisfies `WHERE map_key = ...`, the optimizer prefers scanning it and
+-- top-k-sorting the result over probing the vector index — a correct choice at
+-- this row count, and the wrong one for us, because the cosine search is the
+-- capability rather than an optimisation. Confirmed by EXPLAIN both ways
+-- against the Cloud cluster: with both indexes the plan reads
+-- `mission_memories@mm_map_recent_idx` and no `vector search` node appears;
+-- with only the vector index it reads `mission_memories@mm_embedding_idx`.
+--
+-- The no-embedding path scans instead, which costs nothing on a table holding
+-- a handful of rows per map, and tests/test_recall.py asserts the plan rather
+-- than the results so this cannot regress quietly.
 
 
 -- ═══ MIGRATIONS — v0 -> v1.1 ═════════════════════════════════════════════════
@@ -178,3 +210,32 @@ UPDATE tasks
 -- on lease_expires_at; the old index stays harmless if present.
 CREATE INDEX IF NOT EXISTS tasks_mission_status_lease_idx
   ON tasks (mission_id, status, lease_expires_at);
+
+
+-- ═══ MIGRATIONS — v1.1 -> v1.2 ═══════════════════════════════════════════════
+--
+-- Semantic memory gets a scenario key and a cosine index. Same reasoning as
+-- above: the CREATE TABLE for mission_memories skipped every database that
+-- already had the v1.1 shape, columns and indexes alike, so the statements are
+-- restated here in their idempotent forms. Without them, recall runs against a
+-- table with no map_key column — and once the column exists, full-scans.
+--
+-- CockroachDB Cloud creates tables with `schema_locked = true`, which rejects
+-- schema changes outright. Unlock, migrate, relock. Each statement is separately
+-- idempotent, so a re-run against an already-migrated database is a no-op.
+ALTER TABLE mission_memories SET (schema_locked = false);
+
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS mission_id UUID;
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS map_key STRING NOT NULL DEFAULT 'unknown';
+
+-- Named to match the inline definition above, so this is a no-op on a freshly
+-- created database — CREATE ... IF NOT EXISTS matches on the index name.
+CREATE VECTOR INDEX IF NOT EXISTS mm_embedding_idx
+  ON mission_memories (map_key, embedding vector_cosine_ops);
+
+-- Dropped rather than never created: an earlier cut of this migration shipped
+-- it, and on any database that got it the vector index silently stops being
+-- used. See the note on the table above.
+DROP INDEX IF EXISTS mission_memories@mm_map_recent_idx;
+
+ALTER TABLE mission_memories SET (schema_locked = true);
