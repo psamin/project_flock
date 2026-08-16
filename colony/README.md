@@ -278,7 +278,17 @@ semantic. Anything claiming semantic similarity needs live or recorded Titan.
   `mm_map_recent_idx` and no `vector search` node appears. It is now dropped in the
   migration block.
 - Both vector-index tests assert the **`EXPLAIN` plan**, not the results, because every
-  failure mode above returns perfectly plausible rows.
+  failure mode here returns perfectly plausible rows.
+- **`WHERE embedding IS NOT NULL` disables the vector index.** It reads as hygiene and
+  costs the capability: only filters matching a prefix column keep the index engaged,
+  and that one matches nothing. `<=>` against NULL is NULL and NULLs sort last, so the
+  guard was never needed.
+- **KNOWN GAP:** `find_similar` — the reconcile gate, the project's headline vector use
+  — does *not* hit `obs_embedding_idx` as written, for the same rule: it also constrains
+  `kind` and a `pos_x/pos_y BETWEEN` box, and neither is a prefix column. Results stay
+  correct and demo-scale data is small, so nothing looks wrong. Pinned by an
+  `xfail(strict=True)` in `tests/test_schema.py`; reworking it is a genuine trade,
+  because those filters in SQL are what stop the gate silently missing duplicates.
 - CockroachDB Cloud creates tables with `schema_locked = true`; migrations unlock and
   relock around themselves. That statement must be sent on its own, which is why
   `schema/apply.py` executes statement by statement rather than sending the file whole.

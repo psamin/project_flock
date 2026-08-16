@@ -291,13 +291,23 @@ class CockroachFleetMem:
             ).fetchall()
         else:
             vec = _vec(embedding)
+            # No `WHERE embedding IS NOT NULL`, and that is not an oversight.
+            # Measured against v26.2: adding it moves the plan from
+            # `vector search` on mm_situation_idx to a FULL SCAN of the primary
+            # index. Only filters matching a prefix column keep the vector index
+            # engaged, and this one matches nothing — so the guard that looks
+            # like hygiene silently costs the capability.
+            #
+            # It is not needed anyway: `<=>` against a NULL embedding is NULL,
+            # and NULLs sort last on ASC, so an unembedded lesson falls off the
+            # end of the top-k on its own. `_lesson` still guards the mapper, in
+            # case one is the only row there is.
             rows = self.conn.execute(
                 "SELECT *, embedding <=> %s AS distance FROM mission_memories"
-                " WHERE embedding IS NOT NULL"
                 " ORDER BY embedding <=> %s LIMIT %s",
                 (vec, vec, limit),
             ).fetchall()
-        return [_lesson(r) for r in rows]
+        return [_lesson(r) for r in rows if r.get("embedding") is not None]
 
     def mark_recalled(self, lesson_ids: Sequence[UUID]) -> None:
         """Count a retrieval. A lesson nothing ever retrieves is dead weight,
@@ -706,7 +716,7 @@ def _lesson(r: dict[str, Any]) -> Lesson:
         evidence=r["evidence"] or {},
         confidence=float(r["confidence"] or 0.0),
         times_recalled=int(r["times_recalled"] or 0),
-        distance=float(r["distance"]),
+        distance=float(r["distance"] or 0.0),
         created_at=r.get("created_at"),
     )
 

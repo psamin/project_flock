@@ -291,9 +291,15 @@ def test_recalled_tactics_are_recorded_separately_from_beliefs(mem, clean):
 
 @needs_db
 def test_semantic_recall_uses_the_vector_index(db):
-    """Unprefixed, so unlike the reconcile gate there is no constrain-the-prefix
-    rule to get wrong — but a b-tree covering it would still win the plan, so
-    this asserts the plan rather than trusting that the results look right."""
+    """Asserts the plan, not the results, because every way this breaks returns
+    perfectly plausible rows.
+
+    It has already caught one: `WHERE embedding IS NOT NULL` — which reads as
+    hygiene — moves the plan from `vector search` to a FULL SCAN, because only
+    filters matching a prefix column keep a vector index engaged and that one
+    matches nothing. The query below is the one `recall_lessons` actually runs;
+    a test that exercised a tidier query would pass while the SDK full-scanned.
+    """
     vec = "[" + ",".join(["0.01"] * 512) + "]"
     db.conn.execute("DELETE FROM mission_memories")
     for i in range(10):
@@ -306,7 +312,7 @@ def test_semantic_recall_uses_the_vector_index(db):
         plan = "\n".join(
             r["info"]
             for r in db.conn.execute(
-                "EXPLAIN SELECT id FROM mission_memories WHERE embedding IS NOT NULL"
+                "EXPLAIN SELECT id FROM mission_memories"
                 " ORDER BY embedding <=> %s LIMIT 3",
                 (vec,),
             ).fetchall()
