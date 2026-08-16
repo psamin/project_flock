@@ -174,16 +174,17 @@ class BedrockAdapter:
         # Sorted before the prompt is built, because the prompt text is the
         # cassette key. `open_tasks()` orders by priority alone, so two equal
         # priority tasks can arrive in either order, producing two different
-        # prompts for the same mission state — a cassette miss, and a seeded run
-        # that is no longer reproducible. The id tiebreak makes it total.
-        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
+        # prompts for the same mission state. The tiebreak is the *handle*, not
+        # the row id — see task_handle: ids are random per run, so tiebreaking
+        # on one made the ordering random too.
+        tasks = _ordered(open_tasks)
         prompt = _plan_prompt(role_card, beliefs_digest, tasks, tactics)
         key = _key("plan", prompt)
 
         if self.mode == REPLAY:
             cached = self._cassette.get(key)
             if cached is not None:
-                return Plan.parse(cached)
+                return _resolve(Plan.parse(cached), tasks)
             return _offline_plan(tasks)
 
         body = json.dumps(
@@ -206,7 +207,7 @@ class BedrockAdapter:
         self.calls += 1
         if self.mode == RECORD:
             self._remember(key, text)
-        return Plan.parse(text)
+        return _resolve(Plan.parse(text), tasks)
 
     def derive_lessons(self, run_digest: str, limit: int = 3) -> list[dict[str, str]]:
         """Turn one mission's figures into tactics that transfer to other maps.
@@ -268,7 +269,7 @@ class BedrockAdapter:
         perfectly good at *deciding*, but a rule-based choice presented as a
         Bedrock rationale is a claim we cannot support in front of a judge.
         """
-        tasks = sorted(open_tasks, key=lambda t: (-t.get("priority", 1), str(t["id"])))
+        tasks = _ordered(open_tasks)
         return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks, tactics)) in (
             self._cassette
         )
@@ -303,6 +304,56 @@ def _key(kind: str, payload: str) -> str:
     return f"{kind}:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
 
+def _resolve(plan: Plan, open_tasks: list[dict[str, Any]]) -> Plan:
+    """Turn the handle the model answered with back into a row id.
+
+    The prompt names tasks by handle so it is reproducible, but every caller
+    downstream matches on `tasks.id`. Unresolvable is not an error: a stale or
+    invented handle costs one lost claim race and the robot's own ranking
+    carries it, which is the same tolerance the id path always had.
+    """
+    if plan.task_id is None:
+        return plan
+    for task in open_tasks:
+        if plan.task_id == task_handle(task):
+            plan.task_id = str(task["id"])
+            return plan
+    return plan
+
+
+def _ordered(open_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Total, content-derived order — the same list on every run.
+
+    The row id is the last tiebreak rather than the first, and only decides
+    between tasks whose handles are identical. Real missions do not produce
+    those — one explore per sector, one clear per blocking tile, one delivery
+    per victim — but an order that depends on input order is a non-determinism
+    waiting to happen, so the ordering stays total either way.
+    """
+    return sorted(
+        open_tasks,
+        key=lambda t: (-t.get("priority", 1), task_handle(t), str(t["id"])),
+    )
+
+
+def task_handle(task: dict[str, Any]) -> str:
+    """A name for a task that is the same on every run of the same mission.
+
+    Row ids cannot be used here, and this is the subtle one. `tasks.id` is
+    `gen_random_uuid()`, so it differs on every run against a real cluster —
+    which means a prompt containing ids can never match a recorded one, the
+    cassette misses every single time, and the whole fleet silently runs on
+    rules while `/health` reports a loaded cassette. Worse, the sort tiebreak
+    was `str(id)` too, so even the *order* of the task list was random.
+
+    Kind and target are content, not identity: one explore task per sector, one
+    clear per blocking tile, one delivery per victim. So they name a task
+    stably, and the model gets something more legible than a uuid into the
+    bargain.
+    """
+    return f"{task['kind']}@{task.get('target_x')},{task.get('target_y')}"
+
+
 def _plan_prompt(
     role_card: str,
     beliefs_digest: str,
@@ -311,9 +362,7 @@ def _plan_prompt(
 ) -> str:
     tasks = (
         "\n".join(
-            f"- {t['id']} {t['kind']} at ({t.get('target_x')},{t.get('target_y')})"
-            f" priority={t.get('priority', 1)}"
-            for t in open_tasks
+            f"- {task_handle(t)} priority={t.get('priority', 1)}" for t in open_tasks
         )
         or "- (none)"
     )
@@ -408,7 +457,7 @@ def _offline_embedding(text: str) -> list[float]:
     return [x / norm for x in raw]
 
 
-def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:
+def _offline_plan(open_tasks: list[dict[str, Any]]) -> Plan:  # noqa: D401
     """Highest-priority open task, else explore. This is the rule-based path the
     agent falls back to whenever Bedrock is unavailable or rate-capped."""
     if not open_tasks:

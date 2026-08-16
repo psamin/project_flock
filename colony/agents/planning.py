@@ -184,6 +184,21 @@ class Planner:
             return None
 
         card, tasks = role_card(robot), task_lines(open_tasks)
+
+        if self.adapter.mode == RECORD:
+            # Recorded synchronously, unlike live. A live call is submitted to a
+            # thread and collected some ticks later (§3.5: a robot keeps acting
+            # while a plan is in flight), so the tick a decision lands on depends
+            # on network latency. Replay answers immediately, so a cassette
+            # recorded through the async path traces a mission that replay can
+            # never retrace: the first decision lands on a different tick, the
+            # world diverges, and every prompt after it misses.
+            #
+            # Recording is an offline activity, so paying full latency inline
+            # here costs nothing and is what makes the cassette reproducible.
+            self._record_call(robot.id, tick)
+            return self.adapter.plan(card, digest.text, tasks, tactics)
+
         if not self.live:
             # Replay: a cassette hit is a real recorded decision and is worth
             # replaying. A miss is not — the adapter would answer from the same
