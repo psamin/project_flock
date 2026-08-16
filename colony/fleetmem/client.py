@@ -18,19 +18,19 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from fleetmem.types import BLOCKED, DONE, OPEN, Belief, Match, Plan, Task
+from fleetmem.types import (
+    BLOCKED,
+    DONE,
+    OPEN,
+    Belief,
+    Match,
+    MissionMemory,
+    Plan,
+    Task,
+)
 
 DEFAULT_DSN = "postgresql://root@localhost:26257/colony?sslmode=disable"
 
-# Cosine distance below which two observations are the same belief (§4.2 step 3
-# states the gate as >=0.82 cosine *similarity*; distance = 1 - similarity).
-MERGE_DISTANCE = 0.18
-MERGE_RADIUS_TILES = 5
-
-# Lease defaults (§4.4). 15s TTL renewed every 5s means three renewals can be
-# missed before a task frees itself; the longest atomic action (a rubble-heavy
-# clear, 6 ticks at 4 Hz = 1.5s) sits comfortably inside one lease.
-LEASE_SECONDS = 15
 
 def resolve_dsn(dsn: str | None = None) -> str:
     """Where fleet memory lives: explicit argument, else `COLONY_DSN`, else local.
@@ -42,6 +42,15 @@ def resolve_dsn(dsn: str | None = None) -> str:
     """
     return dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN)
 
+# Cosine distance below which two observations are the same belief (§4.2 step 3
+# states the gate as >=0.82 cosine *similarity*; distance = 1 - similarity).
+MERGE_DISTANCE = 0.18
+MERGE_RADIUS_TILES = 5
+
+# Lease defaults (§4.4). 15s TTL renewed every 5s means three renewals can be
+# missed before a task frees itself; the longest atomic action (a rubble-heavy
+# clear, 6 ticks at 4 Hz = 1.5s) sits comfortably inside one lease.
+LEASE_SECONDS = 15
 RENEW_SECONDS = 5
 
 # CockroachDB runs SERIALIZABLE and aborts transactions that would violate it,
@@ -224,6 +233,78 @@ class CockroachFleetMem:
             params.append(kind)
         rows = self.conn.execute(" ".join(sql), params).fetchall()
         return [_belief(r) for r in rows]
+
+    # --- semantic memory --------------------------------------------------
+
+    def remember_mission(
+        self,
+        mission_id: UUID,
+        map_key: str,
+        summary: str,
+        embedding: Sequence[float] | None = None,
+        outcome: dict[str, Any] | None = None,
+    ) -> UUID | None:
+        """Write what one mission learned. None when it is already written.
+
+        Idempotent per mission, and it has to be: the sim records a run both
+        when the mission ends and again if an operator toggles away from it, so
+        an unguarded INSERT deposits the same lesson twice and the next mission
+        recalls it twice — with the duplicate crowding a genuinely different
+        memory out of the top-k. The guard is in SQL rather than in a
+        process-local set, so a server restart cannot forget.
+        """
+        row = self.conn.execute(
+            "INSERT INTO mission_memories"
+            "  (mission_id, map_key, summary, embedding, outcome)"
+            " SELECT %s, %s, %s, %s, %s"
+            "  WHERE NOT EXISTS ("
+            "    SELECT 1 FROM mission_memories WHERE mission_id = %s)"
+            " RETURNING id",
+            (
+                mission_id,
+                map_key,
+                summary,
+                _vec(embedding),
+                json.dumps(outcome or {}),
+                mission_id,
+            ),
+        ).fetchone()
+        return None if row is None else row["id"]
+
+    def recall_missions(
+        self,
+        map_key: str,
+        embedding: Sequence[float] | None,
+        limit: int = 3,
+    ) -> list[MissionMemory]:
+        """The most similar earlier missions on this map, nearest first.
+
+        The second place CockroachDB's vector indexing carries real weight, and
+        the only search in the SDK that crosses missions. `map_key` is
+        constrained to an exact value because it is the index prefix — see the
+        comment on mm_embedding_idx; a range or an absent filter would silently
+        demote this to a full scan and post-filter.
+
+        Without an embedding this degrades to most-recent-first, the same way
+        find_similar degrades to position and kind. Recall still works with no
+        Bedrock credentials; it just stops being semantic.
+        """
+        if embedding is None:
+            rows = self.conn.execute(
+                "SELECT *, 0.0 AS distance FROM mission_memories"
+                " WHERE map_key = %s"
+                " ORDER BY created_at DESC LIMIT %s",
+                (map_key, limit),
+            ).fetchall()
+        else:
+            vec = _vec(embedding)
+            rows = self.conn.execute(
+                "SELECT *, embedding <=> %s AS distance FROM mission_memories"
+                " WHERE map_key = %s AND embedding IS NOT NULL"
+                " ORDER BY embedding <=> %s LIMIT %s",
+                (vec, map_key, vec, limit),
+            ).fetchall()
+        return [_memory(r) for r in rows]
 
     # --- tasks ------------------------------------------------------------
 
@@ -599,6 +680,18 @@ def _belief(r: dict[str, Any]) -> Belief:
         sightings=r["sightings"],
         robot_id=r["robot_id"],
         observed_at=r["observed_at"],
+    )
+
+
+def _memory(r: dict[str, Any]) -> MissionMemory:
+    return MissionMemory(
+        id=r["id"],
+        mission_id=r.get("mission_id"),
+        map_key=r["map_key"],
+        summary=r["summary"] or "",
+        outcome=r["outcome"] or {},
+        distance=float(r["distance"]),
+        created_at=r.get("created_at"),
     )
 
 

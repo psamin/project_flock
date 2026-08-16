@@ -44,6 +44,25 @@ class Match:
 
 
 @dataclass(frozen=True)
+class MissionMemory:
+    """What an earlier mission on this map learned (semantic memory, §4.0).
+
+    `distance` is cosine distance from the query vector, carried out of the SDK
+    deliberately: the claim is that CockroachDB's vector index found this row,
+    and a number the console can print is what makes that checkable rather than
+    asserted.
+    """
+
+    id: UUID
+    mission_id: UUID | None
+    map_key: str
+    summary: str
+    outcome: dict[str, Any]
+    distance: float = 0.0
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Task:
     id: UUID
     mission_id: UUID

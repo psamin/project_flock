@@ -26,6 +26,7 @@ from fleetmem.types import (
     OPEN,
     Belief,
     Match,
+    MissionMemory,
     Plan,
     Task,
 )
@@ -56,6 +57,11 @@ class FakeFleetMem:
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
         self._victims: dict[UUID, dict[str, Any]] = {}
+        # Semantic memory. Per-instance, deliberately: the sim builds one store
+        # and reuses it across missions, so keying by map is all cross-mission
+        # recall needs. A class-level store would instead leak between
+        # compare_modes' two runs, which take a factory precisely to stop that.
+        self._memories: list[dict[str, Any]] = []
         FakeFleetMem._instances += 1
         self._id_rng = random.Random(FakeFleetMem._instances)
 
@@ -187,6 +193,69 @@ class FakeFleetMem:
                     )
                 )
             return out
+
+    # --- semantic memory --------------------------------------------------
+
+    def remember_mission(
+        self,
+        mission_id: UUID,
+        map_key: str,
+        summary: str,
+        embedding: Sequence[float] | None = None,
+        outcome: dict[str, Any] | None = None,
+    ) -> UUID | None:
+        with self._lock:
+            # Mirrors the client's WHERE NOT EXISTS guard. The contract test
+            # only compares signatures, so this parity is on us.
+            if any(m["mission_id"] == mission_id for m in self._memories):
+                return None
+            row = {
+                "id": self._new_id(),
+                "mission_id": mission_id,
+                "map_key": map_key,
+                "summary": summary,
+                "embedding": list(embedding) if embedding is not None else None,
+                "outcome": outcome or {},
+                "created_at": _now(),
+            }
+            self._memories.append(row)
+            return row["id"]
+
+    def recall_missions(
+        self,
+        map_key: str,
+        embedding: Sequence[float] | None,
+        limit: int = 3,
+    ) -> list[MissionMemory]:
+        with self._lock:
+            rows = [m for m in self._memories if m["map_key"] == map_key]
+            if embedding is None:
+                ranked = [
+                    (0.0, m)
+                    for m in sorted(rows, key=lambda m: m["created_at"], reverse=True)
+                ]
+            else:
+                scored = [
+                    (_cosine_distance(embedding, m["embedding"]), m)
+                    for m in rows
+                    if m["embedding"] is not None
+                ]
+                # Ties break on creation order, never on the row id: a seeded id
+                # is still arbitrary, and two equidistant memories decided by it
+                # reorder between runs.
+                ranked = sorted(scored, key=lambda pair: (pair[0], pair[1]["created_at"]))
+            return [
+                MissionMemory(
+                    id=m["id"],
+                    mission_id=m["mission_id"],
+                    map_key=m["map_key"],
+                    summary=m["summary"],
+                    outcome=m["outcome"],
+                    distance=dist,
+                    created_at=m["created_at"],
+                )
+                for dist, m in ranked[:limit]
+            ]
 
     # --- tasks ------------------------------------------------------------
 
