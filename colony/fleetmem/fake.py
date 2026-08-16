@@ -391,6 +391,7 @@ class FakeFleetMem:
         battery: int | None = None,
         status: str | None = None,
         lease_seconds: int = LEASE_SECONDS,
+        renew: bool = True,
     ) -> None:
         with self._lock:
             robot = self._robots.get(robot_id)
@@ -405,7 +406,8 @@ class FakeFleetMem:
         # Renewal happens even for an unregistered robot, matching the client:
         # the two statements there are independent, and a robot holding tasks
         # must not lose them because its row is missing.
-        self.renew_leases(robot_id, lease_seconds)
+        if renew:
+            self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -487,16 +489,24 @@ class FakeFleetMem:
         verb: str,
         detail: dict[str, Any] | None = None,
     ) -> None:
+        self.log_events(mission_id, [(actor, verb, detail)])
+
+    def log_events(
+        self,
+        mission_id: UUID,
+        rows: Sequence[tuple[str, str, dict[str, Any] | None]],
+    ) -> None:
         with self._lock:
-            self._events.append(
-                {
-                    "mission_id": mission_id,
-                    "actor": actor,
-                    "verb": verb,
-                    "detail": detail or {},
-                    "at": _now(),
-                }
-            )
+            for actor, verb, detail in rows:
+                self._events.append(
+                    {
+                        "mission_id": mission_id,
+                        "actor": actor,
+                        "verb": verb,
+                        "detail": detail or {},
+                        "at": _now(),
+                    }
+                )
 
     def events(self, mission_id: UUID) -> list[dict[str, Any]]:
         with self._lock:

@@ -24,6 +24,9 @@ from uuid import UUID
 from agents import logistics, planning
 from agents.pathing import find_move_plan, find_path
 from agents.planning import BEDROCK, RULES
+# Both agent types report status on the same cadence and there is no reason for
+# them to disagree about it, so the constants have one home rather than two.
+from agents.worker import HEARTBEAT_EVERY_TICKS, RENEW_EVERY_TICKS
 from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, Percept, World
@@ -107,6 +110,10 @@ class Scout:
     # explored" into "this is the stalest ground I know", which is what a scout
     # needs after the map changes under it (FR-7).
     last_seen: dict[tuple[int, int], int] = field(default_factory=dict)
+    # Ticks the status write and the sector-lease renewal last went out. None
+    # means "never", so both fire on this scout's first tick.
+    _heartbeat_at: int | None = field(default=None)
+    _renew_at: int | None = field(default=None)
 
     def __post_init__(self) -> None:
         self.rng = random.Random(self.seed)
@@ -132,14 +139,39 @@ class Scout:
         else:
             action = self._think(world, percept)  # think
 
-        self.mem.heartbeat(
-            self.robot_id,
-            pos=(robot.x, robot.y),
-            battery=robot.battery,
-            status=robot.status,
-            lease_seconds=SECTOR_LEASE_SECONDS,
-        )
+        self._report_status(world, robot)
         return action  # act (the sim applies it)
+
+    def _report_status(self, world: World, robot: Any) -> None:
+        """Status write and sector-lease renewal, each on its own cadence.
+
+        Two statements, two round trips, two different deadlines (§4.3, §4.4).
+        The sector lease is the longer of the fleet's two at 20s, so a renewal
+        every 5s leaves three that may be missed before it lapses.
+        """
+        tick = world.tick
+        beat_due = (
+            self._heartbeat_at is None
+            or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
+        )
+        renew_due = (
+            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
+        )
+        if beat_due:
+            self.mem.heartbeat(
+                self.robot_id,
+                pos=(robot.x, robot.y),
+                battery=robot.battery,
+                status=robot.status,
+                lease_seconds=SECTOR_LEASE_SECONDS,
+                renew=renew_due,
+            )
+            self._heartbeat_at = tick
+            if renew_due:
+                self._renew_at = tick
+        elif renew_due:
+            self.mem.renew_leases(self.robot_id, SECTOR_LEASE_SECONDS)
+            self._renew_at = tick
 
     # --- battery (§3.3) ---------------------------------------------------
 

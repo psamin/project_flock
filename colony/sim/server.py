@@ -311,10 +311,13 @@ class Mission:
             robot_id: agent.step(self.world) for robot_id, agent in self.agents.items()
         }
         frame = self.world.step(actions)
-        for event in frame.events:
-            self.mem.log_event(
-                self.mission_id, event["actor"], event["verb"], event["detail"]
-            )
+        # One round trip for the whole tick's events rather than one each: a
+        # busy tick logs several, and against a Cloud cluster the latency
+        # dominates the insert.
+        self.mem.log_events(
+            self.mission_id,
+            [(e["actor"], e["verb"], e["detail"]) for e in frame.events],
+        )
         frame.lost = self._scan_for_lost(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
