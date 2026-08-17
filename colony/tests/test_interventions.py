@@ -947,3 +947,39 @@ def test_a_decision_after_a_disruption_is_marked_in_the_coordination_feed(monkey
     marked = [ln for ln in mission.coordination(limit=50) if ln["responds_to"]]
     assert marked, "a disruption covering every belief marked nothing"
     assert marked[0]["responds_to"]["label"] == "fire"
+
+
+def test_an_interfered_run_is_recorded_as_such(monkeypatch):
+    """§4.7's comparison is the number the project rests on.
+
+    Interventions are a headline feature and the one thing they must not do is
+    quietly poison it. Killing a coordinated run's fleet makes it score like the
+    baseline; without a marker the panel would publish "coordination gain 0%"
+    from a run somebody sabotaged.
+
+    Asserts both directions — a clean run must NOT be flagged, or the flag
+    means nothing and the panel refuses every comparison.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from sim.server import Mission
+
+    mission = Mission()
+    for _ in range(20):
+        mission.tick_once()
+
+    mission.record_run()
+    clean = mission.last_runs[mission.mode]
+    assert clean["interfered"] is False
+    assert clean["interference"] == {"interventions": 0, "robots_killed": 0}
+
+    mission.kill_robot(next(iter(mission.agents)))
+    mission.record_run()
+    spoiled = mission.last_runs[mission.mode]
+    assert spoiled["interfered"] is True
+    assert spoiled["interference"]["robots_killed"] == 1
+
+    # And a restart is a fresh measurement again.
+    mission._build(coordinated=True)
+    mission.tick_once()
+    mission.record_run()
+    assert mission.last_runs[mission.mode]["interfered"] is False

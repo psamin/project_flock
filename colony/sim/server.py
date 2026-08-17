@@ -189,6 +189,10 @@ class Mission:
         self.disabled: dict[str, Any] = {}
         # Operator disruptions, newest last, for the coordination feed.
         self.recent_disruptions: list[dict[str, Any]] = []
+        # Cumulative, per mission, and never trimmed: `recent_disruptions` is
+        # capped for display, and a count used to qualify a published number
+        # must not silently forget the seventh intervention.
+        self.interference = {"interventions": 0, "robots_killed": 0}
         self._build(coordinated=True)
 
     # --- the commander console (FR-10) ------------------------------------
@@ -235,6 +239,7 @@ class Mission:
         # been broken in it either.
         self.disabled = {}
         self.recent_disruptions = []
+        self.interference = {"interventions": 0, "robots_killed": 0}
         # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
         # has no mission_id — see LostWatch. Live only: `run_mission` is the
         # seeded, deterministic path §3.5 records the golden run from, and
@@ -364,6 +369,7 @@ class Mission:
             return {"error": f"{robot_id} is already down"}
 
         self.disabled[robot_id] = datetime.now(timezone.utc)
+        self.interference["robots_killed"] += 1
         # Asked of the agent, not of `open_tasks`. `open_tasks` returns what is
         # *claimable* — open, or claimed on a lapsed lease — so a task being
         # actively held on a live lease is deliberately absent from it. Looking
@@ -669,6 +675,7 @@ class Mission:
                     "tick": self.world.tick,
                 }
             )
+        self.interference["interventions"] += len(pending)
         del self.recent_disruptions[:-DISRUPTIONS_REMEMBERED]
         return [self.world.apply_intervention(i) for i in pending]
 
@@ -723,6 +730,14 @@ class Mission:
         self.last_runs[self.mode] = {
             **self.metrics(),
             "finished": self.world.finished,
+            # Whether an operator broke this run. §4.7's comparison is the
+            # number the whole project rests on, and interventions are a
+            # headline feature — the one thing they must not do is quietly
+            # poison it. A coordinated run whose fleet was killed scores like
+            # the baseline, and without this the panel would publish
+            # "coordination gain 0%" from a run somebody sabotaged.
+            "interference": dict(self.interference),
+            "interfered": any(self.interference.values()),
         }
         if self.world.finished and self.coordinated:
             self._remember()

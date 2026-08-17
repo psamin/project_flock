@@ -69,6 +69,30 @@ export async function refreshComparison() {
       box.textContent = co || base ? "run the other mode to compare" : "";
       return;
     }
+    // A run somebody broke is not a measurement. Interventions are a headline
+    // feature, and the one thing they must not do is quietly poison §4.7's
+    // number: a coordinated run whose fleet was killed scores like the
+    // baseline, and publishing that as "coordination gain 0%" would be the
+    // demo lying about its own central claim.
+    const spoiled = [
+      ["coordinated", co],
+      ["baseline", base],
+    ].filter(([, r]) => r.interfered);
+    if (spoiled.length) {
+      const what = spoiled
+        .map(([mode, r]) => {
+          const i = r.interference || {};
+          const bits = [];
+          if (i.interventions) bits.push(`${i.interventions} disruption(s)`);
+          if (i.robots_killed) bits.push(`${i.robots_killed} robot(s) killed`);
+          return `${mode}: ${bits.join(", ")}`;
+        })
+        .join(" · ");
+      box.innerHTML =
+        `<b>not a fair comparison</b> — an operator interfered with this run ` +
+        `(${what}). Restart both modes to measure again.`;
+      return;
+    }
     if (!co.finished || !base.finished) {
       // Comparing a finished run against one that was cut short would report a
       // coordination gain the fleet never earned, in either direction.
