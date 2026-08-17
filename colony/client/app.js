@@ -41,6 +41,7 @@ import {
   initKillRobot,
   refreshMemoryRail,
   refreshCoordination,
+  refreshFleet,
   armedIntervention,
   placeIntervention,
 } from "./ui-shared.js";
@@ -567,6 +568,9 @@ initKillRobot();
 // mode switch, so it gets its own cadence rather than riding the frame loop.
 refreshCoordination();
 setInterval(refreshCoordination, 2000);
+// The lease countdown only reads as a countdown if it actually ticks down.
+refreshFleet();
+setInterval(refreshFleet, 1000);
 
 initConsole({
   getRobots: () => robots,

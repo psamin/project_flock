@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +184,9 @@ class Mission:
         # Robots killed on cue (§3.6). They stay in `agents` — a killed robot is
         # not gone, it has stopped answering, and the difference is the point:
         # its rows are still in fleet memory and its lease is still ticking down.
-        self.disabled: set[str] = set()
+        # robot id -> when it was killed. The time is what lets the fleet panel
+        # say how long until its lease lapses; `in` still reads the same.
+        self.disabled: dict[str, Any] = {}
         # Operator disruptions, newest last, for the coordination feed.
         self.recent_disruptions: list[dict[str, Any]] = []
         self._build(coordinated=True)
@@ -230,7 +233,7 @@ class Mission:
         self._metrics_at = -1
         # A restart is a new mission; nobody is dead in it yet, and nothing has
         # been broken in it either.
-        self.disabled = set()
+        self.disabled = {}
         self.recent_disruptions = []
         # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
         # has no mission_id — see LostWatch. Live only: `run_mission` is the
@@ -360,7 +363,7 @@ class Mission:
         if robot_id in self.disabled:
             return {"error": f"{robot_id} is already down"}
 
-        self.disabled.add(robot_id)
+        self.disabled[robot_id] = datetime.now(timezone.utc)
         # Asked of the agent, not of `open_tasks`. `open_tasks` returns what is
         # *claimable* — open, or claimed on a lapsed lease — so a task being
         # actively held on a live lease is deliberately absent from it. Looking
@@ -472,6 +475,73 @@ class Mission:
                 }
             )
         out.reverse()  # newest first; the feed reads top-down
+        return out
+
+    def fleet(self) -> list[dict[str, Any]]:
+        """Every robot, what it holds, and what it last decided (§3.6).
+
+        The map shows where robots are; the ticker shows what happened. Neither
+        answers "what is each unit doing right now, and why" without clicking
+        through them one at a time, which is not a question an operator should
+        have to ask six times.
+
+        Lease seconds are the load-bearing column. A held task is invisible in
+        `open_tasks` until its lease lapses, so the countdown is the only place
+        the takeover mechanism is legible before it fires — and it is what makes
+        the kill-a-robot beat readable rather than fifteen seconds of nothing.
+        """
+        now = datetime.now(timezone.utc)
+        latest: dict[str, Any] = {}
+        for plan in self.mem.plans_for(self.mission_id):
+            latest[plan.robot_id] = plan
+
+        out: list[dict[str, Any]] = []
+        for robot_id, robot in self.world.robots.items():
+            task = self._held_by(robot_id)
+            plan = latest.get(robot_id)
+            # A live robot renews its lease every few ticks, so there is no
+            # countdown to show — "renewing" is the true statement. A killed one
+            # stops renewing, and the row becomes claimable LEASE_SECONDS after
+            # its last heartbeat.
+            #
+            # Estimated from the kill time rather than read from the row: the
+            # SDK has no task-by-id read, and a held task is deliberately absent
+            # from `open_tasks` until its lease lapses. Marked `approx` so the
+            # UI can say "~7s" and never imply it queried the lease.
+            lease_left = None
+            killed_at = self.disabled.get(robot_id)
+            if task is not None and killed_at is not None:
+                elapsed = (now - killed_at).total_seconds()
+                lease_left = max(0, round(LEASE_SECONDS - elapsed))
+            out.append(
+                {
+                    "id": robot_id,
+                    "role": robot.role,
+                    "status": "down" if robot_id in self.disabled else robot.status,
+                    "down": robot_id in self.disabled,
+                    "x": robot.x,
+                    "y": robot.y,
+                    "battery": robot.battery,
+                    "task": None
+                    if task is None
+                    else {
+                        "kind": task.kind,
+                        "target": list(task.target),
+                        "lease_seconds_left": lease_left,
+                        "lease_state": "renewing" if lease_left is None else "lapsing",
+                        "lease_approx": lease_left is not None,
+                    },
+                    "last_decision": None
+                    if plan is None
+                    else {
+                        "rationale": plan.rationale,
+                        "trigger": plan.trigger,
+                        "source": (plan.chosen or {}).get("source", "rules"),
+                        "sources": len(plan.based_on or []),
+                    },
+                }
+            )
+        out.sort(key=lambda r: (r["role"], r["id"]))
         return out
 
     def _disruption_behind(self, plan: Any, beliefs: dict) -> dict[str, Any] | None:
@@ -911,6 +981,12 @@ async def console_catalog() -> dict[str, Any]:
         "mission_id": str(mission.mission_id),
         "questions": console_questions.catalog(),
     }
+
+
+@app.get("/api/fleet")
+async def fleet() -> dict[str, Any]:
+    """Per-robot status: what it holds, its lease countdown, its last decision."""
+    return {"tick": mission.world.tick, "robots": mission.fleet()}
 
 
 @app.get("/api/coordination")

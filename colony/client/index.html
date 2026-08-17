@@ -82,6 +82,27 @@
     #coordination .co-line.disrupted { border-left: 2px solid #d9884a;
       margin-left: -8px; padding-left: 6px; }
     #coordination .co-after { color: #d9884a; }
+    /* The fleet panel. The lease countdown is the column that earns its place:
+       a held task is invisible in open_tasks until the lease lapses, so this is
+       the only place the takeover can be watched before it fires. */
+    #fleet-panel { margin: 6px 0; }
+    #fleet-panel h2 { font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #7fa8c9; margin: 0 0 4px; font-weight: 600; }
+    #fleet-panel h2 small { text-transform: none; letter-spacing: 0;
+      color: #6b6480; font-weight: 400; margin-left: 6px; }
+    #fleet { font-size: 11px; line-height: 1.6; }
+    #fleet .fl-row { display: flex; gap: 8px; align-items: baseline; }
+    #fleet .fl-row.down { opacity: 0.5; }
+    #fleet .fl-id { font-weight: 600; min-width: 26px; }
+    #fleet .fl-id.scout { color: #63c5da; }
+    #fleet .fl-id.lifter { color: #d9884a; }
+    #fleet .fl-id.medic { color: #d96a9a; }
+    #fleet .fl-job { color: #b8b1c4; min-width: 168px; }
+    #fleet .idle { color: #6b6480; }
+    #fleet .lease { color: #8f8a9c; }
+    #fleet .lease.low { color: #d9884a; font-weight: 600; }
+    #fleet .fl-why { color: #6b6480; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; max-width: 320px; }
     #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
     #comparison b { color: #f2c14e; }
 
@@ -283,6 +304,11 @@
   <!-- §3.6: the coordination feed. The ticker below says what happened; this
        says who told whom, which is the only thing the robots ever "say" to each
        other — they have no channel, they read and write rows. -->
+  <section id="fleet-panel">
+    <h2>fleet <small>what each unit holds, and why</small></h2>
+    <div id="fleet"></div>
+  </section>
+
   <section id="coordination-panel">
     <h2>fleet coordination <small>who acted on whose memory</small></h2>
     <div id="coordination"></div>

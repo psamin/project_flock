@@ -512,3 +512,54 @@ export async function refreshCoordination() {
     /* a panel; never let it break the render loop */
   }
 }
+
+// --- the fleet panel (§3.6) --------------------------------------------------
+
+/** Every unit, what it holds, its lease countdown, and what it last decided.
+ *
+ * The map says where robots are and the ticker says what happened. Neither
+ * answers "what is each unit doing, and why" without clicking through them one
+ * at a time — six clicks for a question an operator asks continuously.
+ *
+ * The lease countdown is the column that earns its place: a held task is
+ * invisible in `open_tasks` until its lease lapses, so this is the only place
+ * the takeover mechanism can be watched *before* it fires. It is what turns the
+ * kill-a-robot beat from fifteen seconds of nothing into a visible timer.
+ */
+export async function refreshFleet() {
+  const box = document.getElementById("fleet");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/fleet")).json();
+    box.innerHTML = (data.robots || [])
+      .map((r) => {
+        const job = r.task
+          ? `${r.task.kind} @ ${r.task.target.join(",")}` +
+            // "renewing" while the robot is alive, an approximate countdown
+            // once it is not. The tilde is load-bearing: this is derived from
+            // when the robot stopped, not read off the lease column.
+            (r.task.lease_seconds_left != null
+              ? ` <span class="lease ${r.task.lease_seconds_left <= 5 ? "low" : ""}">` +
+                `lapses ~${r.task.lease_seconds_left}s</span>`
+              : ` <span class="lease">lease renewing</span>`)
+          : `<span class="idle">idle</span>`;
+        const d = r.last_decision;
+        const why = d
+          ? `<span class="fl-why" title="${d.rationale.replace(/"/g, "&quot;")}">` +
+            `${d.rationale}</span>` +
+            `<span class="co-brain ${d.source === "bedrock" ? "claude" : "rules"}">` +
+            `${d.source === "bedrock" ? "claude" : "rules"}</span>`
+          : "";
+        return (
+          `<div class="fl-row ${r.down ? "down" : ""}">` +
+          `<span class="fl-id ${r.role}">${r.id}</span>` +
+          `<span class="fl-job">${r.down ? "<b>DOWN</b>" : job}</span>` +
+          why +
+          `</div>`
+        );
+      })
+      .join("");
+  } catch {
+    /* a panel; never let it break the render loop */
+  }
+}

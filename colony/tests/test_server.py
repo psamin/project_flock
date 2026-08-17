@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from fleetmem.client import LEASE_SECONDS
 from sim.server import QUEUE_FRAMES, TICK_SECONDS, Mission, Viewer
 
 
@@ -481,3 +482,54 @@ def test_the_coordination_feed_names_who_told_whom(mission):
     )
     lead = crossed[0]["lead_belief"]
     assert lead and lead["author"] and lead["author"] != crossed[0]["robot"]
+
+
+def test_the_fleet_panel_reports_holdings_and_lease_countdown(mission):
+    """§3.6: what every unit is doing and why, without clicking six times.
+
+    The lease countdown is the load-bearing column. A held task is deliberately
+    absent from `open_tasks` until its lease lapses, so this is the only place
+    the takeover mechanism is legible *before* it fires — which is what makes
+    the kill-a-robot beat readable rather than fifteen seconds of nothing.
+    """
+    for _ in range(120):
+        mission.tick_once()
+
+    # Holdings come and go — a robot that completed on the sampled tick holds
+    # nothing on it — so this waits for one rather than assuming a tick count.
+    rows: list = []
+    holding: list = []
+    for _ in range(200):
+        mission.tick_once()
+        rows = mission.fleet()
+        holding = [r for r in rows if r["task"]]
+        if holding:
+            break
+
+    assert rows, "a running mission reported no robots"
+    assert {r["id"] for r in rows} == set(mission.world.robots)
+    assert holding, "nobody was holding work in 320 ticks"
+    # A live robot renews, so there is no countdown to show — "renewing" is the
+    # true statement and a number there would be invented.
+    for row in holding:
+        assert row["task"]["lease_seconds_left"] is None
+        assert row["task"]["lease_state"] == "renewing"
+
+    decided = [r for r in rows if r["last_decision"]]
+    assert decided, "no robot had a last decision to report"
+    assert all(r["last_decision"]["source"] in ("rules", "bedrock") for r in decided)
+
+    # A killed robot must read as down here, or the panel disagrees with the
+    # thing the operator just did.
+    victim = holding[0]["id"]
+    mission.kill_robot(victim)
+    after = {r["id"]: r for r in mission.fleet()}
+    assert after[victim]["down"] is True
+    assert after[victim]["status"] == "down"
+    # Once it stops renewing, the panel counts down to the takeover — flagged
+    # approximate, because it is derived from the kill time rather than read
+    # off a lease column the SDK cannot query.
+    lease = after[victim]["task"]["lease_seconds_left"]
+    assert lease is not None and 0 <= lease <= LEASE_SECONDS, lease
+    assert after[victim]["task"]["lease_state"] == "lapsing"
+    assert after[victim]["task"]["lease_approx"] is True
