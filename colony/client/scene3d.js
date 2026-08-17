@@ -68,6 +68,10 @@ const PALETTE = {
   fire: 0xff7a3c,
 };
 
+/** A located, unreached person. Red because they need help, and far enough from
+ *  PALETTE.fire that a small sphere is never mistaken for a small blaze. */
+const VICTIM_RED = 0xff2f45;
+
 /* Zones come straight off the wire (world.py:616) and are what turn a tile grid
  * into a place: a low staging yard, a road, dense mid-rise housing, a tall
  * office block. Nothing else in the client reads this field. */
@@ -606,13 +610,23 @@ function syncVictims() {
     }
     mesh.visible = !!visible;
     if (!visible) continue;
+    // Red for `located`, not amber. A person found and not yet reached is the
+    // most urgent thing on the map, and amber reads as a warning where red
+    // reads as a casualty — the distinction a viewer has to make in the two
+    // seconds the marker is on screen. Green once stabilized, grey once lost.
+    // Kept clear of the fire orange (PALETTE.fire) so the two never blur.
     const colour =
       victim.state === "stabilized" ? 0x5fc98a
       : victim.state === "lost" ? 0x5a5560
-      : 0xf2c14e;
+      : VICTIM_RED;
     mesh.material.color.setHex(colour);
     mesh.material.emissive.setHex(colour);
-    mesh.material.emissiveIntensity = victim.state === "lost" ? 0.15 : 1.7;
+    // Emissive above ~1.3 clips to white under ACES at this exposure, which
+    // cost the stabilized markers their green — and green-versus-red is the
+    // only distinction that matters here. Kept under the knee.
+    mesh.material.emissiveIntensity =
+      victim.state === "lost" ? 0.15 : victim.state === "stabilized" ? 0.7 : 1.2;
+    mesh.userData.urgent = victim.state === "located";
     mesh.position.set(victim.x - width / 2 + 0.5, 0.42, victim.y - height / 2 + 0.5);
   }
 }
@@ -858,6 +872,14 @@ function render() {
     // rest — otherwise four blocks cover the block they are describing.
     updateLabel(rig, pose, robot, isLost, selected === robot.id, mySlot);
     if (!isLost) pushTrace(traces.get(robot.id), pose.x, pose.z);
+  }
+
+  // A located person pulses. §3.6 asked for it in 2D and it earns its place
+  // here too: a static dot is a map pin, a pulsing one is a countdown — which
+  // is what a vitals deadline actually is.
+  const pulse = 1.15 + Math.sin(now / 260) * 0.55;
+  for (const mesh of victimMeshes.values()) {
+    if (mesh.visible && mesh.userData.urgent) mesh.material.emissiveIntensity = pulse;
   }
 
   if (instancesDirty) {
