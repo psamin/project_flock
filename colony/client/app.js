@@ -40,6 +40,7 @@ import {
   initInterventions,
   initKillRobot,
   refreshMemoryRail,
+  refreshCoordination,
   armedIntervention,
   placeIntervention,
 } from "./ui-shared.js";
@@ -531,6 +532,7 @@ function connect() {
         boot(frame);
         refreshComparison();
         refreshMemoryRail();
+        refreshCoordination();
       }
       // A diff can arrive before the snapshot: the server registers a viewer
       // before sending it, deliberately, so no frame is skipped. Without a
@@ -561,6 +563,10 @@ function connect() {
 
 initInterventions();
 initKillRobot();
+// The feed moves with every decision, and snapshots only arrive on boot or a
+// mode switch, so it gets its own cadence rather than riding the frame loop.
+refreshCoordination();
+setInterval(refreshCoordination, 2000);
 
 initConsole({
   getRobots: () => robots,

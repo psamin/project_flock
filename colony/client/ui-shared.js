@@ -449,3 +449,56 @@ export function initKillRobot() {
     }
   });
 }
+
+// --- the coordination feed (§3.6) --------------------------------------------
+
+const VERB = {
+  claim_task: "claimed",
+  explore: "swept",
+  return_to_base: "returned to base",
+};
+
+/** "m1 claimed deliver_kit at 12,10 — because s2 reported a victim there."
+ *
+ * Robots never message each other. Their only communication is rows, so a feed
+ * of rows is the coordination feed, and naming both ends of each one is the
+ * thesis stated in the demo's own words rather than in narration over it.
+ *
+ * Solo decisions are shown too, dimmed. Hiding them would make every visible
+ * line look like teamwork and quietly overstate the thing being demonstrated.
+ */
+export async function refreshCoordination() {
+  const box = document.getElementById("coordination");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/coordination?limit=14")).json();
+    if (!data.lines?.length) {
+      box.innerHTML = `<div class="co-empty">no decisions yet</div>`;
+      return;
+    }
+    box.innerHTML = data.lines
+      .map((ln) => {
+        const act = ln.chosen?.kind ?? VERB[ln.chosen?.action] ?? ln.trigger;
+        const at = ln.chosen?.target ? ` at ${ln.chosen.target.join(",")}` : "";
+        const brain = ln.source === "bedrock" ? "claude" : "rules";
+        const why = ln.cross_agent
+          ? `because <b>${ln.informed_by.join(", ")}</b> reported ` +
+            `${ln.lead_belief?.kind ?? "something"}` +
+            (ln.lead_belief ? ` at ${ln.lead_belief.x},${ln.lead_belief.y}` : "") +
+            (ln.lead_belief?.sightings > 1
+              ? ` (${ln.lead_belief.sightings} sightings)`
+              : "")
+          : `on what it saw itself`;
+        return (
+          `<div class="co-line ${ln.cross_agent ? "crossed" : "solo"}">` +
+          `<span class="co-who">${ln.robot}</span> ${act}${at}` +
+          `<span class="co-why">${why}</span>` +
+          `<span class="co-brain ${brain}">${brain}</span>` +
+          `</div>`
+        );
+      })
+      .join("");
+  } catch {
+    /* a panel; never let it break the render loop */
+  }
+}

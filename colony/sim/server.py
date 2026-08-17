@@ -407,6 +407,54 @@ class Mission:
         robot = next(iter(self.world.robots.values()), None)
         return None if robot is None else (robot.x, robot.y)
 
+    def coordination(self, limit: int = 12) -> list[dict[str, Any]]:
+        """Decisions, each named with the robot whose belief caused it (§3.6).
+
+        The ticker says what happened. This says who told whom, which is the
+        product: `m1` went to (12,10) because `s2` wrote an observation there.
+
+        There is no message bus to tap — robots never talk to each other, they
+        read and write rows — so a feed of rows *is* the coordination feed. Every
+        line here is one `plans` row joined to the `observations` in its
+        `based_on`, which is the same join the commander console answers
+        "why did robot X do that" with; the only new thing is streaming it.
+
+        A plan citing only its own author's beliefs is not coordination, it is a
+        robot acting on what it personally saw, so `cross_agent` marks the
+        difference rather than letting every line look like teamwork.
+        """
+        beliefs = {b.id: b for b in self.mem.get_beliefs(self.mission_id)}
+        out: list[dict[str, Any]] = []
+        for plan in self.mem.plans_for(self.mission_id)[-limit:]:
+            sources = [beliefs[b] for b in (plan.based_on or []) if b in beliefs]
+            # Whose knowledge this robot acted on, excluding its own.
+            others = sorted({b.robot_id for b in sources if b.robot_id != plan.robot_id})
+            lead = max(sources, key=lambda b: b.sightings, default=None)
+            out.append(
+                {
+                    "robot": plan.robot_id,
+                    "trigger": plan.trigger,
+                    "rationale": plan.rationale,
+                    "chosen": plan.chosen or {},
+                    "source": (plan.chosen or {}).get("source", "rules"),
+                    "cross_agent": bool(others),
+                    "informed_by": others,
+                    "lead_belief": None
+                    if lead is None
+                    else {
+                        "kind": lead.kind,
+                        "x": lead.pos[0],
+                        "y": lead.pos[1],
+                        "author": lead.robot_id,
+                        "sightings": lead.sightings,
+                        "confidence": round(lead.confidence, 2),
+                    },
+                    "sources": len(sources),
+                }
+            )
+        out.reverse()  # newest first; the feed reads top-down
+        return out
+
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).
 
@@ -791,6 +839,16 @@ async def console_catalog() -> dict[str, Any]:
         "mission_id": str(mission.mission_id),
         "questions": console_questions.catalog(),
     }
+
+
+@app.get("/api/coordination")
+async def coordination(limit: int = 12) -> dict[str, Any]:
+    """The coordination feed: decisions, each with the robot that caused it.
+
+    Read straight off `plans` joined to `observations` — the fleet's actual
+    communication, since it has no other kind.
+    """
+    return {"tick": mission.world.tick, "lines": mission.coordination(limit=limit)}
 
 
 @app.post("/api/failure/kill-robot")

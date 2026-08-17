@@ -55,6 +55,27 @@
                       letter-spacing: 0.06em; font-size: 10px; }
     #memory-rail b { color: #e8e3d9; font-weight: 600; }
     #memory-rail .zero b { color: #6b6480; }
+    /* The coordination feed. Cross-agent lines are the point, so solo ones are
+       shown but dimmed rather than hidden — hiding them would make every
+       visible line read as teamwork. */
+    #coordination-panel { margin: 6px 0; }
+    #coordination-panel h2 { font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.08em; color: #7fa8c9; margin: 0 0 4px; font-weight: 600; }
+    #coordination-panel h2 small { text-transform: none; letter-spacing: 0;
+      color: #6b6480; font-weight: 400; margin-left: 6px; }
+    #coordination { max-height: 148px; overflow-y: auto; font-size: 11px;
+      line-height: 1.5; border-left: 2px solid #2a2833; padding-left: 8px; }
+    #coordination .co-line { display: flex; gap: 7px; flex-wrap: wrap;
+      align-items: baseline; padding: 1px 0; }
+    #coordination .co-line.solo { opacity: 0.45; }
+    #coordination .co-who { color: #e8e3d9; font-weight: 600; }
+    #coordination .co-why { color: #8f8a9c; }
+    #coordination .co-why b { color: #63c5da; font-weight: 600; }
+    #coordination .co-brain { margin-left: auto; font-size: 10px;
+      padding: 0 5px; border-radius: 8px; }
+    #coordination .co-brain.claude { color: #14131a; background: #d9cfa8; }
+    #coordination .co-brain.rules { color: #6b6480; border: 1px solid #2a2833; }
+    #coordination .co-empty { color: #6b6480; }
     #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
     #comparison b { color: #f2c14e; }
 
@@ -251,6 +272,14 @@
       <div id="console-sql"></div>
       <div id="console-rows"></div>
     </div>
+  </section>
+
+  <!-- §3.6: the coordination feed. The ticker below says what happened; this
+       says who told whom, which is the only thing the robots ever "say" to each
+       other — they have no channel, they read and write rows. -->
+  <section id="coordination-panel">
+    <h2>fleet coordination <small>who acted on whose memory</small></h2>
+    <div id="coordination"></div>
   </section>
 
   <div id="ticker"></div>

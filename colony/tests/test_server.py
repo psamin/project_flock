@@ -443,3 +443,41 @@ def test_killing_a_robot_leaves_its_work_on_an_expiring_lease(mission):
         mission.tick_once()
     after = mission.world.robots[victim_robot].x, mission.world.robots[victim_robot].y
     assert before == after, "a killed robot kept moving"
+
+
+def test_the_coordination_feed_names_who_told_whom(mission):
+    """§3.6's thesis, streamed rather than asked for.
+
+    The ticker says what happened; this says why, and the why is the product.
+    Robots have no channel to each other — they read and write rows — so a plan
+    citing another robot's observation *is* the coordination, and the feed has
+    to name both ends of it or it is just a second event log.
+    """
+    for _ in range(120):
+        mission.tick_once()
+
+    lines = mission.coordination(limit=50)
+    assert lines, "no decisions were recorded in 120 ticks"
+
+    # Newest first: an operator reads a feed top-down. Checked against the store
+    # rather than against itself, so the assertion can actually fail.
+    stored = mission.mem.plans_for(mission.mission_id)[-50:]
+    assert [ln["robot"] for ln in lines] == [p.robot_id for p in reversed(stored)], (
+        "the feed is not newest-first, or it dropped rows"
+    )
+
+    for line in lines:
+        assert line["robot"], "a decision with no decider"
+        assert "cross_agent" in line
+        # A robot must never be listed as having informed itself — that would
+        # make solo work look like teamwork, which is the one thing this feed
+        # exists to distinguish.
+        assert line["robot"] not in line["informed_by"]
+
+    crossed = [ln for ln in lines if ln["cross_agent"]]
+    assert crossed, (
+        "no decision cited another robot's belief in 120 ticks — either the feed "
+        "is not resolving based_on, or the fleet is not actually coordinating"
+    )
+    lead = crossed[0]["lead_belief"]
+    assert lead and lead["author"] and lead["author"] != crossed[0]["robot"]
