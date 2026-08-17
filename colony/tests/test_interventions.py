@@ -893,3 +893,57 @@ def test_a_planner_that_raises_does_not_stop_the_mission(mem, mission):
     _run(world, [medic], 3)
     world.apply_intervention(iv.plan(world, iv.COLLAPSE, 10, 10, radius=1))
     medic.step(world)  # must not raise
+
+
+def test_a_decision_after_a_disruption_is_marked_in_the_coordination_feed(monkeypatch):
+    """§3.6: show the fleet *noticing*, not just moving differently.
+
+    Dropping fire on a route already changes behaviour — beliefs update, routes
+    re-cost, unreachable work is handed back — but on screen that reads as
+    robots wandering. Marking the decisions that cite a belief inside the blast
+    radius, written after it landed, is what turns it into a visible
+    report -> re-plan chain.
+
+    The attribution is correlation and the test holds it to that: a decision
+    citing beliefs nowhere near the disruption must NOT be marked, or the panel
+    would credit the operator for everything the fleet does next.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from sim.server import Mission
+
+    mission = Mission()
+    for _ in range(60):
+        mission.tick_once()
+
+    # Nothing has been broken yet, so nothing may claim to be a response to it.
+    assert all(ln["responds_to"] is None for ln in mission.coordination(limit=50))
+
+    # A disruption far from anything the fleet is currently looking at.
+    mission.recent_disruptions.append(
+        {
+            "kind": "fire",
+            "label": "fire",
+            "x": 0,
+            "y": 0,
+            "radius": 1,
+            "tick": mission.world.tick,
+        },
+    )
+    assert all(ln["responds_to"] is None for ln in mission.coordination(limit=50)), (
+        "a disruption in an empty corner was credited with decisions elsewhere"
+    )
+
+    # One that covers the whole map: now the beliefs really are inside it.
+    mission.recent_disruptions.append(
+        {
+            "kind": "fire",
+            "label": "fire",
+            "x": 20,
+            "y": 15,
+            "radius": 999,
+            "tick": mission.world.tick,
+        },
+    )
+    marked = [ln for ln in mission.coordination(limit=50) if ln["responds_to"]]
+    assert marked, "a disruption covering every belief marked nothing"
+    assert marked[0]["responds_to"]["label"] == "fire"

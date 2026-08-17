@@ -269,9 +269,7 @@ SELECT m.created_at,
 
 def _render_learned(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        return (
-            "nothing yet — no mission has finished and had tactics derived from it"
-        )
+        return "nothing yet — no mission has finished and had tactics derived from it"
     used = [r for r in rows if (r["times_recalled"] or 0) > 0]
     lead = f"{len(rows)} tactic(s) learned across earlier missions"
     if used:

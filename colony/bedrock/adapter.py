@@ -270,9 +270,9 @@ class BedrockAdapter:
         Bedrock rationale is a claim we cannot support in front of a judge.
         """
         tasks = _ordered(open_tasks)
-        return _key("plan", _plan_prompt(role_card, beliefs_digest, tasks, tactics)) in (
-            self._cassette
-        )
+        return _key(
+            "plan", _plan_prompt(role_card, beliefs_digest, tasks, tactics)
+        ) in (self._cassette)
 
     def status(self) -> dict[str, Any]:
         """What this adapter is actually doing, for `/health`.
@@ -515,7 +515,11 @@ def adapter_from_env() -> BedrockAdapter:
     if mode in (LIVE, RECORD) and not has_credentials():
         mode = REPLAY
     cassette = os.environ.get("COLONY_BEDROCK_CASSETTE")
-    path = Path(cassette) if cassette else (DEFAULT_CASSETTE if DEFAULT_CASSETTE.exists() else None)
+    path = (
+        Path(cassette)
+        if cassette
+        else (DEFAULT_CASSETTE if DEFAULT_CASSETTE.exists() else None)
+    )
     return BedrockAdapter(
         mode=mode,
         region=os.environ.get("AWS_REGION", "us-east-1"),

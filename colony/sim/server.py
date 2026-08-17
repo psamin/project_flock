@@ -48,6 +48,14 @@ METRICS_EVERY_TICKS = TICK_HZ
 # running it four times a second would ask the same question four times for the
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
+# How many operator disruptions the coordination feed keeps in mind when
+# deciding whether a decision was a response to one. A handful: the demo drops
+# two or three, and an unbounded list would tag half a mission as "adapting".
+DISRUPTIONS_REMEMBERED = 6
+# How long after a disruption a nearby decision still counts as a response to
+# it. 40 ticks is 10s at 4 Hz — long enough for a scout to fly over, report, and
+# a worker to re-plan; short enough that unrelated later work is not claimed.
+DISRUPTION_WINDOW_TICKS = 40
 
 # Semantic memory (§4.0): derive tactics when a mission ends. Retrieval happens
 # per plan boundary inside the agents; this switch governs the write, and gives
@@ -176,6 +184,8 @@ class Mission:
         # not gone, it has stopped answering, and the difference is the point:
         # its rows are still in fleet memory and its lease is still ticking down.
         self.disabled: set[str] = set()
+        # Operator disruptions, newest last, for the coordination feed.
+        self.recent_disruptions: list[dict[str, Any]] = []
         self._build(coordinated=True)
 
     # --- the commander console (FR-10) ------------------------------------
@@ -218,8 +228,10 @@ class Mission:
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
-        # A restart is a new mission; nobody is dead in it yet.
+        # A restart is a new mission; nobody is dead in it yet, and nothing has
+        # been broken in it either.
         self.disabled = set()
+        self.recent_disruptions = []
         # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
         # has no mission_id — see LostWatch. Live only: `run_mission` is the
         # seeded, deterministic path §3.5 records the golden run from, and
@@ -426,9 +438,12 @@ class Mission:
         beliefs = {b.id: b for b in self.mem.get_beliefs(self.mission_id)}
         out: list[dict[str, Any]] = []
         for plan in self.mem.plans_for(self.mission_id)[-limit:]:
+            responds_to = self._disruption_behind(plan, beliefs)
             sources = [beliefs[b] for b in (plan.based_on or []) if b in beliefs]
             # Whose knowledge this robot acted on, excluding its own.
-            others = sorted({b.robot_id for b in sources if b.robot_id != plan.robot_id})
+            others = sorted(
+                {b.robot_id for b in sources if b.robot_id != plan.robot_id}
+            )
             lead = max(sources, key=lambda b: b.sightings, default=None)
             out.append(
                 {
@@ -450,10 +465,51 @@ class Mission:
                         "confidence": round(lead.confidence, 2),
                     },
                     "sources": len(sources),
+                    # Set when this decision looks like a response to something
+                    # the operator broke: a belief inside the blast radius,
+                    # written after it landed.
+                    "responds_to": responds_to,
                 }
             )
         out.reverse()  # newest first; the feed reads top-down
         return out
+
+    def _disruption_behind(self, plan: Any, beliefs: dict) -> dict[str, Any] | None:
+        """The operator disruption this decision appears to answer, if any.
+
+        An intervention already changes the fleet's behaviour — beliefs update,
+        routes re-cost, unreachable work gets handed back — but on screen that
+        reads as robots wandering differently. This is what turns it into "I
+        dropped fire, a scout reported it, and a lifter changed its mind".
+
+        Attribution is deliberately conservative and stated rather than implied:
+        a cited belief must sit inside the blast radius *and* have been observed
+        after the disruption landed. Correlation, not proof — a robot may have
+        re-planned for its own reasons — so the field is named `responds_to` and
+        the UI says "after", never "because of".
+        """
+        if not self.recent_disruptions:
+            return None
+        sources = [beliefs[b] for b in (plan.based_on or []) if b in beliefs]
+        if not sources:
+            return None
+        for event in reversed(self.recent_disruptions):
+            if self.world.tick - event["tick"] > DISRUPTION_WINDOW_TICKS:
+                continue
+            for belief in sources:
+                near = (
+                    abs(belief.pos[0] - event["x"]) + abs(belief.pos[1] - event["y"])
+                    <= event["radius"]
+                )
+                if near:
+                    return {
+                        "kind": event["kind"],
+                        "label": event["label"],
+                        "x": event["x"],
+                        "y": event["y"],
+                        "tick": event["tick"],
+                    }
+        return None
 
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).
@@ -528,6 +584,22 @@ class Mission:
         except Exception as exc:  # noqa: BLE001 - a button, not a mission
             print(f"[sim] intervention listener failed: {type(exc).__name__}: {exc}")
             return []
+        for i in pending:
+            # Remembered so the coordination feed can say which decisions came
+            # *after* an operator broke something, and near enough to it to
+            # plausibly be a response. Without this the fleet does adapt and it
+            # reads as robots wandering differently.
+            self.recent_disruptions.append(
+                {
+                    "kind": i.kind,
+                    "label": i.label,
+                    "x": i.origin[0],
+                    "y": i.origin[1],
+                    "radius": i.radius,
+                    "tick": self.world.tick,
+                }
+            )
+        del self.recent_disruptions[:-DISRUPTIONS_REMEMBERED]
         return [self.world.apply_intervention(i) for i in pending]
 
     def _scan_for_lost(self, frame: Any) -> list[str]:

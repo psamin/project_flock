@@ -76,6 +76,12 @@
     #coordination .co-brain.claude { color: #14131a; background: #d9cfa8; }
     #coordination .co-brain.rules { color: #6b6480; border: 1px solid #2a2833; }
     #coordination .co-empty { color: #6b6480; }
+    /* A decision that followed something the operator broke. Marked, not
+       claimed: the label says "after", because a nearby belief written after a
+       disruption is correlation and the robot may have re-planned anyway. */
+    #coordination .co-line.disrupted { border-left: 2px solid #d9884a;
+      margin-left: -8px; padding-left: 6px; }
+    #coordination .co-after { color: #d9884a; }
     #comparison { color: #f2c14e; font-size: 12px; min-height: 18px; }
     #comparison b { color: #f2c14e; }
 

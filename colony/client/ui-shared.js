@@ -489,10 +489,20 @@ export async function refreshCoordination() {
               ? ` (${ln.lead_belief.sightings} sightings)`
               : "")
           : `on what it saw itself`;
+        // "after", never "because of": a belief inside the blast radius written
+        // after the disruption is correlation, and the robot may have re-planned
+        // for its own reasons. Overclaiming here would be the one place this
+        // panel could mislead.
+        const after = ln.responds_to
+          ? `<span class="co-after">after ${ln.responds_to.label} ` +
+            `at ${ln.responds_to.x},${ln.responds_to.y}</span>`
+          : "";
         return (
-          `<div class="co-line ${ln.cross_agent ? "crossed" : "solo"}">` +
+          `<div class="co-line ${ln.cross_agent ? "crossed" : "solo"}` +
+          `${ln.responds_to ? " disrupted" : ""}">` +
           `<span class="co-who">${ln.robot}</span> ${act}${at}` +
           `<span class="co-why">${why}</span>` +
+          after +
           `<span class="co-brain ${brain}">${brain}</span>` +
           `</div>`
         );
