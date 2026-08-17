@@ -30,12 +30,25 @@
 import * as THREE from "three";
 
 /** How long the director keeps its hands off after the operator touches it. */
-const OVERRIDE_MS = 4000;
-/** No cue for this long and we drift back to an establishing wide. */
+const OVERRIDE_MS = 9000;
+/** No cue for this long and we drift back to framing the fleet. */
 const IDLE_MS = 4200;
 
-// Sized so an idle wide holds the entire 40x30 slab in frame at fov 45.
-const WIDE = { distance: 62, height: 0.62 };
+/** Where the camera starts. NOT somewhere it returns to — see below. */
+const WIDE = { distance: 62 };
+
+/* ZOOM BELONGS TO THE OPERATOR.
+ *
+ * The first version treated WIDE.distance as a resting state and lerped back to
+ * it whenever no cue was active. Combined with a 4s override that meant every
+ * manual zoom was undone about five seconds later, which feels like the app
+ * fighting you — and it is, because "how close am I looking" is a question the
+ * person watching is better placed to answer than the event stream is.
+ *
+ * Now: whatever distance the operator settles on becomes the resting distance.
+ * Cues may still push in for a stabilize or pull wide for an aftershock, since
+ * that is the entire point of a director, but when the shot expires the camera
+ * returns to THEIR framing rather than a number chosen in this file. */
 
 /* priority: higher wins. hold: how long the shot stays before expiring. */
 const CUES = {
@@ -59,6 +72,8 @@ export class Director {
     this.desired = new THREE.Vector3(0, 0, 0);
     this.distance = WIDE.distance;
     this.desiredDistance = WIDE.distance;
+    /** The operator's chosen framing. Cues borrow the camera; this gets it back. */
+    this.userDistance = WIDE.distance;
 
     this.cue = null;          // {priority, expires, shakeUntil}
     this.overrideUntil = 0;
@@ -77,8 +92,15 @@ export class Director {
     this.overrideUntil = now + OVERRIDE_MS;
   }
 
-  get overridden() {
-    return performance.now() < this.overrideUntil;
+  /** Is the operator still holding the wheel?
+   *
+   * Takes `now` rather than reading performance.now() itself. Every other
+   * decision in this class runs off the clock update() is handed, and mixing
+   * two time sources inside one branch is only correct for as long as every
+   * caller happens to pass the wall clock — which is exactly the kind of
+   * assumption that silently stops being true. */
+  isOverridden(now) {
+    return now < this.overrideUntil;
   }
 
   /**
@@ -120,15 +142,29 @@ export class Director {
    */
   update(now, home) {
     const shaking = now < this.shakeUntil;
+    const actual = this.camera.position.distanceTo(this.controls.target);
 
-    if (this.enabled && !this.overridden) {
+    if (!this.enabled || this.isOverridden(now)) {
+      // The operator is driving, or the director is switched off. Track what
+      // they are doing rather than remembering an older framing, so nothing is
+      // yanked back the moment the director resumes.
+      this.userDistance = actual;
+      this.distance = actual;
+      this.desiredDistance = actual;
+      this.target.copy(this.controls.target);
+      this.desired.copy(this.controls.target);
+    } else {
       const stale = !this.cue || this.cue.expires <= now;
-      if (stale && now - this.lastCueAt > IDLE_MS) {
-        // Nothing happening: drift to an establishing wide on the fleet and
-        // orbit slowly, so the shot is never completely still.
+      const idle = stale && now - this.lastCueAt > IDLE_MS;
+
+      if (stale) {
+        // A shot has expired: give the framing back at the distance THEY chose.
+        this.desiredDistance = this.userDistance;
+      }
+      if (idle) {
+        // Nothing happening: keep the fleet in frame and drift very slowly, so
+        // the shot is never completely dead. Distance is untouched here.
         this.desired.copy(home);
-        this.desiredDistance = WIDE.distance;
-        this.azimuth += 0.00013 * 16;
       }
 
       this.target.lerp(this.desired, 0.045);
@@ -138,7 +174,7 @@ export class Director {
       // keep its direction, and only change its length.
       const offset = this.camera.position.clone().sub(this.controls.target);
       const spherical = new THREE.Spherical().setFromVector3(offset);
-      if (stale && now - this.lastCueAt > IDLE_MS) spherical.theta += 0.0007;
+      if (idle) spherical.theta += 0.00035;
       spherical.radius = this.distance;
       spherical.makeSafe();
 
