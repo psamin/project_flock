@@ -81,6 +81,32 @@
       width: min(1280px, 96vw); background: #1c1a24; border: 1px solid #2e2939;
       border-radius: 4px; padding: 10px 12px;
     }
+    #intervene {
+      border: 1px solid #2b2733; border-radius: 6px; padding: 10px 12px;
+      margin-bottom: 8px; background: #16141c;
+    }
+    #intervene-head {
+      display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px;
+    }
+    #intervene-head strong { color: #e8e3d9; letter-spacing: 0.08em; font-size: 12px; }
+    #intervene-status { color: #8a8397; font-size: 11px; }
+    #intervene-status.err { color: #d96a9a; }
+    #intervene-status.ok { color: #7fc99a; }
+    #intervene-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    #intervene-kinds { display: flex; gap: 6px; flex-wrap: wrap; }
+    #intervene-kinds button.armed {
+      border-color: #d9a86a; color: #f0d9b5; background: #2a2118;
+    }
+    #intervene-kinds button .mem {
+      margin-left: 6px; color: #6f6880; font-size: 9px; letter-spacing: 0.06em;
+    }
+    #intervene-radius-wrap {
+      color: #8a8397; font-size: 11px; display: flex; align-items: center; gap: 6px;
+    }
+    #intervene-radius { width: 80px; }
+    /* An armed cursor over the map, so it is obvious the next click places a
+       disruption rather than selecting a robot. */
+    body.arming #stage canvas { cursor: crosshair; }
     #console-head {
       display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
       margin-bottom: 8px;
@@ -187,6 +213,20 @@
       <div id="panel-body"></div>
     </aside>
   </div>
+
+  <section id="intervene">
+    <div id="intervene-head">
+      <strong>OPERATOR</strong>
+      <span id="intervene-status">pick a disruption, then click a tile</span>
+    </div>
+    <div id="intervene-controls">
+      <div id="intervene-kinds"></div>
+      <label id="intervene-radius-wrap">radius
+        <input id="intervene-radius" type="range" min="0" max="3" value="1" />
+        <span id="intervene-radius-label">1</span>
+      </label>
+    </div>
+  </section>
 
   <section id="console">
     <div id="console-head">
