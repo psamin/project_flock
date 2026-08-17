@@ -21,7 +21,7 @@ from uuid import UUID
 from agents import beliefs, logistics, planning
 from agents.pathing import find_move_plan
 from agents.planning import BEDROCK, RULES
-from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, Task
+from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, WORLD_CHANGED, Task
 from sim import recall as recall_mod
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, World
@@ -144,6 +144,9 @@ class Worker:
     # Escalations this robot has felt. A change it did not cause invalidates the
     # plan it made before the change (FR-7).
     seen_escalations: int = 0
+    # Escalations *and* interventions (issue #22). Separate from the field
+    # above because the agent compares the two to tell which it just felt.
+    seen_disruptions: int = 0
     # Consecutive ticks another robot has stood in the only route to the target.
     blocked_ticks: int = 0
     # task id -> tick when this robot last failed to reach it
@@ -285,29 +288,89 @@ class Worker:
     # --- reacting to the world (FR-7) -------------------------------------
 
     def _note_escalation(self, world: World) -> None:
-        """An aftershock invalidates plans made before it (FR-7).
+        """A disruption invalidates plans made before it (FR-7, issue #22).
 
         The robot does not get told what changed — it re-decides, and the world
         it re-decides against is the one it can now observe. Holding work is the
         risky part: the corridor this task depended on may be gone, so the task
         goes back to the pool and is re-picked on the merits a tick later.
+
+        An operator intervention is felt exactly as an aftershock is, through
+        the same counter, because to a robot they are the same event: the ground
+        moved and what that cost has to be discovered by looking. The only thing
+        the robot distinguishes is *which* — and it does that by comparing two
+        counts it can already see, not by reading anyone's tile list.
         """
-        if world.escalations_fired <= self.seen_escalations:
+        if world.disruptions_felt <= self.seen_disruptions:
             return
+        by_operator = world.escalations_fired <= self.seen_escalations
+        self.seen_disruptions = world.disruptions_felt
         self.seen_escalations = world.escalations_fired
         if self.task is None:
             return
         released = self.task
-        self._abandon(reason="aftershock")
+        cause = "an operator" if by_operator else "aftershock"
+        self._abandon(reason="intervention" if by_operator else "aftershock")
+        # A disruption is the moment the model earns its place: the rules that
+        # rank open work by distance have nothing to say about a route that has
+        # just stopped existing. Hence `reserved` — this replan draws on the
+        # budget kept for exactly this, rather than on whatever routine planning
+        # left over.
         self._log_choice(
             None,
             [],
-            trigger=AFTERSHOCK,
+            trigger=WORLD_CHANGED if by_operator else AFTERSHOCK,
             rationale=(
-                f"aftershock invalidated my route to {released.kind} at "
+                f"{cause} invalidated my route to {released.kind} at "
                 f"{released.target[0]},{released.target[1]}; re-deciding"
             ),
             robot=world.robots[self.robot_id],
+        )
+        self._replan_after_disruption(world)
+
+    def _replan_after_disruption(self, world: World) -> None:
+        """Ask Bedrock what to do about a world that just changed.
+
+        Fails soft in every direction, per §5.4: no planner, no credentials, a
+        throttle, an empty cassette or a call already in flight all mean the
+        robot uses the rules it always had. The intervention still landed and
+        the task is still back in the pool — the model deepens the response, it
+        does not gate it.
+        """
+        if self.planner is None:
+            return
+        robot = world.robots[self.robot_id]
+        candidates = self._claimable(world, robot)
+        digest = planning.build_digest(self.mem, self.mission_id, robot)
+        lessons = self._recall(robot, candidates)
+        try:
+            plan = self.planner.plan(
+                robot,
+                world.tick,
+                digest,
+                candidates,
+                recall_mod.as_prompt_lines(lessons),
+                reserved=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a decision we do not have
+            # This runs the instant an operator clicks a button, which is the
+            # worst possible moment for an unhandled exception: an agent step
+            # raises into the tick loop, the loop's asyncio task dies with
+            # nobody awaiting it, and the mission silently stops ticking with
+            # no traceback anywhere. That happened once during development and
+            # took a live repro to find, so this path does not get to raise.
+            print(f"[{self.robot_id}] disruption replan failed: {exc!r}")
+            return
+        if plan is None:
+            return
+        self._log_choice(
+            None,
+            candidates,
+            trigger=WORLD_CHANGED,
+            rationale=plan.rationale,
+            robot=robot,
+            digest=digest,
+            source=BEDROCK,
         )
 
     # --- finding work -----------------------------------------------------
@@ -324,14 +387,7 @@ class Worker:
             return
 
         robot = world.robots[self.robot_id]
-        candidates = [
-            task
-            for task in self.mem.open_tasks(self.mission_id)
-            if task.kind in ROLE_TASKS.get(self.role, set())
-            and task.id not in self.finished
-            and not self._cooling_off(task.id, world.tick)
-        ]
-        candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
+        candidates = self._claimable(world, robot)
         if not candidates:
             return
 
@@ -400,6 +456,24 @@ class Worker:
             robot, world.tick, digest, candidates, recall_mod.as_prompt_lines(lessons)
         )
         return plan, digest
+
+    def _claimable(self, world: World, robot: Any) -> list[Task]:
+        """Open work this robot could take, best first by the §4.4 score.
+
+        Extracted from `_find_work` when the disruption replan needed the same
+        list: a prompt built from a different set of candidates than the one the
+        robot then claims from would produce a rationale about work it never
+        considered.
+        """
+        candidates = [
+            task
+            for task in self.mem.open_tasks(self.mission_id)
+            if task.kind in ROLE_TASKS.get(self.role, set())
+            and task.id not in self.finished
+            and not self._cooling_off(task.id, world.tick)
+        ]
+        candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
+        return candidates
 
     def _recall(self, robot: Any, candidates: list[Task]) -> list:
         """Tactics from earlier missions that match this moment.

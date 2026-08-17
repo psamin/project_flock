@@ -23,8 +23,10 @@ from fleetmem.types import (
     CLAIMED,
     DONE,
     IN_PROGRESS,
+    INTERVENTION_PREFIX,
     OPEN,
     Belief,
+    Hazard,
     Lesson,
     Match,
     Plan,
@@ -57,6 +59,10 @@ class FakeFleetMem:
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
         self._victims: dict[UUID, dict[str, Any]] = {}
+        # Operator interventions land here too (issue #22). Insertion-ordered,
+        # which is what lets the no-cluster listener diff by id and pick up
+        # exactly what it has not seen.
+        self._hazards: dict[UUID, dict[str, Any]] = {}
         # Semantic memory. Per-instance, deliberately: the sim builds one store
         # and reuses it across missions, which is all cross-mission recall
         # needs. A class-level store would instead leak between compare_modes'
@@ -459,6 +465,58 @@ class FakeFleetMem:
                     lease_expires_at=t["lease_expires_at"],
                 )
                 for t in rows
+            ]
+
+    # --- hazards and operator interventions -------------------------------
+
+    def record_intervention(
+        self,
+        mission_id: UUID,
+        kind: str,
+        area: dict[str, Any],
+        severity: int = 1,
+        caused_by: str = "operator",
+    ) -> UUID:
+        """Mirror of the client's write (issue #22).
+
+        The real one is picked up by a changefeed; there is nothing to stream
+        from here, so `InterventionWatch` diffs `active_hazards` instead. Same
+        SDK surface either way, which is the point of this class — the feature
+        works with no cluster, and the transport is the listener's problem
+        rather than the caller's.
+        """
+        with self._lock:
+            hazard_id = self._new_id()
+            self._hazards[hazard_id] = {
+                "id": hazard_id,
+                "mission_id": mission_id,
+                "kind": f"{INTERVENTION_PREFIX}{kind}",
+                "area": {**area, "caused_by": caused_by},
+                "severity": severity,
+                "active": True,
+            }
+            return hazard_id
+
+    def active_hazards(
+        self, mission_id: UUID, interventions_only: bool = False
+    ) -> list[Hazard]:
+        with self._lock:
+            return [
+                Hazard(
+                    id=h["id"],
+                    mission_id=h["mission_id"],
+                    kind=h["kind"],
+                    area=h["area"],
+                    severity=h["severity"],
+                    active=h["active"],
+                )
+                for h in self._hazards.values()
+                if h["active"]
+                and h["mission_id"] == mission_id
+                and (
+                    not interventions_only
+                    or h["kind"].startswith(INTERVENTION_PREFIX)
+                )
             ]
 
     # --- robots and log ---------------------------------------------------

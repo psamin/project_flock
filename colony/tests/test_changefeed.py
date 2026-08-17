@@ -195,3 +195,101 @@ def test_the_feed_reports_a_startup_failure_rather_than_going_quiet(db):
     with pytest.raises(psycopg.Error):
         feed.start(timeout=10.0)
     feed.stop()
+
+
+# --- interventions over the feed (issue #22) --------------------------------
+#
+# The spike's own docstring said "nothing in the fleet depends on this module".
+# That stopped being true when operator interventions started travelling this
+# way, so the hazard half gets the same live-cluster treatment the task half
+# has: the row has to actually arrive, over a real feed, against a real cluster.
+
+
+@pytest.fixture
+def hazard_feed(db, mission):
+    from fleetmem.changefeed import HazardFeed
+
+    ensure_enabled(db.conn)
+    f = HazardFeed(mission_id=mission)
+    f.start()
+    _await_liveness(f)
+    yield f
+    f.stop()
+
+
+def _wait_for_intervention(feed, timeout: float = DELIVERY_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = feed.interventions(timeout=0.25)
+        if found:
+            return found
+    return []
+
+
+def test_an_intervention_reaches_a_listener_over_the_feed(db, mission, hazard_feed):
+    """The claim issue #22 makes load-bearing: an operator writes a row and the
+    running mission finds out, with no path between them but CockroachDB."""
+    db.record_intervention(
+        mission,
+        "collapse",
+        {"origin": [7, 8], "radius": 1, "tiles": [[7, 8], [7, 7]]},
+        severity=2,
+    )
+    found = _wait_for_intervention(hazard_feed)
+    assert found, "the intervention never arrived over the changefeed"
+    assert found[0].intervention_kind == "collapse"
+    assert found[0].area["origin"] == [7, 8]
+    assert found[0].area["tiles"] == [[7, 8], [7, 7]]
+
+
+def test_the_feed_is_scoped_to_its_own_mission(db, mission, hazard_feed):
+    """A core changefeed carries the whole table; another mission's disruption
+    must not land in this one's world."""
+    db.record_intervention(
+        uuid.uuid4(), "fire", {"origin": [1, 1], "radius": 0, "tiles": [[1, 1]]}
+    )
+    db.record_intervention(
+        mission, "rubble", {"origin": [2, 2], "radius": 0, "tiles": [[2, 2]]}
+    )
+    found = _wait_for_intervention(hazard_feed)
+    assert [c.intervention_kind for c in found] == ["rubble"]
+
+
+def test_the_watch_prefers_the_changefeed_when_there_is_a_cluster(db, mission):
+    """`InterventionWatch` picks its transport; against a real cluster it must
+    pick the feed, or the 0.09s delivery this feature is built on is silently a
+    1 Hz poll and nobody finds out."""
+    from sim.interventions import InterventionWatch
+
+    watch = InterventionWatch(db, mission).start()
+    try:
+        assert watch.transport == "changefeed", watch.error
+    finally:
+        watch.stop()
+
+
+def test_the_watch_delivers_an_intervention_end_to_end(db, mission):
+    """Through the listener rather than the raw feed: written as an operator
+    would write it, rebuilt as the world would receive it."""
+    from sim.interventions import InterventionWatch
+
+    watch = InterventionWatch(db, mission).start()
+    try:
+        assert watch.transport == "changefeed", watch.error
+        time.sleep(1.5)  # the rangefeed does not see writes from before it attached
+        db.record_intervention(
+            mission,
+            "collapse",
+            {"origin": [4, 5], "radius": 0, "tiles": [[4, 5]]},
+            caused_by="commander",
+        )
+        deadline = time.monotonic() + DELIVERY_TIMEOUT
+        found = []
+        while time.monotonic() < deadline and not found:
+            found = watch.pending()
+            time.sleep(0.1)
+        assert found, "the listener never saw the intervention"
+        assert found[0].origin == (4, 5)
+        assert found[0].caused_by == "commander"
+    finally:
+        watch.stop()

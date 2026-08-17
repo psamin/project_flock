@@ -37,6 +37,9 @@ import {
   refreshComparison,
   formatEvent,
   initConsole,
+  initInterventions,
+  armedIntervention,
+  placeIntervention,
 } from "./ui-shared.js";
 
 const TICK_MS = 250; // 4 Hz
@@ -355,6 +358,16 @@ function onCanvasClick(event) {
   const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
   const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
 
+  // An armed disruption takes the click (issue #22). Checked before robot
+  // picking rather than after: the tile an operator wants to collapse is very
+  // often the one a robot is standing next to, and "select the robot instead"
+  // would make the corridor beside it unclickable.
+  const armed = armedIntervention();
+  if (armed) {
+    placeIntervention(Math.floor(x / tile), Math.floor(y / tile));
+    return;
+  }
+
   let best = null;
   let bestDistance = tile; // within a tile of the click counts as a hit
   for (const r of robots) {
@@ -542,6 +555,8 @@ function connect() {
 // Lives in ui-shared.js. It takes accessors rather than reading globals,
 // because "which robot is the subject of this question" is renderer state and
 // /sim3d tracks its own selection.
+
+initInterventions();
 
 initConsole({
   getRobots: () => robots,

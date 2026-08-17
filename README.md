@@ -77,6 +77,8 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
  Orchestrator ────────────────────────┘                    │
     · lost-marking only — allocation and unblocking live in the data model
  Commander console ── read-only SQL / CockroachDB Managed MCP Server
+ Operator console ── breaks the world on cue. The command is a `hazards` row and
+    a CRDB changefeed carries it to the fleet; there is no other path in.
  Chaos rig ── kills a CockroachDB node on cue
 ```
 
@@ -137,6 +139,7 @@ global across every mission and every map, so the index ranks many rows against
 | [`colony/sim/`](colony/sim/) | Authoritative world, 4 Hz tick server, websocket protocol |
 | [`colony/client/`](colony/client/) | Both renderers. `app.js`+`atlas.js` are the 2D view, `scene3d.js`+`rigs.js`+`director.js` the 3D one, `ui-shared.js` the HUD, ticker and console they share |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
+| [`colony/sim/interventions.py`](colony/sim/interventions.py) | Operator interventions: what may be broken, and what the world refuses |
 | [`colony/console/`](colony/console/) | The commander console's six questions, read-only |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |
 | [`docs/`](docs/) | Setup, lane handoffs, the changefeed spike |

@@ -21,8 +21,10 @@ from psycopg.rows import dict_row
 from fleetmem.types import (
     BLOCKED,
     DONE,
+    INTERVENTION_PREFIX,
     OPEN,
     Belief,
+    Hazard,
     Match,
     Lesson,
     Plan,
@@ -531,6 +533,58 @@ class CockroachFleetMem:
         ).fetchall()
         return [_task(r) for r in rows]
 
+    # --- hazards and operator interventions -------------------------------
+
+    def record_intervention(
+        self,
+        mission_id: UUID,
+        kind: str,
+        area: dict[str, Any],
+        severity: int = 1,
+        caused_by: str = "operator",
+    ) -> UUID:
+        """Write an operator's disruption to fleet memory (issue #22).
+
+        This is the whole of the operator's channel. The console writes a row;
+        the fleet finds out the way it finds out about everything else. Nothing
+        reaches into the sim, and there is no path from a person to a robot that
+        does not go through this table — which is the same claim the project
+        makes about robot-to-robot messaging, held to for the operator too.
+
+        Returning before anything has been applied is deliberate: the caller is
+        an HTTP handler, and the disruption becomes real when the listener picks
+        the row up, not when the request returns.
+        """
+        row = self.conn.execute(
+            "INSERT INTO hazards (mission_id, kind, area, severity, active)"
+            " VALUES (%s, %s, %s, %s, true) RETURNING id",
+            (
+                mission_id,
+                f"{INTERVENTION_PREFIX}{kind}",
+                json.dumps({**area, "caused_by": caused_by}),
+                severity,
+            ),
+        ).fetchone()
+        return row["id"]
+
+    def active_hazards(
+        self, mission_id: UUID, interventions_only: bool = False
+    ) -> list[Hazard]:
+        """Live hazards for this mission, newest last.
+
+        Read by the console panel and by the fake's listener. Agents do **not**
+        call this: a robot learns what is in its way by looking at the world,
+        and a query that hands it the operator's tile list would be ground truth
+        arriving without anyone sensing it (§4.8).
+        """
+        sql = "SELECT * FROM hazards WHERE mission_id = %s AND active"
+        params: list[Any] = [mission_id]
+        if interventions_only:
+            sql += " AND kind LIKE %s"
+            params.append(f"{INTERVENTION_PREFIX}%")
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_hazard(r) for r in rows]
+
     # --- robots and log ---------------------------------------------------
 
     def heartbeat(
@@ -718,6 +772,17 @@ def _lesson(r: dict[str, Any]) -> Lesson:
         times_recalled=int(r["times_recalled"] or 0),
         distance=float(r["distance"] or 0.0),
         created_at=r.get("created_at"),
+    )
+
+
+def _hazard(r: dict[str, Any]) -> Hazard:
+    return Hazard(
+        id=r["id"],
+        mission_id=r.get("mission_id"),
+        kind=r["kind"] or "",
+        area=r["area"] or {},
+        severity=int(r["severity"] or 1),
+        active=bool(r["active"]),
     )
 
 

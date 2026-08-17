@@ -249,3 +249,123 @@ export async function initConsole(ctx) {
     status.textContent = "console unreachable";
   }
 }
+
+// --- operator interventions (issue #22) --------------------------------------
+//
+// Breaking the world is a two-step gesture on purpose: arm a disruption, then
+// click where it goes. A one-click "drop fire" button beside the mission
+// controls is one misclick away from ending a run somebody is recording, and
+// the arm step also gives the cursor somewhere to say what it is about to do.
+
+let armed = null; // {kind, radius} or null
+
+/** The armed disruption, for a renderer deciding what a canvas click means. */
+export function armedIntervention() {
+  return armed;
+}
+
+function setStatus(text, className = "") {
+  const status = document.getElementById("intervene-status");
+  if (!status) return;
+  status.className = className;
+  status.textContent = text;
+}
+
+/** Un-arm. `keepStatus` is for the success path, which has something to say —
+ * without it the confirmation is overwritten by the idle prompt in the same
+ * frame and the operator sees no feedback at all. */
+function disarm(keepStatus = false) {
+  armed = null;
+  for (const b of document.querySelectorAll("#intervene-kinds button")) {
+    b.classList.remove("armed");
+  }
+  document.body.classList.remove("arming");
+  if (!keepStatus) setStatus("pick a disruption, then click a tile");
+}
+
+/** Place the armed disruption at a tile. Returns true if it was accepted.
+ *
+ * The interesting branch is the 409: the world refusing to let an operator seal
+ * off a victim for good. Surfacing that reason verbatim is the difference
+ * between "nothing happened" and "you were about to kill v3". */
+export async function placeIntervention(x, y) {
+  if (!armed) return false;
+  const { kind, radius } = armed;
+  setStatus(`sending ${kind} at ${x},${y}…`);
+  try {
+    const reply = await fetch("/api/intervene", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, x, y, radius }),
+    });
+    const body = await reply.json();
+    if (!reply.ok) {
+      const reason = (body.detail && body.detail.reason) || `refused (${reply.status})`;
+      setStatus(reason, "err");
+      return false;
+    }
+    // Deliberately reports the transport. The whole point of routing this
+    // through fleet memory is that the changefeed carries it, and a panel that
+    // silently fell back to a 1 Hz poll should say so rather than just feel
+    // slower.
+    setStatus(`${body.label} at ${x},${y} · via ${body.transport}`, "ok");
+    disarm(true);
+    return true;
+  } catch (err) {
+    setStatus(`intervention failed: ${err.message}`, "err");
+    return false;
+  }
+}
+
+/** Wire the disruption buttons and the radius control. */
+export async function initInterventions() {
+  const holder = document.getElementById("intervene-kinds");
+  if (!holder) return;
+  let data;
+  try {
+    data = await (await fetch("/api/interventions")).json();
+  } catch {
+    setStatus("interventions unavailable", "err");
+    return;
+  }
+
+  const radius = document.getElementById("intervene-radius");
+  if (radius) {
+    radius.max = String(data.max_radius);
+    radius.addEventListener("input", () => {
+      if (armed) armed.radius = Number(radius.value);
+      const label = document.getElementById("intervene-radius-label");
+      if (label) label.textContent = radius.value;
+    });
+  }
+
+  holder.innerHTML = "";
+  for (const kind of data.kinds) {
+    const button = document.createElement("button");
+    button.textContent = kind.label;
+    const tag = document.createElement("span");
+    tag.className = "mem";
+    // Which disruptions a lifter can undo, and which are permanent. It is the
+    // one property that changes what an operator is actually doing.
+    tag.textContent = kind.clearable ? "CLEARABLE" : "PERMANENT";
+    button.appendChild(tag);
+    button.addEventListener("click", () => {
+      const wasArmed = armed && armed.kind === kind.id;
+      disarm();
+      if (wasArmed) return; // clicking the armed one disarms it
+      armed = { kind: kind.id, radius: radius ? Number(radius.value) : 1 };
+      button.classList.add("armed");
+      document.body.classList.add("arming");
+      setStatus(`click a tile to place ${kind.label}`);
+    });
+    holder.appendChild(button);
+  }
+  disarm();
+
+  // Escape is the way out of an armed cursor. Without it the only way to
+  // un-arm is to click a tile, which is exactly what the operator is trying
+  // not to do.
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && armed) disarm();
+  });
+}

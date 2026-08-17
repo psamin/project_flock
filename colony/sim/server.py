@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +28,7 @@ from bedrock.adapter import REPLAY, adapter_from_env
 from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
 from orchestrator.lost import LostWatch
+from sim import interventions as interventions_mod
 from sim import metrics as metrics_mod
 from sim import recall as recall_mod
 from sim.mission import build_fleet
@@ -191,6 +192,12 @@ class Mission:
 
     def _build(self, *, coordinated: bool) -> None:
         """Stand up a fresh world, mission and fleet in this coordination mode."""
+        # A restart replaces the mission, so the old listener's changefeed thread
+        # has to go with it. Left running it would hold a connection for a
+        # mission nobody is watching, and every toggle would leak another.
+        previous = getattr(self, "intervention_watch", None)
+        if previous is not None:
+            previous.stop()
         self.coordinated = coordinated
         self.world = World(load_map(self.map_path), seed=self.seed)
         self.world.shared_vision = coordinated
@@ -213,6 +220,13 @@ class Mission:
         # make an identical seed produce a different event log on a slow laptop.
         self.lost_watch = LostWatch(self.mem, self.mission_id, self.agents)
         self._lost_at = -1
+        # How an operator's disruption reaches this mission (issue #22). Started
+        # here rather than lazily so the changefeed thread is up before the first
+        # click, and scoped to this mission_id so a restart cannot deliver the
+        # previous run's interventions into the new world.
+        self.intervention_watch = interventions_mod.InterventionWatch(
+            self.mem, self.mission_id
+        ).start()
 
     async def reset(self, *, coordinated: bool) -> None:
         """Restart the mission in the other coordination mode (FR-9).
@@ -359,6 +373,12 @@ class Mission:
     def tick_once(self) -> dict[str, Any]:
         """One pass of the pipeline. Split out from the loop so tests can drive
         the mission without asyncio or wall-clock time."""
+        # Operator interventions land *before* the agents think, so a robot
+        # feels the disruption on the same tick it arrives rather than a tick
+        # late. Applying after would have every robot spend one tick acting on a
+        # world that no longer exists, which on camera reads as a lag in the
+        # fleet rather than in us.
+        self._apply_interventions()
         actions = {
             robot_id: agent.step(self.world) for robot_id, agent in self.agents.items()
         }
@@ -374,6 +394,23 @@ class Mission:
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
+
+    def _apply_interventions(self) -> list[Any]:
+        """Drain whatever the operator has written and land it on the world.
+
+        The listener is the only thing that turns a row into a change in the
+        world, which is what keeps the claim in issue #22 honest: an operator
+        has no path to a running mission that does not go through fleet memory.
+
+        A failure here is a disruption that did not land, not a mission that
+        ends. The tick loop is running a rescue.
+        """
+        try:
+            pending = self.intervention_watch.pending()
+        except Exception as exc:  # noqa: BLE001 - a button, not a mission
+            print(f"[sim] intervention listener failed: {type(exc).__name__}: {exc}")
+            return []
+        return [self.world.apply_intervention(i) for i in pending]
 
     def _scan_for_lost(self, frame: Any) -> list[str]:
         """Run the heartbeat scan on its own cadence and put the edges on the
@@ -590,6 +627,83 @@ async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
         "mode": mission.mode,
         "tick": mission.world.tick,
         "previous": mission.last_runs,
+    }
+
+
+@app.post("/api/intervene")
+async def intervene(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Break the world on purpose (issue #22).
+
+    The handler validates and **writes a row**. It does not touch the world:
+    the disruption becomes real when the listener picks the row up, which is
+    what makes "the operator has no channel the robots do not have" a fact about
+    the code rather than a claim in a README.
+
+    Two failure modes are told apart on purpose. A bad request — unknown kind,
+    off-map, silly radius — is a 400 the operator can fix. An intervention that
+    would seal off a victim for good is a **409**: the request was
+    well-formed and the world refused it, and saying so is more useful than
+    letting someone quietly kill a run they were only poking at.
+    """
+    body = body or {}
+    try:
+        x, y = int(body.get("x", -1)), int(body.get("y", -1))
+        radius = int(body.get("radius", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, detail={"reason": "x, y and radius must be integers"})
+
+    try:
+        planned = interventions_mod.plan(
+            mission.world,
+            str(body.get("kind", "")),
+            x,
+            y,
+            radius,
+            caused_by=str(body.get("caused_by", "operator")),
+        )
+    except interventions_mod.InterventionError as exc:
+        status = 409 if exc.detail.get("stranded") else 400
+        raise HTTPException(status, detail={"reason": exc.reason, **exc.detail})
+
+    try:
+        hazard_id = mission.mem.record_intervention(
+            mission.mission_id,
+            planned.kind,
+            planned.area(),
+            severity=planned.severity,
+            caused_by=planned.caused_by,
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced, not swallowed
+        raise HTTPException(
+            503,
+            detail={"reason": f"fleet memory rejected the write: {exc}"},
+        )
+
+    return {
+        "id": str(hazard_id),
+        "accepted": True,
+        "transport": mission.intervention_watch.transport,
+        **planned.to_json(),
+    }
+
+
+@app.get("/api/interventions")
+async def intervention_catalog() -> dict[str, Any]:
+    """What an operator may do, and what has been done to this mission."""
+    return {
+        "kinds": [
+            {
+                "id": kind,
+                "label": spec["label"],
+                "severity": spec["severity"],
+                "clearable": spec["clearable"],
+            }
+            for kind, spec in interventions_mod.KINDS.items()
+        ],
+        "max_radius": interventions_mod.MAX_RADIUS,
+        "transport": mission.intervention_watch.transport,
+        "transport_error": mission.intervention_watch.error,
+        "applied": [a.to_json() for a in mission.world.interventions],
     }
 
 

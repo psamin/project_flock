@@ -40,6 +40,12 @@ SDK_METHODS = [
     "remember_lesson",
     "recall_lessons",
     "mark_recalled",
+    # operator interventions (issue #22). On the SDK surface rather than beside
+    # the server because writing the row *is* the operator's entire channel —
+    # the fleet learns about a disruption the same way it learns everything,
+    # and the fake has to offer that path too or the feature needs a cluster.
+    "record_intervention",
+    "active_hazards",
     "close",
 ]
 

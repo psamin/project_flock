@@ -58,7 +58,8 @@ so a broken cluster can't masquerade as a green run.
 | [`orchestrator/lost.py`](orchestrator/lost.py) | The heartbeat scan, and why it stays off the recovery path |
 | [`console/questions.py`](console/questions.py) | The commander console's six canned questions (FR-10) |
 | [`console/reader.py`](console/reader.py) | The read-only execution path the console cannot write through |
-| [`fleetmem/changefeed.py`](fleetmem/changefeed.py) | P1 spike: waking on unblocks instead of polling (§4.4) |
+| [`fleetmem/changefeed.py`](fleetmem/changefeed.py) | Task unblocks (P1 spike, §4.4) and operator interventions (load-bearing, issue #22) |
+| [`sim/interventions.py`](sim/interventions.py) | What an operator may break, what the world refuses, and how the row reaches the fleet |
 
 ## Interface contracts (§5.2 — all four frozen Aug 3)
 

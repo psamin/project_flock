@@ -74,6 +74,42 @@ class Lesson:
     created_at: datetime | None = None
 
 
+# Operator interventions ride in `hazards` under this prefix (issue #22). They
+# are hazards in the only sense a robot cares about — something in the way that
+# has to be routed around — and giving them their own table would mean a second
+# thing to join when the console asks what is blocking a victim.
+INTERVENTION_PREFIX = "intervention:"
+
+
+@dataclass(frozen=True)
+class Hazard:
+    """A hazard as fleet memory holds it.
+
+    `area` is the JSONB payload: for an intervention that is
+    `{origin, radius, tiles}`, which is what lets a listener rebuild the exact
+    disruption from the changefeed row rather than re-deriving it from a radius
+    and hoping the two agree.
+    """
+
+    id: UUID
+    mission_id: UUID | None
+    kind: str
+    area: dict[str, Any]
+    severity: int = 1
+    active: bool = True
+
+    @property
+    def is_intervention(self) -> bool:
+        return self.kind.startswith(INTERVENTION_PREFIX)
+
+    @property
+    def intervention_kind(self) -> str:
+        """`collapse` from `intervention:collapse`; '' for anything else."""
+        return (
+            self.kind[len(INTERVENTION_PREFIX) :] if self.is_intervention else ""
+        )
+
+
 @dataclass(frozen=True)
 class Task:
     id: UUID

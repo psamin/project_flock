@@ -38,6 +38,21 @@ from bedrock.adapter import LIVE, RECORD, BedrockAdapter, Plan
 PLAN_CALLS_PER_MINUTE = 4
 TICKS_PER_MINUTE = 240  # 4 Hz (§3.5)
 
+# A separate, smaller budget for replans forced by the world changing under a
+# robot — an aftershock or an operator intervention (issue #22).
+#
+# **This raises the effective ceiling above §3.5's 4/robot/minute to 6**, which
+# is a deliberate deviation and worth stating rather than burying. The reason:
+# an intervention exists to be reacted to, and a robot that felt the ground move
+# but had spent its budget ranking routine tasks would answer the one question
+# worth asking with a rule. Reserving capacity for disruptions is what makes the
+# model's contribution visible where it is actually better than the rules.
+#
+# Separate rather than larger, so ordinary planning cannot eat the reserve and
+# an operator holding down the button cannot mint unbounded calls: the worst
+# case is still bounded per robot per minute, just at 6.
+RESERVED_CALLS_PER_MINUTE = 2
+
 # Prompt budget (§4.3: "≤1.5k tokens"). Beliefs are one short line each, so a
 # dozen of them plus the role card and the open-task list lands well inside it.
 DIGEST_BELIEFS = 12
@@ -154,6 +169,8 @@ class Planner:
 
     # robot_id -> ticks at which it called, most recent last
     _calls: dict[str, list[int]] = field(default_factory=dict, init=False)
+    # The same, for disruption replans, which draw on their own budget.
+    _reserved: dict[str, list[int]] = field(default_factory=dict, init=False)
     # robot_id -> a live call that has not landed yet
     _pending: dict[str, Future] = field(default_factory=dict, init=False)
     _pool: ThreadPoolExecutor | None = field(default=None, init=False)
@@ -169,6 +186,7 @@ class Planner:
         digest: Digest,
         open_tasks: list[Any],
         tactics: Sequence[str] = (),
+        reserved: bool = False,
     ) -> Plan | None:
         """A plan, or None to mean "use your own rules this tick".
 
@@ -176,11 +194,21 @@ class Planner:
         flight, so a live call is submitted to a thread and collected on a later
         tick; a robot that would otherwise stand still for a 3-second round trip
         instead keeps clearing the debris it is already standing next to.
+
+        `reserved=True` marks a replan forced by the world changing — an
+        aftershock or an operator intervention (issue #22). It draws on its own
+        budget so a disruption is answered by the model rather than by whatever
+        the ordinary cap happened to leave over. It does **not** bypass the
+        in-flight guard: one call per robot at a time is a correctness rule, not
+        a budget, and stacking a second would leave two answers racing for the
+        same robot.
         """
         landed = self._collect(robot.id)
         if landed is not None:
             return landed
-        if robot.id in self._pending or not self._within_cap(robot.id, tick):
+        if robot.id in self._pending or not self._within_cap(
+            robot.id, tick, reserved=reserved
+        ):
             return None
 
         card, tasks = role_card(robot), task_lines(open_tasks)
@@ -196,7 +224,7 @@ class Planner:
             #
             # Recording is an offline activity, so paying full latency inline
             # here costs nothing and is what makes the cassette reproducible.
-            self._record_call(robot.id, tick)
+            self._record_call(robot.id, tick, reserved=reserved)
             return self.adapter.plan(card, digest.text, tasks, tactics)
 
         if not self.live:
@@ -206,10 +234,10 @@ class Planner:
             # would put a fabricated rationale in front of a judge.
             if not self.adapter.knows_plan(card, digest.text, tasks, tactics):
                 return None
-            self._record_call(robot.id, tick)
+            self._record_call(robot.id, tick, reserved=reserved)
             return self.adapter.plan(card, digest.text, tasks, tactics)
 
-        self._record_call(robot.id, tick)
+        self._record_call(robot.id, tick, reserved=reserved)
         self._pending[robot.id] = self._submit(card, digest.text, tasks, tactics)
         return None
 
@@ -240,15 +268,23 @@ class Planner:
             )
         return self._pool.submit(self.adapter.plan, card, digest, tasks, tactics)
 
-    def _within_cap(self, robot_id: str, tick: int) -> bool:
-        recent = [
-            t for t in self._calls.get(robot_id, []) if tick - t < TICKS_PER_MINUTE
-        ]
-        self._calls[robot_id] = recent
-        return len(recent) < PLAN_CALLS_PER_MINUTE
+    def _within_cap(self, robot_id: str, tick: int, reserved: bool = False) -> bool:
+        """Whether this robot may call, against the budget the call draws on.
 
-    def _record_call(self, robot_id: str, tick: int) -> None:
-        self._calls.setdefault(robot_id, []).append(tick)
+        The two budgets are counted independently. A robot that has spent all
+        four of its ordinary calls this minute can still answer an intervention,
+        and a robot that has answered two interventions has not thereby lost its
+        ordinary planning.
+        """
+        calls = self._reserved if reserved else self._calls
+        limit = RESERVED_CALLS_PER_MINUTE if reserved else PLAN_CALLS_PER_MINUTE
+        recent = [t for t in calls.get(robot_id, []) if tick - t < TICKS_PER_MINUTE]
+        calls[robot_id] = recent
+        return len(recent) < limit
+
+    def _record_call(self, robot_id: str, tick: int, reserved: bool = False) -> None:
+        calls = self._reserved if reserved else self._calls
+        calls.setdefault(robot_id, []).append(tick)
 
     def close(self) -> None:
         if self._pool is not None:
