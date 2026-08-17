@@ -143,11 +143,14 @@ export const TICKER_TEXT = {
   restocked: () => "restocked kits",
   fire_spread: (e) => `fire spread to ${e.detail.x},${e.detail.y}`,
   aftershock: () => "AFTERSHOCK — the map just changed",
+  fleet_lost: (e) =>
+    `the fleet is gone — ${(e.detail.robots || []).join(", ")} are down, mission over`,
   robot_lost: (e) => `SIGNAL LOST — silent ${e.detail.silent_for_seconds}s`,
   robot_recovered: () => "back on the air",
 };
 
 export const TICKER_CLASS = {
+  fleet_lost: "bad",
   victim_found: "found",
   victim_stabilized: "good",
   victim_lost: "bad",

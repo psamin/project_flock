@@ -711,13 +711,61 @@ class Mission:
                 )
         return self.lost_watch.lost_ids()
 
+    @property
+    def fleet_lost(self) -> bool:
+        """Every robot is down, so nothing further can happen.
+
+        `world.finished` cannot see this: it ends a mission when every victim is
+        stabilized or lost, and with no robots left that is when the last vitals
+        deadline passes — tick 700 on Aftershock. A fleet killed at tick 127
+        therefore left the mission running for **573 ticks, about 143 seconds**,
+        during which nothing could occur and nothing on screen said so.
+
+        An operator who clicks "kill a robot" until the fleet is gone is
+        entitled to be told that is what happened.
+        """
+        return bool(self.agents) and len(self.disabled) >= len(self.agents)
+
     async def run(self) -> None:
         self.running = True
-        while self.running and not self.world.finished:
+        while self.running and not self.world.finished and not self.fleet_lost:
             frame = self.tick_once()
             await self._broadcast(frame)
             await asyncio.sleep(TICK_SECONDS)
         self.running = False
+        if self.fleet_lost and not self.world.finished:
+            # Ends the mission rather than leaving it ticking, and says why in
+            # the log the ticker reads from, so the reason reaches the screen.
+            self.mem.log_event(
+                self.mission_id,
+                "world",
+                "fleet_lost",
+                {
+                    "tick": self.world.tick,
+                    "robots": sorted(self.disabled),
+                    "unrescued": sum(
+                        1
+                        for v in self.world.victims.values()
+                        if v.state not in ("stabilized", "lost")
+                    ),
+                },
+            )
+            self.record_run()
+            await self._broadcast(
+                {
+                    "kind": "diff",
+                    "tick": self.world.tick,
+                    "events": [
+                        {
+                            "tick": self.world.tick,
+                            "actor": "world",
+                            "verb": "fleet_lost",
+                            "detail": {"robots": sorted(self.disabled)},
+                        }
+                    ],
+                    "metrics": self.metrics(),
+                }
+            )
         if self.world.finished:
             # Recorded the moment the mission ends, not when somebody navigates
             # away from it: a run that has just finished is exactly the one the

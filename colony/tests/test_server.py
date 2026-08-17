@@ -533,3 +533,32 @@ def test_the_fleet_panel_reports_holdings_and_lease_countdown(mission):
     assert lease is not None and 0 <= lease <= LEASE_SECONDS, lease
     assert after[victim]["task"]["lease_state"] == "lapsing"
     assert after[victim]["task"]["lease_approx"] is True
+
+
+def test_a_dead_fleet_ends_the_mission_instead_of_ticking_on(mission):
+    """§3.6's kill button, followed to its conclusion.
+
+    `world.finished` cannot see a dead fleet: it ends a mission when every
+    victim is stabilized or lost, and with nobody left to rescue anyone that is
+    when the last vitals deadline passes — tick 700 on Aftershock. Measured: a
+    fleet killed at tick 127 left the mission running 573 more ticks, about 143
+    seconds, in which nothing could happen and nothing said so.
+
+    An operator who kills every robot is entitled to be told that is what they
+    did.
+    """
+    for _ in range(20):
+        mission.tick_once()
+
+    assert mission.fleet_lost is False
+    for robot_id in list(mission.agents):
+        mission.kill_robot(robot_id)
+    assert mission.fleet_lost is True
+
+    # And it is not merely a flag: the run is recorded, so the scoreboard shows
+    # what the fleet had achieved when it died rather than nothing at all.
+    asyncio.run(mission.run())
+    assert mission.running is False
+    assert mission.mode in mission.last_runs
+    verbs = [e["verb"] for e in mission.mem.events(mission.mission_id)]
+    assert "fleet_lost" in verbs, "the mission ended without saying why"
