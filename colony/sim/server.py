@@ -1200,6 +1200,37 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+@app.post("/api/compare")
+async def compare() -> dict[str, Any]:
+    """Run both modes headless on one seed and return §4.7's comparison.
+
+    Producing this live costs a mission per mode at 4 Hz — coordinated finishes
+    around tick 312 and baseline runs to ~560 *because it fails* — so roughly
+    three and a half minutes of watching, in a video that has to be under three.
+    The same two missions run headless in seconds because nothing is throttled
+    to a frame rate.
+
+    Deliberately against the in-memory fake and a fresh store per arm, not the
+    live mission's cluster: this must not write two more missions' worth of rows
+    into the database the demo is showing, and the baseline must not inherit the
+    coordinated run's beliefs. The seed is the running mission's, so the numbers
+    describe the same world on screen.
+    """
+    from fleetmem.fake import FakeFleetMem
+    from sim.mission import compare_modes
+
+    result = await asyncio.to_thread(
+        compare_modes,
+        load_map(mission.map_path),
+        FakeFleetMem,
+        seed=mission.seed or 0,
+    )
+    payload = result.to_json()
+    payload["headless"] = True
+    payload["seed"] = mission.seed or 0
+    return payload
+
+
 @app.get("/api/runs")
 async def runs() -> dict[str, Any]:
     """Final numbers per mode, for the side-by-side scoreboard (FR-9, §4.7)."""

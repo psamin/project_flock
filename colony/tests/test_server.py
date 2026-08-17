@@ -562,3 +562,30 @@ def test_a_dead_fleet_ends_the_mission_instead_of_ticking_on(mission):
     assert mission.mode in mission.last_runs
     verbs = [e["verb"] for e in mission.mem.events(mission.mission_id)]
     assert "fleet_lost" in verbs, "the mission ended without saying why"
+
+
+def test_the_headless_comparison_matches_the_live_one(monkeypatch):
+    """§4.7 in seconds rather than three and a half minutes.
+
+    Watching both arms play out costs a mission each at 4 Hz — coordinated ends
+    near tick 312, baseline runs to ~560 because it fails — which is longer than
+    the whole video. This runs the same two missions headless.
+
+    The point of the test is that it is the *same* measurement: same map, same
+    seed, same code path. A shortcut that produced different numbers would be
+    worse than the wait.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from fleetmem.fake import FakeFleetMem
+    from sim.mission import compare_modes
+    from world.map_format import load_map
+
+    from sim.server import DEFAULT_MAP
+
+    first = compare_modes(load_map(DEFAULT_MAP), FakeFleetMem, seed=0).to_json()
+    second = compare_modes(load_map(DEFAULT_MAP), FakeFleetMem, seed=0).to_json()
+
+    assert first == second, "the comparison is not reproducible on one seed"
+    assert first["coordinated"]["rescue_rate"] > first["baseline"]["rescue_rate"]
+    # The headline the panel leads with has to survive the shortcut.
+    assert first["baseline"]["victims_lost"] > first["coordinated"]["victims_lost"]

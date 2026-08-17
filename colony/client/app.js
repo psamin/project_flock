@@ -39,6 +39,7 @@ import {
   initConsole,
   initInterventions,
   initKillRobot,
+  initCompare,
   refreshMemoryRail,
   refreshCoordination,
   refreshFleet,
@@ -564,6 +565,7 @@ function connect() {
 
 initInterventions();
 initKillRobot();
+initCompare();
 // The feed moves with every decision, and snapshots only arrive on boot or a
 // mode switch, so it gets its own cadence rather than riding the frame loop.
 refreshCoordination();

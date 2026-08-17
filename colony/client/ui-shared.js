@@ -590,3 +590,46 @@ export async function refreshFleet() {
     /* a panel; never let it break the render loop */
   }
 }
+
+
+/** §4.7's comparison, without waiting three and a half minutes for it.
+ *
+ * Watching both modes play out costs a mission per arm at 4 Hz — coordinated
+ * finishes near tick 312, baseline runs to ~560 *because it fails* — which is
+ * longer than the entire video. The same two missions run headless in about
+ * two and a half seconds.
+ *
+ * Labelled as headless on screen. It is the same code path and the same seed as
+ * the mission being watched, but it is not the run on screen, and a number
+ * presented as though it were would be the demo overclaiming about itself.
+ */
+export function initCompare() {
+  const button = document.getElementById("compare");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    const box = document.getElementById("comparison");
+    button.disabled = true;
+    if (box) box.textContent = "running both modes on this seed…";
+    try {
+      const d = await (await fetch("/api/compare", { method: "POST" })).json();
+      const co = d.coordinated;
+      const base = d.baseline;
+      const lives = base.victims_lost - co.victims_lost;
+      if (box) {
+        box.innerHTML =
+          (lives > 0
+            ? `<b>${lives} more people died without shared memory</b> ` +
+              `(${co.victims_lost} vs ${base.victims_lost}) · `
+            : "") +
+          `rescued ${co.victims_stabilized}/${co.victims_total} coordinated ` +
+          `vs ${base.victims_stabilized}/${base.victims_total} baseline · ` +
+          `gain ${Math.round((d.coordination_gain ?? 0) * 100)}% ` +
+          `<span class="co-why">seed ${d.seed}, both modes run headless</span>`;
+      }
+    } catch {
+      if (box) box.textContent = "comparison failed — the mission is unaffected";
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
