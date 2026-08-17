@@ -490,18 +490,34 @@ def has_credentials() -> bool:
         return False
 
 
+# The recorded golden run, committed so a replay demo needs no AWS at all.
+DEFAULT_CASSETTE = Path(__file__).resolve().parents[1] / "cassettes" / "golden-run.json"
+
+
 def adapter_from_env() -> BedrockAdapter:
     """Live only when explicitly asked for AND credentials resolve; replay otherwise.
 
     Defaulting to replay means a missing credential is a degraded demo, not a
     crashed one.
+
+    **And replay defaults to the committed cassette.** It was recorded and
+    checked in precisely so the demo could run Bedrock's decisions offline, but
+    nothing set `COLONY_BEDROCK_CASSETTE` — not the server, not `make demo` —
+    so every replay ran with an empty cassette, every lookup missed, and every
+    robot fell through to rules. A full mission logged 34 plans and all 34 read
+    `source: rules`, which made "Claude decides at the boundaries" false on the
+    one path anybody would actually watch.
+
+    The env var still wins, so recording a fresh cassette or pointing at a
+    variant is unchanged. This only supplies the file that is already there.
     """
     mode = os.environ.get("COLONY_BEDROCK_MODE", REPLAY)
     if mode in (LIVE, RECORD) and not has_credentials():
         mode = REPLAY
     cassette = os.environ.get("COLONY_BEDROCK_CASSETTE")
+    path = Path(cassette) if cassette else (DEFAULT_CASSETTE if DEFAULT_CASSETTE.exists() else None)
     return BedrockAdapter(
         mode=mode,
         region=os.environ.get("AWS_REGION", "us-east-1"),
-        cassette_path=Path(cassette) if cassette else None,
+        cassette_path=path,
     )
