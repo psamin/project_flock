@@ -277,7 +277,11 @@ class Mission:
         with: one source of truth, and it is the log. `victims_located`,
         `coverage` and `tick` do not collide and survive either way.
         """
-        if self.world.tick - self._metrics_at < METRICS_EVERY_TICKS and self._metrics:
+        if (
+            not self.world.finished
+            and self.world.tick - self._metrics_at < METRICS_EVERY_TICKS
+            and self._metrics
+        ):
             return {**self.world.metrics(), **self._metrics}
         computed = metrics_mod.compute(
             self.mem.events(self.mission_id),
