@@ -143,15 +143,51 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 
 
--- ═══ SEMANTIC MEMORY — what we learned across missions (P1) ══════════════════
-
+-- ═══ SEMANTIC MEMORY — the tactics we learned across missions ════════════════
+--
+-- What survives a mission is *not* where the victims were. The same disaster
+-- does not happen twice in the same place, so remembering coordinates would be
+-- a fact about one map rather than knowledge — and a fleet that "recalled"
+-- victim positions would be a fleet handed the answer.
+--
+-- What transfers is technique: that a victim behind rubble-heavy debris is
+-- worth staging a medic for before the clear finishes, that fire adjacent to a
+-- located victim outruns a medic dispatched on distance alone. Those hold on a
+-- map nobody has seen.
+--
+-- So a row is a `situation` (the conditions it applies to) and a `lesson` (what
+-- to do about them). The embedding is of the *situation*, because retrieval
+-- asks "what does this moment resemble?" — the agent embeds what it is facing
+-- and the index returns the tactics learned in moments like it. That is the
+-- retrieval half of long-term agent memory, and it is why the search must range
+-- over every mission on every map.
+--
+-- Hence NO prefix column on the vector index. `observations` prefixes on
+-- mission_id because the reconcile gate searches within one mission; here any
+-- prefix would partition exactly the knowledge we are trying to generalise. An
+-- unprefixed vector index engages unconditionally, so there is no
+-- constrain-the-prefix rule to get wrong — and nothing may cover it with a
+-- b-tree, for the reason recorded in the notes below.
 CREATE TABLE IF NOT EXISTS mission_memories (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  summary     STRING,
-  embedding   VECTOR(512),
-  outcome     JSONB,
-  created_at  TIMESTAMPTZ DEFAULT now()
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mission_id     UUID,             -- the run that learned it; joins to events/plans
+  situation      STRING,           -- the conditions this applies to; what gets embedded
+  lesson         STRING,           -- what to do when they hold
+  embedding      VECTOR(512),      -- Titan V2 @ 512 dims, of `situation`
+  evidence       JSONB,            -- the run figures that supported it
+  confidence     FLOAT DEFAULT 0.5,
+  times_recalled INT DEFAULT 0,    -- a lesson nothing ever retrieves is dead weight
+  created_at     TIMESTAMPTZ DEFAULT now(),
+  VECTOR INDEX mm_situation_idx (embedding vector_cosine_ops)
 );
+-- There is deliberately NO secondary b-tree here. One was added on
+-- (map_key, created_at) for a degraded no-embedding path and measured: the
+-- optimizer preferred scanning it and top-k-sorting over probing the vector
+-- index, and no `vector search` node appeared in the plan at all. A defensible
+-- choice at this row count and the wrong one for us, because the cosine search
+-- is the capability rather than an optimisation. tests/test_recall.py asserts
+-- the EXPLAIN plan rather than the results, because this failure mode returns
+-- perfectly plausible rows.
 
 
 -- ═══ MIGRATIONS — v0 -> v1.1 ═════════════════════════════════════════════════
@@ -178,3 +214,59 @@ UPDATE tasks
 -- on lease_expires_at; the old index stays harmless if present.
 CREATE INDEX IF NOT EXISTS tasks_mission_status_lease_idx
   ON tasks (mission_id, status, lease_expires_at);
+
+
+-- ═══ MIGRATIONS — v1.1 -> v1.2 ═══════════════════════════════════════════════
+--
+-- Semantic memory gets a scenario key and a cosine index. Same reasoning as
+-- above: the CREATE TABLE for mission_memories skipped every database that
+-- already had the v1.1 shape, columns and indexes alike, so the statements are
+-- restated here in their idempotent forms. Without them, recall runs against a
+-- table with no map_key column — and once the column exists, full-scans.
+--
+-- CockroachDB Cloud creates tables with `schema_locked = true`, which rejects
+-- schema changes outright. Unlock, migrate, relock. Each statement is separately
+-- idempotent, so a re-run against an already-migrated database is a no-op.
+ALTER TABLE mission_memories SET (schema_locked = false);
+
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS mission_id UUID;
+
+-- v1.2 -> v1.3: semantic memory stops being about places and becomes about
+-- technique. The earlier cut stored a per-map summary of where victims turned
+-- up, which is a fact about one map rather than knowledge — it transfers to no
+-- other disaster, and a fleet recalling victim positions is a fleet handed the
+-- answer. Rows under the old shape carry nothing worth migrating, so the
+-- columns are replaced rather than backfilled.
+--
+-- The index goes first: a prefixed index pins the column it prefixes, so
+-- map_key cannot be dropped while mm_embedding_idx exists.
+DROP INDEX IF EXISTS mission_memories@mm_embedding_idx;
+DROP INDEX IF EXISTS mission_memories@mm_map_recent_idx;
+
+ALTER TABLE mission_memories DROP COLUMN IF EXISTS map_key;
+ALTER TABLE mission_memories DROP COLUMN IF EXISTS summary;
+ALTER TABLE mission_memories DROP COLUMN IF EXISTS outcome;
+
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS situation STRING;
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS lesson STRING;
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS evidence JSONB;
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS confidence FLOAT DEFAULT 0.5;
+ALTER TABLE mission_memories ADD COLUMN IF NOT EXISTS times_recalled INT DEFAULT 0;
+
+-- Unprefixed, so it engages on every query rather than only when a prefix is
+-- constrained. Named to match the inline definition above, making this a no-op
+-- on a freshly created database.
+CREATE VECTOR INDEX IF NOT EXISTS mm_situation_idx
+  ON mission_memories (embedding vector_cosine_ops);
+
+ALTER TABLE mission_memories SET (schema_locked = true);
+
+-- Provenance for recalled tactics (FR-17). `based_on` is typed UUID[] and is
+-- resolved against `observations` in two places — Mission.provenance in Python
+-- and the console's WHY_DID_ROBOT join in SQL — so a mission_memories id put
+-- there is silently dropped by both, and the panel would claim more sources
+-- than it lists. A separate column resolved against its own table keeps "which
+-- memories caused this decision" answerable by join for both kinds of memory.
+ALTER TABLE plans SET (schema_locked = false);
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS recalled_from UUID[];
+ALTER TABLE plans SET (schema_locked = true);

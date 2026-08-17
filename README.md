@@ -18,7 +18,7 @@ rescuing people.
 | **Working** | `robots`, `tasks`, `victims`, `hazards` | what is true right now |
 | **Episodic** | `observations` (512-dim `VECTOR`) | what we experienced |
 | **Provenance** | `plans`, `events` | why we acted |
-| **Semantic** | `mission_memories` | what we learned across missions |
+| **Semantic** | `mission_memories` (512-dim `VECTOR`) | what we learned across missions |
 
 Read [`colony/schema/v1_1.sql`](colony/schema/v1_1.sql) first — it is commented
 as an argument, not as DDL.
@@ -29,8 +29,21 @@ as an argument, not as DDL.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 617 tests
+make test     # 701 tests
 ```
+
+Two views of the same mission, on the same frames:
+
+| URL | What it is | Needs |
+|---|---|---|
+| [`/`](http://localhost:8000/) | Canvas 2D top-down. Fog of war, thought bubbles, scoreboard. | nothing |
+| [`/sim3d`](http://localhost:8000/sim3d) | Digital twin: an orbitable floating island, robots with sensor volumes and pose telemetry, and a camera that frames the story off the event stream. | WebGL 2 |
+
+`/sim3d` is a second *renderer*, not a second simulation — it reads the same
+`/ws` frames and shows the same numbers. It is a separate route rather than a
+mode because it requires WebGL and `/` deliberately does not: if a machine
+cannot run it, the 2D view still shows the whole mission, and the 3D page says
+so and links there.
 
 `make sim` runs without a cluster too — it falls back to in-memory fleet memory
 and says so, so nothing is blocked on CockroachDB. Database-backed tests skip
@@ -43,7 +56,10 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
 ## Architecture
 
 ```
- Browser ── Canvas 2D renderer · fog of war · scoreboard · ON/OFF toggle
+ Browser ── two views of one mission, same frames, same numbers:
+    │        /       Canvas 2D · fog of war · scoreboard · ON/OFF toggle
+    │        /sim3d  WebGL digital twin · orbitable floating island ·
+    │                sensor volumes · pose telemetry · camera director
     ▲ websocket (state frames, 4 Hz)
     │
  Sim server (Python 3.12 / FastAPI) — authoritative world
@@ -61,6 +77,8 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
  Orchestrator ────────────────────────┘                    │
     · lost-marking only — allocation and unblocking live in the data model
  Commander console ── read-only SQL / CockroachDB Managed MCP Server
+ Operator console ── breaks the world on cue. The command is a `hazards` row and
+    a CRDB changefeed carries it to the fleet; there is no other path in.
  Chaos rig ── kills a CockroachDB node on cue
 ```
 
@@ -69,7 +87,7 @@ rank open work and claim it themselves — dependency unblocking happens inside
 `complete_task`'s transaction, and recovery is lease-native. The only job left
 without another owner is telling the UI that a robot went quiet.
 
-## The three ideas worth reading the code for
+## The four ideas worth reading the code for
 
 **Ownership is a lease.** A claim stamps `lease_expires_at`; the owner renews it
 while it works; an expired lease is claimable by anyone *inside the same
@@ -92,6 +110,24 @@ rows that were in the prompt digest, so "why did robot X do that" is answered by
 a join rather than by a plausible story. Click any robot in the UI, or ask the
 commander console.
 
+**The fleet learns tactics, not places.** When a mission ends, Claude reads its
+figures and derives what would transfer — *"when a robot has cleared debris to
+reach a victim and a medic is not yet present, bring the medic rather than
+continuing to explore"* — and each lesson is embedded and stored in
+`mission_memories`. At the next plan boundary a robot describes what it is
+facing, cosine search returns the tactics learned in situations like it, and
+those ride into the planning prompt.
+
+Deliberately **not** where the victims were. The same disaster does not recur on
+the same tiles, so a remembered coordinate transfers to nothing — and a fleet
+recalling victim positions is a fleet handed the answer. The lesson prompt
+forbids coordinates and sector names outright, and the run digest it reads is
+built without them so the temptation is never offered.
+
+This is also what makes retrieval real rather than decorative: lessons are
+global across every mission and every map, so the index ranks many rows against
+"what does this moment resemble?" rather than filtering to a handful.
+
 ## Repo map
 
 | Path | What it is |
@@ -101,18 +137,38 @@ commander console.
 | [`colony/fleetmem/`](colony/fleetmem/) | The SDK every robot writes through, plus an in-memory fake |
 | [`colony/agents/`](colony/agents/) | Scout, lifter, medic — the sense/sync/think/act/report loop |
 | [`colony/sim/`](colony/sim/) | Authoritative world, 4 Hz tick server, websocket protocol |
-| [`colony/client/`](colony/client/) | Renderer, fog of war, thought bubbles, scoreboard |
+| [`colony/client/`](colony/client/) | Both renderers. `app.js`+`atlas.js` are the 2D view, `scene3d.js`+`rigs.js`+`director.js` the 3D one, `ui-shared.js` the HUD, ticker and console they share |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
-| [`colony/console/`](colony/console/) | The commander console's five questions, read-only |
+| [`colony/sim/interventions.py`](colony/sim/interventions.py) | Operator interventions: what may be broken, and what the world refuses |
+| [`colony/console/`](colony/console/) | The commander console's six questions, read-only |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |
 | [`docs/`](docs/) | Setup, lane handoffs, the changefeed spike |
 | [`PRD.md`](PRD.md) | The specification everything above cites by section |
 
 ## Tools
 
-**CockroachDB** — serializable claiming, `VECTOR(512)` columns with a cosine
-index behind the reconcile gate, survival of a node kill, and the Managed MCP
-Server behind the commander console (read-only by grant, not merely by setting).
+**CockroachDB** — serializable claiming, survival of a node kill, and the Managed
+MCP Server behind the commander console (read-only by grant, not merely by
+setting).
+
+Distributed vector indexing carries weight in **two** places, which is worth
+separating because they pull in opposite directions:
+
+| | scope | index | what it answers |
+|---|---|---|---|
+| reconcile gate | *within* one mission | `obs_embedding_idx (mission_id, …)` | is this the victim we already know about? |
+| tactical recall | *across every mission and map* | `mm_situation_idx (embedding)` | what do we know about a moment like this? |
+
+Both are cosine (`vector_cosine_ops`, `<=>`) and they scope in opposite
+directions, which is the whole reason they are worth reading together. The gate
+prefixes on `mission_id`, and a prefixed vector index is used *only* when the
+prefix is constrained to an exact value — a filter that is not a prefix column
+is applied after the top-k. Tactical recall has no prefix at all, because any
+scope would partition exactly the knowledge it exists to generalise.
+
+Get either wrong and the query still returns perfectly plausible rows, which is
+why `tests/test_schema.py` and `tests/test_recall.py` assert the `EXPLAIN` plan
+rather than the results.
 
 **AWS Bedrock** — Claude for planning at decision boundaries, Titan Text
 Embeddings V2 at 512 dims for observations. Rate-capped per §3.5, with rules as

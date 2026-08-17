@@ -26,7 +26,7 @@ import re
 from typing import Any
 
 import psycopg
-from fleetmem.client import DEFAULT_DSN
+from fleetmem.client import resolve_dsn
 from psycopg.rows import dict_row
 
 # `COLONY_CONSOLE_DSN` is how the console connects as `commander` rather than as
@@ -106,9 +106,7 @@ class ReadOnlyReader:
     """
 
     def __init__(self, dsn: str | None = None):
-        self.dsn = dsn or os.environ.get(
-            CONSOLE_DSN_ENV, os.environ.get("COLONY_DSN", DEFAULT_DSN)
-        )
+        self.dsn = dsn or resolve_dsn(os.environ.get(CONSOLE_DSN_ENV))
         self.conn = psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
         # Belt and braces: even if a statement slipped past the check above, the
         # session itself refuses to write. Left non-fatal because a role without

@@ -21,7 +21,8 @@ from uuid import UUID
 from agents import beliefs, logistics, planning
 from agents.pathing import find_move_plan
 from agents.planning import BEDROCK, RULES
-from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, Task
+from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, WORLD_CHANGED, Task
+from sim import recall as recall_mod
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, World
 from world.map_format import DEBRIS, RUBBLE_HEAVY
@@ -81,6 +82,26 @@ CLUSTER_RADIUS = 4
 # belief reads (~1s = 4 ticks at 4 Hz) rather than every tick.
 STAGING_REFRESH_TICKS = 4
 
+# How often the robot writes its status row. `robots.heartbeat_at` feeds one
+# reader — the lost scan (§5.1 lane 4), which itself runs every 4 ticks against
+# a 10s staleness window — so a write every tick told it nothing it did not
+# already know, and against a Cloud cluster it was the most expensive statement
+# in the tick. Once a second still leaves ten inside the window.
+HEARTBEAT_EVERY_TICKS = 4  # 1s at 4 Hz
+
+# How often it renews the leases on the tasks it holds. fleetmem states the
+# lease contract as a 15s TTL renewed every 5s, so three renewals can be missed
+# before one lapses (§4.4); renewing every tick was 20x the design cadence.
+RENEW_EVERY_TICKS = 20  # 5s at 4 Hz
+
+# `open_tasks` is deliberately NOT cached, though it is the next most expensive
+# read in the tick. Caching it for 4 ticks measured a full second of delay
+# between a scout creating a task and a worker seeing it, and the coordinated
+# run stabilized fewer victims than the baseline over the same 40 ticks
+# (tests/test_metrics.py::test_the_two_modes_do_not_share_fleet_memory) — the
+# claim race is safe to read stale, but the *arrival* of new work is not, and
+# that latency is the coordination story the ON/OFF toggle exists to show.
+
 
 @dataclass
 class Worker:
@@ -102,6 +123,14 @@ class Worker:
     # complete robot — the planner improves choices, it does not enable them.
     planner: Any = None
 
+    # Titan embeddings, for searching semantic memory at a plan boundary. None
+    # means the robot decides without the benefit of earlier missions — which is
+    # exactly what it did before this existed, so it stays a complete robot.
+    embedder: Any = None
+    # Tactics retrieved for the decision in flight, held so the provenance write
+    # can name them without a second retrieval.
+    recalled: list = field(default_factory=list)
+
     # Whether an orchestrator is pushing assignments (lane 4). While there is
     # none, waiting SELF_CLAIM_AFTER_TICKS for one would leave victims waiting
     # five seconds for a message nobody is sending (§4.4).
@@ -115,6 +144,9 @@ class Worker:
     # Escalations this robot has felt. A change it did not cause invalidates the
     # plan it made before the change (FR-7).
     seen_escalations: int = 0
+    # Escalations *and* interventions (issue #22). Separate from the field
+    # above because the agent compares the two to tell which it just felt.
+    seen_disruptions: int = 0
     # Consecutive ticks another robot has stood in the only route to the target.
     blocked_ticks: int = 0
     # task id -> tick when this robot last failed to reach it
@@ -127,6 +159,10 @@ class Worker:
     _staging: tuple[int, tuple[int, int] | None] | None = field(default=None)
     # (tick, map) — the shared hazard picture routing is done against.
     _belief_cache: tuple[int, Any] | None = field(default=None)
+    # Ticks the status write and the lease renewal last went out. None means
+    # "never", so both fire on the robot's first tick.
+    _heartbeat_at: int | None = field(default=None)
+    _renew_at: int | None = field(default=None)
 
     # --- the loop ---------------------------------------------------------
 
@@ -134,13 +170,12 @@ class Worker:
         robot = world.robots[self.robot_id]
         here = (robot.x, robot.y)
 
-        # Heartbeat renews the lease on whatever this robot holds (§4.4). Sent
-        # every tick: a robot that stops heart-beating mid-clear has its work
-        # taken over, which is exactly what we want when it is genuinely dead
-        # and a disaster when it is merely busy.
-        self.mem.heartbeat(
-            self.robot_id, pos=here, battery=robot.battery, status=robot.status
-        )
+        # Status and lease renewal, each on its own cadence (§4.3, §4.4). A
+        # robot that stops heart-beating mid-clear has its work taken over,
+        # which is what we want when it is genuinely dead and a disaster when
+        # it is merely busy — so what matters is staying comfortably inside the
+        # 10s staleness window and the 15s lease, not writing every tick.
+        self._report_status(world, robot, here)
 
         self.last_tick = world.tick
         if robot.work_left > 0:
@@ -175,6 +210,39 @@ class Worker:
             return Action.act(TASK_VERB[self.task.kind], target)
 
         return self._advance(world, here, target)
+
+    def _report_status(
+        self, world: World, robot: Any, here: tuple[int, int]
+    ) -> None:
+        """Write the status row and renew leases, each on its own cadence.
+
+        Two statements, two round trips, two different deadlines — so they are
+        asked for separately. The renewal cadence is the wider of the two, and
+        the branches do not assume one is a multiple of the other: a renewal
+        that comes due on a tick with no status write still goes out alone.
+        """
+        tick = world.tick
+        beat_due = (
+            self._heartbeat_at is None
+            or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
+        )
+        renew_due = (
+            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
+        )
+        if beat_due:
+            self.mem.heartbeat(
+                self.robot_id,
+                pos=here,
+                battery=robot.battery,
+                status=robot.status,
+                renew=renew_due,
+            )
+            self._heartbeat_at = tick
+            if renew_due:
+                self._renew_at = tick
+        elif renew_due:
+            self.mem.renew_leases(self.robot_id)
+            self._renew_at = tick
 
     # --- battery and kits (§3.3) ------------------------------------------
 
@@ -220,29 +288,89 @@ class Worker:
     # --- reacting to the world (FR-7) -------------------------------------
 
     def _note_escalation(self, world: World) -> None:
-        """An aftershock invalidates plans made before it (FR-7).
+        """A disruption invalidates plans made before it (FR-7, issue #22).
 
         The robot does not get told what changed — it re-decides, and the world
         it re-decides against is the one it can now observe. Holding work is the
         risky part: the corridor this task depended on may be gone, so the task
         goes back to the pool and is re-picked on the merits a tick later.
+
+        An operator intervention is felt exactly as an aftershock is, through
+        the same counter, because to a robot they are the same event: the ground
+        moved and what that cost has to be discovered by looking. The only thing
+        the robot distinguishes is *which* — and it does that by comparing two
+        counts it can already see, not by reading anyone's tile list.
         """
-        if world.escalations_fired <= self.seen_escalations:
+        if world.disruptions_felt <= self.seen_disruptions:
             return
+        by_operator = world.escalations_fired <= self.seen_escalations
+        self.seen_disruptions = world.disruptions_felt
         self.seen_escalations = world.escalations_fired
         if self.task is None:
             return
         released = self.task
-        self._abandon(reason="aftershock")
+        cause = "an operator" if by_operator else "aftershock"
+        self._abandon(reason="intervention" if by_operator else "aftershock")
+        # A disruption is the moment the model earns its place: the rules that
+        # rank open work by distance have nothing to say about a route that has
+        # just stopped existing. Hence `reserved` — this replan draws on the
+        # budget kept for exactly this, rather than on whatever routine planning
+        # left over.
         self._log_choice(
             None,
             [],
-            trigger=AFTERSHOCK,
+            trigger=WORLD_CHANGED if by_operator else AFTERSHOCK,
             rationale=(
-                f"aftershock invalidated my route to {released.kind} at "
+                f"{cause} invalidated my route to {released.kind} at "
                 f"{released.target[0]},{released.target[1]}; re-deciding"
             ),
             robot=world.robots[self.robot_id],
+        )
+        self._replan_after_disruption(world)
+
+    def _replan_after_disruption(self, world: World) -> None:
+        """Ask Bedrock what to do about a world that just changed.
+
+        Fails soft in every direction, per §5.4: no planner, no credentials, a
+        throttle, an empty cassette or a call already in flight all mean the
+        robot uses the rules it always had. The intervention still landed and
+        the task is still back in the pool — the model deepens the response, it
+        does not gate it.
+        """
+        if self.planner is None:
+            return
+        robot = world.robots[self.robot_id]
+        candidates = self._claimable(world, robot)
+        digest = planning.build_digest(self.mem, self.mission_id, robot)
+        lessons = self._recall(robot, candidates)
+        try:
+            plan = self.planner.plan(
+                robot,
+                world.tick,
+                digest,
+                candidates,
+                recall_mod.as_prompt_lines(lessons),
+                reserved=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a decision we do not have
+            # This runs the instant an operator clicks a button, which is the
+            # worst possible moment for an unhandled exception: an agent step
+            # raises into the tick loop, the loop's asyncio task dies with
+            # nobody awaiting it, and the mission silently stops ticking with
+            # no traceback anywhere. That happened once during development and
+            # took a live repro to find, so this path does not get to raise.
+            print(f"[{self.robot_id}] disruption replan failed: {exc!r}")
+            return
+        if plan is None:
+            return
+        self._log_choice(
+            None,
+            candidates,
+            trigger=WORLD_CHANGED,
+            rationale=plan.rationale,
+            robot=robot,
+            digest=digest,
+            source=BEDROCK,
         )
 
     # --- finding work -----------------------------------------------------
@@ -259,14 +387,7 @@ class Worker:
             return
 
         robot = world.robots[self.robot_id]
-        candidates = [
-            task
-            for task in self.mem.open_tasks(self.mission_id)
-            if task.kind in ROLE_TASKS.get(self.role, set())
-            and task.id not in self.finished
-            and not self._cooling_off(task.id, world.tick)
-        ]
-        candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
+        candidates = self._claimable(world, robot)
         if not candidates:
             return
 
@@ -319,12 +440,66 @@ class Worker:
         belief ids are `based_on` (FR-17), and a rule-based decision deserves
         the same provenance trail as a Bedrock one — the commander console
         should not go quiet just because the model was rate-capped.
+
+        This is also where semantic memory enters a decision: the robot
+        describes what it is facing, the vector index returns the tactics
+        learned in situations like it, and those ride into the prompt. Retrieval
+        happens here rather than per tick because a plan boundary is the only
+        moment the answer is used, and an embed call per tick would blow both
+        the latency budget and the point.
         """
         digest = planning.build_digest(self.mem, self.mission_id, robot)
         if self.planner is None:
             return None, digest
-        plan = self.planner.plan(robot, world.tick, digest, candidates)
+        lessons = self._recall(robot, candidates)
+        plan = self.planner.plan(
+            robot, world.tick, digest, candidates, recall_mod.as_prompt_lines(lessons)
+        )
         return plan, digest
+
+    def _claimable(self, world: World, robot: Any) -> list[Task]:
+        """Open work this robot could take, best first by the §4.4 score.
+
+        Extracted from `_find_work` when the disruption replan needed the same
+        list: a prompt built from a different set of candidates than the one the
+        robot then claims from would produce a rationale about work it never
+        considered.
+        """
+        candidates = [
+            task
+            for task in self.mem.open_tasks(self.mission_id)
+            if task.kind in ROLE_TASKS.get(self.role, set())
+            and task.id not in self.finished
+            and not self._cooling_off(task.id, world.tick)
+        ]
+        candidates.sort(key=lambda t: -allocation_score(self.role, robot, t))
+        return candidates
+
+    def _recall(self, robot: Any, candidates: list[Task]) -> list:
+        """Tactics from earlier missions that match this moment.
+
+        Held on the agent so `_log_choice` can record which ones were in the
+        prompt without retrieving twice, and so a retrieval failure costs this
+        decision its memory rather than costing the fleet a robot.
+        """
+        if not self.coordinated or self.embedder is None:
+            # Baseline is a control condition: it must not read what coordinated
+            # runs learned, or the ON/OFF comparison measures its own history.
+            self.recalled = []
+            return []
+        try:
+            situation = recall_mod.situation_of(
+                robot, self._beliefs_for_recall(), candidates
+            )
+            self.recalled = recall_mod.recall(self.mem, self.embedder, situation)
+            self.mem.mark_recalled([m.id for m in self.recalled])
+        except Exception as exc:  # noqa: BLE001 - a missing memory is not a stall
+            print(f"[{self.robot_id}] could not recall tactics: {exc!r}")
+            self.recalled = []
+        return self.recalled
+
+    def _beliefs_for_recall(self) -> list:
+        return self.mem.get_beliefs(self.mission_id)
 
     def _log_choice(
         self,
@@ -365,6 +540,10 @@ class Worker:
             ),
             rationale=rationale,
             based_on=list(digest.ids),
+            # The other half of FR-17: which remembered tactics were in front of
+            # the robot when it decided. Separate from based_on because they
+            # resolve against a different table.
+            recalled_from=[m.id for m in getattr(self, "recalled", [])],
         )
 
     def _cooling_off(self, task_id, tick: int) -> bool:

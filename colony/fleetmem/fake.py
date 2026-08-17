@@ -23,8 +23,11 @@ from fleetmem.types import (
     CLAIMED,
     DONE,
     IN_PROGRESS,
+    INTERVENTION_PREFIX,
     OPEN,
     Belief,
+    Hazard,
+    Lesson,
     Match,
     Plan,
     Task,
@@ -56,6 +59,15 @@ class FakeFleetMem:
         self._events: list[dict[str, Any]] = []
         self._plans: list[dict[str, Any]] = []
         self._victims: dict[UUID, dict[str, Any]] = {}
+        # Operator interventions land here too (issue #22). Insertion-ordered,
+        # which is what lets the no-cluster listener diff by id and pick up
+        # exactly what it has not seen.
+        self._hazards: dict[UUID, dict[str, Any]] = {}
+        # Semantic memory. Per-instance, deliberately: the sim builds one store
+        # and reuses it across missions, which is all cross-mission recall
+        # needs. A class-level store would instead leak between compare_modes'
+        # two runs, which take a factory precisely to stop that.
+        self._lessons: list[dict[str, Any]] = []
         FakeFleetMem._instances += 1
         self._id_rng = random.Random(FakeFleetMem._instances)
 
@@ -187,6 +199,79 @@ class FakeFleetMem:
                     )
                 )
             return out
+
+    # --- semantic memory --------------------------------------------------
+
+    def remember_lesson(
+        self,
+        mission_id: UUID,
+        situation: str,
+        lesson: str,
+        embedding: Sequence[float] | None = None,
+        evidence: dict[str, Any] | None = None,
+        confidence: float = 0.5,
+    ) -> UUID:
+        with self._lock:
+            row = {
+                "id": self._new_id(),
+                "mission_id": mission_id,
+                "situation": situation,
+                "lesson": lesson,
+                "embedding": list(embedding) if embedding is not None else None,
+                "evidence": evidence or {},
+                "confidence": confidence,
+                "times_recalled": 0,
+                "created_at": _now(),
+            }
+            self._lessons.append(row)
+            return row["id"]
+
+    def recall_lessons(
+        self,
+        embedding: Sequence[float] | None,
+        limit: int = 3,
+    ) -> list[Lesson]:
+        with self._lock:
+            if embedding is None:
+                ranked = [
+                    (0.0, m)
+                    for m in sorted(
+                        self._lessons, key=lambda m: m["created_at"], reverse=True
+                    )
+                ]
+            else:
+                scored = [
+                    (_cosine_distance(embedding, m["embedding"]), m)
+                    for m in self._lessons
+                    if m["embedding"] is not None
+                ]
+                # Ties break on creation order, never on the row id: a seeded id
+                # is still arbitrary, and two equidistant lessons decided by it
+                # would reorder between runs.
+                ranked = sorted(
+                    scored, key=lambda pair: (pair[0], pair[1]["created_at"])
+                )
+            return [
+                Lesson(
+                    id=m["id"],
+                    mission_id=m["mission_id"],
+                    situation=m["situation"],
+                    lesson=m["lesson"],
+                    evidence=m["evidence"],
+                    confidence=m["confidence"],
+                    times_recalled=m["times_recalled"],
+                    distance=dist,
+                    created_at=m["created_at"],
+                )
+                for dist, m in ranked[:limit]
+            ]
+
+    def mark_recalled(self, lesson_ids: Sequence[UUID]) -> None:
+        with self._lock:
+            wanted = set(lesson_ids)
+            for m in self._lessons:
+                if m["id"] in wanted:
+                    m["times_recalled"] += 1
 
     # --- tasks ------------------------------------------------------------
 
@@ -382,6 +467,57 @@ class FakeFleetMem:
                 for t in rows
             ]
 
+    # --- hazards and operator interventions -------------------------------
+
+    def record_intervention(
+        self,
+        mission_id: UUID,
+        kind: str,
+        area: dict[str, Any],
+        severity: int = 1,
+        caused_by: str = "operator",
+    ) -> UUID:
+        """Mirror of the client's write (issue #22).
+
+        The real one is picked up by a changefeed; there is nothing to stream
+        from here, so `InterventionWatch` diffs `active_hazards` instead. Same
+        SDK surface either way, which is the point of this class — the feature
+        works with no cluster, and the transport is the listener's problem
+        rather than the caller's.
+        """
+        with self._lock:
+            hazard_id = self._new_id()
+            self._hazards[hazard_id] = {
+                "id": hazard_id,
+                "mission_id": mission_id,
+                "kind": f"{INTERVENTION_PREFIX}{kind}",
+                "area": {**area, "caused_by": caused_by},
+                "severity": severity,
+                "active": True,
+            }
+            return hazard_id
+
+    def active_hazards(
+        self, mission_id: UUID, interventions_only: bool = False
+    ) -> list[Hazard]:
+        with self._lock:
+            return [
+                Hazard(
+                    id=h["id"],
+                    mission_id=h["mission_id"],
+                    kind=h["kind"],
+                    area=h["area"],
+                    severity=h["severity"],
+                    active=h["active"],
+                )
+                for h in self._hazards.values()
+                if h["active"]
+                and h["mission_id"] == mission_id
+                and (
+                    not interventions_only or h["kind"].startswith(INTERVENTION_PREFIX)
+                )
+            ]
+
     # --- robots and log ---------------------------------------------------
 
     def heartbeat(
@@ -391,6 +527,7 @@ class FakeFleetMem:
         battery: int | None = None,
         status: str | None = None,
         lease_seconds: int = LEASE_SECONDS,
+        renew: bool = True,
     ) -> None:
         with self._lock:
             robot = self._robots.get(robot_id)
@@ -405,7 +542,8 @@ class FakeFleetMem:
         # Renewal happens even for an unregistered robot, matching the client:
         # the two statements there are independent, and a robot holding tasks
         # must not lose them because its row is missing.
-        self.renew_leases(robot_id, lease_seconds)
+        if renew:
+            self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -445,6 +583,7 @@ class FakeFleetMem:
         chosen: dict[str, Any],
         rationale: str,
         based_on: Sequence[UUID] = (),
+        recalled_from: Sequence[UUID] = (),
     ) -> UUID:
         with self._lock:
             plan_id = self._new_id()
@@ -457,6 +596,7 @@ class FakeFleetMem:
                     "chosen": chosen,
                     "rationale": rationale,
                     "based_on": list(based_on),
+                    "recalled_from": list(recalled_from),
                     "at": _now(),
                 }
             )
@@ -473,6 +613,7 @@ class FakeFleetMem:
                     chosen=p["chosen"],
                     rationale=p["rationale"],
                     based_on=list(p["based_on"]),
+                    recalled_from=list(p.get("recalled_from") or []),
                     at=p["at"],
                 )
                 for p in self._plans
@@ -487,16 +628,24 @@ class FakeFleetMem:
         verb: str,
         detail: dict[str, Any] | None = None,
     ) -> None:
+        self.log_events(mission_id, [(actor, verb, detail)])
+
+    def log_events(
+        self,
+        mission_id: UUID,
+        rows: Sequence[tuple[str, str, dict[str, Any] | None]],
+    ) -> None:
         with self._lock:
-            self._events.append(
-                {
-                    "mission_id": mission_id,
-                    "actor": actor,
-                    "verb": verb,
-                    "detail": detail or {},
-                    "at": _now(),
-                }
-            )
+            for actor, verb, detail in rows:
+                self._events.append(
+                    {
+                        "mission_id": mission_id,
+                        "actor": actor,
+                        "verb": verb,
+                        "detail": detail or {},
+                        "at": _now(),
+                    }
+                )
 
     def events(self, mission_id: UUID) -> list[dict[str, Any]]:
         with self._lock:

@@ -94,17 +94,19 @@ def test_a_trailing_semicolon_is_still_one_read():
 # --- the catalog ------------------------------------------------------------
 
 
-def test_there_are_five_canned_questions():
-    """§5.1 asks for five. The count is asserted so quietly dropping one to make
+def test_there_are_six_canned_questions():
+    """§5.1 asks for five; the sixth reads semantic memory, which arrived with
+    cross-mission recall. The count is asserted so quietly dropping one to make
     a test pass shows up here."""
-    assert len(QUESTIONS) == 5
+    assert len(QUESTIONS) == 6
 
 
-def test_the_questions_cover_the_memory_systems_the_thesis_claims():
+def test_the_questions_cover_all_four_memory_systems():
     """§4.0's four memories are judging criterion #1, so the console has to
-    actually interrogate more than one of them."""
+    interrogate every one of them — this used to reach three, with SEMANTIC
+    missing in exactly the place a judge is told to look."""
     memories = {q.memory for q in QUESTIONS}
-    assert {"provenance", "working", "episodic"} <= memories
+    assert {"provenance", "working", "episodic", "semantic"} == memories
 
 
 def test_the_named_question_exists():
@@ -120,17 +122,38 @@ def test_every_canned_question_is_a_read():
         assert_read_only(question.sql)
 
 
-def test_every_question_is_scoped_to_a_mission():
+def test_every_question_is_scoped_to_something_the_server_supplies():
     """Without this a question answers across every mission ever run against the
-    cluster, which on a shared demo cluster is somebody else's data."""
+    cluster, which on a shared demo cluster is somebody else's data.
+
+    Semantic memory is the one deliberate exception to *mission* scoping —
+    crossing missions is its entire purpose — so it is scoped by map instead.
+    Either way the scope is a bound parameter the server fills from the running
+    mission, never something a caller chooses, so the console still cannot be
+    pointed at data this fleet did not produce.
+    """
     for question in QUESTIONS:
-        assert question.params[0] == "mission_id"
-        assert "mission_id = %s" in question.sql
+        if question.memory == "semantic":
+            # Tactics carry no scope at all — not a mission, not a map. One
+            # learned clearing rubble on one map is meant to apply on the next,
+            # so any scope here would defeat the point of storing it. It is
+            # also the only table that holds nothing mission-identifying.
+            assert question.params == ()
+        else:
+            assert question.params[0] == "mission_id"
+            assert "mission_id = %s" in question.sql
+
+
+def test_semantic_memory_is_the_only_question_that_leaves_the_mission():
+    """Guards the exception above from spreading. A second unscoped question
+    would be a bug, not a feature — every other table has a mission in it."""
+    unscoped = [q.id for q in QUESTIONS if "mission_id" not in q.params]
+    assert unscoped == ["what_did_we_learn"]
 
 
 def test_the_catalog_is_json_shaped():
     entries = catalog()
-    assert len(entries) == 5
+    assert len(entries) == 6
     for entry in entries:
         assert {"id", "prompt", "memory", "params"} == set(entry)
 

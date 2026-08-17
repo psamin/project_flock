@@ -64,6 +64,34 @@ def test_the_snapshot_carries_the_sector_grid(world):
     assert sectors and {"id", "x", "y", "width", "height"} <= set(sectors[0])
 
 
+def test_the_snapshot_carries_usable_zones(world):
+    """`zones` is the field with the weakest guarantee and the most riding on it.
+
+    The 2D renderer never reads it, so for most of this project's life nothing
+    would have noticed it changing shape — only its *presence* was pinned, in
+    the field loop above. /sim3d derives its entire building layout from it:
+    each zone's name picks the height band and materials, and x/y/width/height
+    place them. A rename to `w`/`h`, or a name this client does not know, is a
+    map that renders as bare ground with no way to tell it went wrong.
+
+    So the key set is asserted here the same way the sector grid's is, and the
+    bounds are checked because a zone running off the edge of the map would
+    write outside the tile pool.
+    """
+    got = _snapshot(world)["world"]
+    zones = got["zones"]
+    assert zones, "no zones: /sim3d would render a flat, featureless block"
+    for zone in zones:
+        assert {"name", "x", "y", "width", "height"} <= set(zone), zone
+        assert isinstance(zone["name"], str) and zone["name"]
+        for field in ("x", "y", "width", "height"):
+            assert isinstance(zone[field], int), (
+                f"{zone['name']}.{field} must be an int"
+            )
+        assert zone["x"] + zone["width"] <= got["width"]
+        assert zone["y"] + zone["height"] <= got["height"]
+
+
 # --- robots: the floaters layer (§4.8 layer 5) -------------------------------
 
 

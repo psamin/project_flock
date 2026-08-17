@@ -19,17 +19,19 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agents.planning import Planner
-from bedrock.adapter import adapter_from_env
+from bedrock.adapter import REPLAY, adapter_from_env
 from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
 from fleetmem.client import LEASE_SECONDS
 from orchestrator.lost import LostWatch
+from sim import interventions as interventions_mod
 from sim import metrics as metrics_mod
+from sim import recall as recall_mod
 from sim.mission import build_fleet
 from sim.world import World
 from world.map_format import load_map
@@ -47,6 +49,13 @@ METRICS_EVERY_TICKS = TICK_HZ
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
 
+# Semantic memory (§4.0): derive tactics when a mission ends. Retrieval happens
+# per plan boundary inside the agents; this switch governs the write, and gives
+# the demo a way to show a fleet that has learned nothing beside one that has,
+# on the same binary. A kill switch rather than a code change, because the one
+# place this could misbehave is in front of an audience.
+RECALL_ENABLED = os.environ.get("COLONY_RECALL", "1") != "0"
+
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_DIR = ROOT / "client"
 # `COLONY_MAP` points the server at another map — a playtest variant, or a
@@ -60,7 +69,19 @@ def _make_memory():
     """CockroachDB when it is reachable, the in-memory fake otherwise.
 
     The walking skeleton has to run on a laptop with no cluster — if the sim
-    refused to start without one, nobody could work on the renderer.
+    refused to start without one, nobody could work on the renderer. So an
+    unreachable cluster degrades to the fake.
+
+    **But only when nobody named a cluster.** Setting `COLONY_DSN` is a
+    statement that fleet memory lives at a specific address, and falling back
+    from that is the most expensive failure this file can have: the mission
+    runs, the UI looks perfect, and every claim the demo makes is quietly
+    false — no serializable claiming, no vector index, no reconcile gate, and
+    nothing persisted for the console or the next mission to read. A typo in a
+    Cloud DSN would look exactly like a working demo. So when `COLONY_DSN` is
+    set, a connection failure is fatal and says why.
+
+    `COLONY_MEMORY=fake` remains the way to ask for the fake on purpose.
     """
     if os.environ.get("COLONY_MEMORY") == "fake":
         from fleetmem.fake import FakeFleetMem
@@ -71,6 +92,14 @@ def _make_memory():
 
         return CockroachFleetMem(), "cockroach"
     except Exception as exc:  # noqa: BLE001 - any failure means no cluster
+        if os.environ.get("COLONY_DSN"):
+            raise RuntimeError(
+                f"COLONY_DSN is set but the cluster is unreachable "
+                f"({type(exc).__name__}: {exc}).\n"
+                "Refusing to start on in-memory memory: the mission would run and "
+                "look healthy while writing nothing to CockroachDB.\n"
+                "Fix the DSN, or set COLONY_MEMORY=fake to ask for the fake."
+            ) from exc
         from fleetmem.fake import FakeFleetMem
 
         print(
@@ -168,6 +197,12 @@ class Mission:
 
     def _build(self, *, coordinated: bool) -> None:
         """Stand up a fresh world, mission and fleet in this coordination mode."""
+        # A restart replaces the mission, so the old listener's changefeed thread
+        # has to go with it. Left running it would hold a connection for a
+        # mission nobody is watching, and every toggle would leak another.
+        previous = getattr(self, "intervention_watch", None)
+        if previous is not None:
+            previous.stop()
         self.coordinated = coordinated
         self.world = World(load_map(self.map_path), seed=self.seed)
         self.world.shared_vision = coordinated
@@ -192,6 +227,13 @@ class Mission:
         # make an identical seed produce a different event log on a slow laptop.
         self.lost_watch = LostWatch(self.mem, self.mission_id, self.agents)
         self._lost_at = -1
+        # How an operator's disruption reaches this mission (issue #22). Started
+        # here rather than lazily so the changefeed thread is up before the first
+        # click, and scoped to this mission_id so a restart cannot deliver the
+        # previous run's interventions into the new world.
+        self.intervention_watch = interventions_mod.InterventionWatch(
+            self.mem, self.mission_id
+        ).start()
 
     async def reset(self, *, coordinated: bool) -> None:
         """Restart the mission in the other coordination mode (FR-9).
@@ -242,7 +284,11 @@ class Mission:
         with: one source of truth, and it is the log. `victims_located`,
         `coverage` and `tick` do not collide and survive either way.
         """
-        if self.world.tick - self._metrics_at < METRICS_EVERY_TICKS and self._metrics:
+        if (
+            not self.world.finished
+            and self.world.tick - self._metrics_at < METRICS_EVERY_TICKS
+            and self._metrics
+        ):
             return {**self.world.metrics(), **self._metrics}
         computed = metrics_mod.compute(
             self.mem.events(self.mission_id),
@@ -255,7 +301,17 @@ class Mission:
             # reproduce with a SELECT.
             victims_located=len(self.mem.get_beliefs(self.mission_id, kind="victim")),
         )
-        self._metrics = {**computed.to_json(), "mode": self.mode}
+        self._metrics = {
+            **computed.to_json(),
+            "mode": self.mode,
+            # Semantic memory and Bedrock, on the scoreboard rather than only in
+            # /health. Both are claims the demo makes out loud — "the fleet has
+            # done this before", "the LLM is deciding" — and a claim nobody can
+            # see on screen is a claim a judge has to take on trust.
+            "lessons_known": self._lessons_known(),
+            "bedrock_mode": self.embedder.mode,
+            "bedrock_calls": self.embedder.calls,
+        }
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
 
@@ -316,6 +372,20 @@ class Mission:
             "lease_seconds": LEASE_SECONDS,
         }
 
+    def _lessons_known(self) -> int:
+        """How many tactics the fleet is carrying into this mission.
+
+        Reads 0 on a fleet that has never finished a mission, which is the
+        honest number and the one that makes a later run's figure mean
+        something. Counted rather than cached because a mission ending mid-run
+        adds to it, and swallowed on failure because a scoreboard field is not
+        worth a broken tick.
+        """
+        try:
+            return len(self.mem.recall_lessons(None, limit=100))
+        except Exception:  # noqa: BLE001 - a HUD number, not a mission
+            return 0
+
     def focus_point(self) -> tuple[int, int] | None:
         """Somewhere worth asking "what do we know about here?" about.
 
@@ -371,20 +441,46 @@ class Mission:
     def tick_once(self) -> dict[str, Any]:
         """One pass of the pipeline. Split out from the loop so tests can drive
         the mission without asyncio or wall-clock time."""
+        # Operator interventions land *before* the agents think, so a robot
+        # feels the disruption on the same tick it arrives rather than a tick
+        # late. Applying after would have every robot spend one tick acting on a
+        # world that no longer exists, which on camera reads as a lag in the
+        # fleet rather than in us.
+        self._apply_interventions()
         actions = {
             robot_id: agent.step(self.world)
             for robot_id, agent in self.agents.items()
             if robot_id not in self.disabled
         }
         frame = self.world.step(actions)
-        for event in frame.events:
-            self.mem.log_event(
-                self.mission_id, event["actor"], event["verb"], event["detail"]
-            )
+        # One round trip for the whole tick's events rather than one each: a
+        # busy tick logs several, and against a Cloud cluster the latency
+        # dominates the insert.
+        self.mem.log_events(
+            self.mission_id,
+            [(e["actor"], e["verb"], e["detail"]) for e in frame.events],
+        )
         frame.lost = self._scan_for_lost(frame)
         payload = frame.to_json()
         payload["metrics"] = self.metrics()
         return payload
+
+    def _apply_interventions(self) -> list[Any]:
+        """Drain whatever the operator has written and land it on the world.
+
+        The listener is the only thing that turns a row into a change in the
+        world, which is what keeps the claim in issue #22 honest: an operator
+        has no path to a running mission that does not go through fleet memory.
+
+        A failure here is a disruption that did not land, not a mission that
+        ends. The tick loop is running a rescue.
+        """
+        try:
+            pending = self.intervention_watch.pending()
+        except Exception as exc:  # noqa: BLE001 - a button, not a mission
+            print(f"[sim] intervention listener failed: {type(exc).__name__}: {exc}")
+            return []
+        return [self.world.apply_intervention(i) for i in pending]
 
     def _scan_for_lost(self, frame: Any) -> list[str]:
         """Run the heartbeat scan on its own cadence and put the edges on the
@@ -438,6 +534,35 @@ class Mission:
             **self.metrics(),
             "finished": self.world.finished,
         }
+        if self.world.finished and self.coordinated:
+            self._remember()
+
+    def _remember(self) -> None:
+        """Derive tactics from this mission and write them down (§4.0).
+
+        Finished, coordinated runs only. An unfinished run has nothing settled
+        to teach, and a baseline run is a control condition — a memory it wrote
+        would be read by a later coordinated run and leak across the very
+        comparison the ON/OFF toggle exists to make.
+
+        Never allowed to fail loudly. This runs at the exact moment a mission
+        ends, which is the moment somebody is watching the screen; a summarizer
+        that raises would take the scoreboard down with it. `remember_mission`
+        is idempotent per mission, so the second call this makes on a toggle
+        away from an already-finished run is a no-op rather than a duplicate.
+        """
+        try:
+            learned = recall_mod.learn(
+                self.mem,
+                self.embedder,
+                self.mission_id,
+                self.world,
+                self.metrics(),
+            )
+            if learned:
+                print(f"[sim] learned {len(learned)} tactic(s) from this mission")
+        except Exception as exc:  # noqa: BLE001 - a demo must not die here
+            print(f"[sim] could not write mission memory: {type(exc).__name__}: {exc}")
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         """Hand one frame to every viewer's queue. Never touches a socket.
@@ -500,9 +625,12 @@ mission = Mission()
 async def lifespan(_: FastAPI):
     """Start the tick loop with the app and stop it cleanly on shutdown."""
     task = asyncio.create_task(mission.run())
+    # "N robots", not "N scouts": the fleet is 2 scouts, a lifter and a medic,
+    # and the heterogeneity is the premise. Also says what was recalled, so the
+    # cold run and the remembering run are distinguishable from the log alone.
     print(
         f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-        f"({mission.memory_kind} memory, {len(mission.agents)} scouts)"
+        f"({mission.memory_kind} memory, {len(mission.agents)} robots)"
     )
     try:
         yield
@@ -526,6 +654,19 @@ async def health() -> dict[str, Any]:
         "agents": sorted(mission.agents),
         "lost": mission.lost_watch.lost_ids(),
         "metrics": mission.metrics(),
+        # Nested rather than flat because `mode` up there is already the
+        # coordination mode (§4.7) and these are two different modes.
+        #
+        # `requested` against `mode` is the whole point of reporting both:
+        # `adapter_from_env` silently downgrades live to replay when no
+        # credentials resolve, which is exactly the failure that leaves the
+        # fleet running on rules while looking perfectly healthy. Read off the
+        # environment rather than stored at build time, so a downgrade shows up
+        # as the disagreement it is.
+        "bedrock": {
+            "requested": os.environ.get("COLONY_BEDROCK_MODE", REPLAY),
+            **mission.embedder.status(),
+        },
     }
 
 
@@ -556,6 +697,83 @@ async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
         "mode": mission.mode,
         "tick": mission.world.tick,
         "previous": mission.last_runs,
+    }
+
+
+@app.post("/api/intervene")
+async def intervene(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Break the world on purpose (issue #22).
+
+    The handler validates and **writes a row**. It does not touch the world:
+    the disruption becomes real when the listener picks the row up, which is
+    what makes "the operator has no channel the robots do not have" a fact about
+    the code rather than a claim in a README.
+
+    Two failure modes are told apart on purpose. A bad request — unknown kind,
+    off-map, silly radius — is a 400 the operator can fix. An intervention that
+    would seal off a victim for good is a **409**: the request was
+    well-formed and the world refused it, and saying so is more useful than
+    letting someone quietly kill a run they were only poking at.
+    """
+    body = body or {}
+    try:
+        x, y = int(body.get("x", -1)), int(body.get("y", -1))
+        radius = int(body.get("radius", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, detail={"reason": "x, y and radius must be integers"})
+
+    try:
+        planned = interventions_mod.plan(
+            mission.world,
+            str(body.get("kind", "")),
+            x,
+            y,
+            radius,
+            caused_by=str(body.get("caused_by", "operator")),
+        )
+    except interventions_mod.InterventionError as exc:
+        status = 409 if exc.detail.get("stranded") else 400
+        raise HTTPException(status, detail={"reason": exc.reason, **exc.detail})
+
+    try:
+        hazard_id = mission.mem.record_intervention(
+            mission.mission_id,
+            planned.kind,
+            planned.area(),
+            severity=planned.severity,
+            caused_by=planned.caused_by,
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced, not swallowed
+        raise HTTPException(
+            503,
+            detail={"reason": f"fleet memory rejected the write: {exc}"},
+        )
+
+    return {
+        "id": str(hazard_id),
+        "accepted": True,
+        "transport": mission.intervention_watch.transport,
+        **planned.to_json(),
+    }
+
+
+@app.get("/api/interventions")
+async def intervention_catalog() -> dict[str, Any]:
+    """What an operator may do, and what has been done to this mission."""
+    return {
+        "kinds": [
+            {
+                "id": kind,
+                "label": spec["label"],
+                "severity": spec["severity"],
+                "clearable": spec["clearable"],
+            }
+            for kind, spec in interventions_mod.KINDS.items()
+        ],
+        "max_radius": interventions_mod.MAX_RADIUS,
+        "transport": mission.intervention_watch.transport,
+        "transport_error": mission.intervention_watch.error,
+        "applied": [a.to_json() for a in mission.world.interventions],
     }
 
 
@@ -679,6 +897,10 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
         focus = mission.focus_point()
         if focus is not None:
             params["x"], params["y"] = focus
+    # Semantic memory is scoped by map, not by mission, and only the running
+    # mission knows which map it is on — the same reason mission_id is injected
+    # rather than accepted. It is also what stops the console being asked about
+    # a map the fleet is not on.
     try:
         result = console_questions.answer(
             mission.reader(),
@@ -747,6 +969,19 @@ async def ws(socket: WebSocket) -> None:
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(CLIENT_DIR / "index.html")
+
+
+@app.get("/sim3d")
+async def sim3d() -> FileResponse:
+    """The digital-twin view (docs/designs/3d-simulation-view.md).
+
+    A second renderer over the same authoritative sim — same `/ws` frames, same
+    numbers — not a second world. It is a separate route rather than a mode on
+    `/` because it requires WebGL and `/` deliberately does not: if a judge's
+    machine cannot run this one, the Canvas 2D view is still there and still
+    shows the whole mission.
+    """
+    return FileResponse(CLIENT_DIR / "sim3d.html")
 
 
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")

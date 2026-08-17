@@ -17,9 +17,32 @@
  * the renderer impossible to verify in headless QA. At this scale (1,200 tiles,
  * a handful of entities) Canvas 2D is not a compromise — the sprite work lives
  * in atlas.js and blits the same either way.
+ *
+ * There IS now a WebGL renderer, at /sim3d (docs/designs/3d-simulation-view.md),
+ * and the objection above is exactly why it is a second route instead of a
+ * replacement. It does not weaken: a machine without WebGL still gets a working
+ * mission here, and /sim3d checks for WebGL before it loads Three.js and links
+ * back to this page when it is missing. This file stays Canvas 2D on purpose —
+ * it is the floor the other view is allowed to be ambitious above.
  */
 
 import { buildAtlas, drawSprite, tileSprite, COLOURS } from "./atlas.js";
+// The HUD, the §4.7 comparison line, the ticker vocabulary and the commander
+// console are identical in this view and in /sim3d, so they live in one place.
+// logEvents() stays here: it mutates screen shake and path ghosts, which are
+// this renderer's state, and only its formatting half is shared.
+import {
+  setText,
+  updateHud,
+  refreshComparison,
+  formatEvent,
+  initConsole,
+  initInterventions,
+  initKillRobot,
+  refreshMemoryRail,
+  armedIntervention,
+  placeIntervention,
+} from "./ui-shared.js";
 
 const TICK_MS = 250; // 4 Hz
 const FIRE_FRAME_MS = 140;
@@ -337,6 +360,16 @@ function onCanvasClick(event) {
   const x = ((event.clientX - rect.left) / rect.width) * canvas.width;
   const y = ((event.clientY - rect.top) / rect.height) * canvas.height;
 
+  // An armed disruption takes the click (issue #22). Checked before robot
+  // picking rather than after: the tile an operator wants to collapse is very
+  // often the one a robot is standing next to, and "select the robot instead"
+  // would make the corridor beside it unclickable.
+  const armed = armedIntervention();
+  if (armed) {
+    placeIntervention(Math.floor(x / tile), Math.floor(y / tile));
+    return;
+  }
+
   let best = null;
   let bestDistance = tile; // within a tile of the click counts as a hit
   for (const r of robots) {
@@ -426,149 +459,20 @@ async function toggleMode() {
 }
 
 // --- HUD ---------------------------------------------------------------------
+// setText, updateHud and refreshComparison now live in ui-shared.js, imported
+// at the top of this file — /sim3d renders the same numbers from the same
+// frames, and two copies drifting apart would show a viewer two different
+// missions.
 
-function setText(id, value) {
-  const node = document.getElementById(id);
-  if (node) node.textContent = value;
-}
-
-function updateHud(metrics) {
-  if (!metrics) return;
-  setText("m-tick", metrics.tick ?? 0);
-  setText("m-located", metrics.victims_located ?? 0);
-  setText("m-stabilized", metrics.victims_stabilized ?? 0);
-  setText("m-lost", metrics.victims_lost ?? 0);
-  setText("m-coverage", `${Math.round((metrics.coverage ?? 0) * 100)}%`);
-  setText("m-rescue", `${Math.round((metrics.rescue_rate ?? 0) * 100)}%`);
-  setText("m-duplicate", `${Math.round((metrics.duplicate_effort_index ?? 0) * 100)}%`);
-  // Computed since the first playtest and never shown. It is the most direct
-  // "coordination is working" number the project has: with claiming on it
-  // should sit at zero, and the baseline is where it climbs.
-  setText("m-doublework", metrics.double_work_incidents ?? 0);
-  setText(
-    "m-median",
-    metrics.median_time_to_stabilize == null
-      ? "—"
-      : Math.round(metrics.median_time_to_stabilize),
-  );
-}
-
-/** §3.6: put the memory on screen.
- *
- * The data layer is the thesis and it was the one part of the demo with nothing
- * to look at — a viewer saw robots moving and had to take on faith that any of
- * it went through a database. This shows live row counts grouped by the four
- * memory types the schema is organised around, so "the fleet is writing to
- * CockroachDB right now" is watchable rather than asserted.
- *
- * It also shows the empty tables honestly. `hazards 0` and `mission_memories 0`
- * are real — nothing writes to either — and that is better on screen than
- * discovered.
- */
-async function refreshMemoryRail() {
-  const box = document.getElementById("memory-rail");
-  if (!box) return;
-  try {
-    const data = await (await fetch("/api/memory")).json();
-    if (!data.available) {
-      box.textContent = `fleet memory: ${data.memory} — no cluster, counts unavailable`;
-      return;
-    }
-    const groups = Object.entries(data.counts)
-      .map(([group, tables]) => {
-        const cells = Object.entries(tables)
-          .map(([t, n]) => `<span class="${n ? "" : "zero"}">${t} <b>${n}</b></span>`)
-          .join(" ");
-        return `<span class="grp"><em>${group}</em> ${cells}</span>`;
-      })
-      .join("");
-    box.innerHTML =
-      `<span class="grp"><em>cockroachdb</em> <b>${data.total}</b> rows</span>` +
-      groups;
-  } catch {
-    /* the rail is decoration; never let it break the render loop */
-  }
-}
-
-/** §4.7's one number the video ends on, once both modes have run. */
-async function refreshComparison() {
-  try {
-    const data = await (await fetch("/api/runs")).json();
-    const runs = data.runs || {};
-    const box = document.getElementById("comparison");
-    const co = runs.coordinated;
-    const base = runs.baseline;
-    if (!co || !base) {
-      box.textContent = co || base ? "run the other mode to compare" : "";
-      return;
-    }
-    if (!co.finished || !base.finished) {
-      // Comparing a finished run against one that was cut short would report a
-      // coordination gain the fleet never earned, in either direction.
-      box.textContent = "let each mode run to the end for a fair comparison";
-      return;
-    }
-    const gain =
-      base.median_time_to_stabilize && co.median_time_to_stabilize != null
-        ? (base.median_time_to_stabilize - co.median_time_to_stabilize) /
-          base.median_time_to_stabilize
-        : 0;
-    // Lives first, percentages second. Measured across 6 seeds, baseline loses
-    // exactly five people every run and coordinated loses none: baseline fails,
-    // so its mission does not end early, the vitals deadlines arrive, and the
-    // victims nobody reached die. That is the §4.7 comparison stated in the unit
-    // the scenario is actually about, and it needs no arithmetic from the
-    // viewer. The rate and the gain stay — they are the defensible numbers — but
-    // they are no longer the first thing read.
-    const livesLost =
-      base.victims_lost > co.victims_lost
-        ? `<b>${base.victims_lost - co.victims_lost} more people died without ` +
-          `shared memory</b> (${co.victims_lost} vs ${base.victims_lost}) · `
-        : "";
-    box.innerHTML =
-      livesLost +
-      `rescued ${co.victims_stabilized}/${co.victims_total} coordinated ` +
-      `vs ${base.victims_stabilized}/${base.victims_total} baseline · ` +
-      `coordination gain ${Math.round(gain * 100)}%`;
-  } catch {
-    /* the scoreboard is decoration until both runs exist */
-  }
-}
-
-const TICKER_TEXT = {
-  victim_found: (e) => `found ${e.detail.victim} at ${e.detail.x},${e.detail.y}`,
-  victim_stabilized: (e) => `stabilized ${e.detail.victim}`,
-  victim_lost: (e) => `lost ${e.detail.victim}`,
-  debris_cleared: (e) => `cleared debris at ${e.detail.x},${e.detail.y}`,
-  task_claimed: (e) => `claimed ${e.detail.kind}`,
-  task_completed: (e) => `completed ${e.detail.kind}`,
-  task_released: (e) => `released a task (${e.detail.reason})`,
-  sector_claimed: (e) => `claimed sector ${e.detail.sector}`,
-  sector_swept: (e) => `swept sector ${e.detail.sector}`,
-  returning_to_base: () => "heading back to base",
-  recharged: () => "recharged",
-  restocked: () => "restocked kits",
-  fire_spread: (e) => `fire spread to ${e.detail.x},${e.detail.y}`,
-  aftershock: () => "AFTERSHOCK — the map just changed",
-  robot_lost: (e) => `SIGNAL LOST — silent ${e.detail.silent_for_seconds}s`,
-  robot_recovered: () => "back on the air",
-};
-
-const TICKER_CLASS = {
-  victim_found: "found",
-  victim_stabilized: "good",
-  victim_lost: "bad",
-  aftershock: "shock",
-  sector_claimed: "sector",
-  sector_swept: "sector",
-  robot_lost: "bad",
-  robot_recovered: "good",
-};
+/* The ticker vocabulary (TICKER_TEXT, TICKER_CLASS) moved to ui-shared.js too,
+ * behind formatEvent(). What stays here is everything below that touches this
+ * renderer's own state. */
 
 function logEvents(events) {
   const ticker = document.getElementById("ticker");
   for (const e of events || []) {
-    if (e.verb === "action_rejected" || e.verb === "tile_visited") continue; // noise
+    const formatted = formatEvent(e);
+    if (!formatted) continue;   // noise the shared vocabulary filters out
     if (e.verb === "aftershock") shakeUntil = performance.now() + SHAKE_MS;
     if (e.verb === "task_claimed" && e.detail.target) {
       const robot = robots.find((r) => r.id === e.actor);
@@ -585,11 +489,8 @@ function logEvents(events) {
     }
 
     const line = document.createElement("div");
-    line.className = TICKER_CLASS[e.verb] || "";
-    const say = TICKER_TEXT[e.verb];
-    line.textContent =
-      `${String(e.tick).padStart(4, " ")}  ${e.actor.padEnd(6)} ` +
-      (say ? say(e) : e.verb.replace(/_/g, " "));
+    line.className = formatted.className;
+    line.textContent = formatted.text;
     ticker.appendChild(line);
   }
   while (ticker.childElementCount > TICKER_MAX) ticker.removeChild(ticker.firstChild);
@@ -654,92 +555,17 @@ function connect() {
 }
 
 // --- commander console (FR-10) ----------------------------------------------
+// Lives in ui-shared.js. It takes accessors rather than reading globals,
+// because "which robot is the subject of this question" is renderer state and
+// /sim3d tracks its own selection.
 
-/** Which robot a question about "robot X" should ask about.
- *
- * The selected one when the provenance panel is open, otherwise a scout — a
- * lifter has logged nothing until a scout has found somebody to dig out, so
- * defaulting alphabetically makes the flagship question look broken for the
- * first forty ticks of every run. */
-function subjectRobot() {
-  if (selected) return selected;
-  const scout = robots.find((r) => r.role === "scout");
-  return scout ? scout.id : robots.length ? robots[0].id : "s1";
-}
+initInterventions();
+initKillRobot();
 
-async function askConsole(question) {
-  const summary = document.getElementById("console-summary");
-  const sqlBox = document.getElementById("console-sql");
-  const rowsBox = document.getElementById("console-rows");
-  summary.className = "";
-  summary.textContent = "asking fleet memory…";
-  sqlBox.textContent = "";
-  rowsBox.textContent = "";
-
-  const body = { question };
-  if (question === "why_did_robot") body.robot_id = subjectRobot();
-  if (question === "what_do_we_know") {
-    // Centred on the selected robot when there is one: "what do we know around
-    // here" is the question a commander actually asks, and (0,0) is a corner.
-    const robot = robots.find((r) => r.id === subjectRobot());
-    body.x = robot ? robot.x : 20;
-    body.y = robot ? robot.y : 15;
-    body.radius = 6;
-  }
-
-  try {
-    const answer = await (
-      await fetch("/api/console/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      })
-    ).json();
-
-    if (answer.error) {
-      summary.className = "err";
-      summary.textContent = answer.error;
-      return;
-    }
-    summary.textContent = `${answer.prompt} — ${answer.summary}`;
-    // The SQL is shown on purpose: FR-10 claims these answers come out of
-    // fleet memory, and the query beside the rows is what makes that
-    // checkable rather than asserted.
-    sqlBox.textContent = answer.sql;
-    rowsBox.textContent = answer.rows.length
-      ? answer.rows.map((r) => JSON.stringify(r)).join("\n")
-      : "(no rows)";
-  } catch (err) {
-    summary.className = "err";
-    summary.textContent = `console error: ${err.message}`;
-  }
-}
-
-async function buildConsole() {
-  const holder = document.getElementById("console-questions");
-  const status = document.getElementById("console-status");
-  try {
-    const data = await (await fetch("/api/console/questions")).json();
-    if (!data.available) {
-      status.textContent = `unavailable — running on ${data.memory} memory`;
-    }
-    holder.innerHTML = "";
-    for (const q of data.questions) {
-      const button = document.createElement("button");
-      button.textContent = q.prompt.replace(/\{[^}]+\}/g, "…");
-      const tag = document.createElement("span");
-      tag.className = "mem";
-      tag.textContent = q.memory.toUpperCase();
-      button.appendChild(tag);
-      button.addEventListener("click", () => askConsole(q.id));
-      holder.appendChild(button);
-    }
-  } catch {
-    status.textContent = "console unreachable";
-  }
-}
-
-buildConsole();
+initConsole({
+  getRobots: () => robots,
+  getSelected: () => selected,
+});
 
 // The comparison changes when a mission *ends*, which is not an event the
 // frame stream carries — polling a read-only endpoint every few seconds is
@@ -747,46 +573,6 @@ buildConsole();
 setInterval(refreshComparison, 4000);
 
 document.getElementById("toggle").addEventListener("click", toggleMode);
-
-/** §3.6's first failure beat: kill a robot, watch its work get taken over.
- *
- * AUDIT B measured zero contended claims across a whole normal run, so the
- * lease-takeover branch — the entire "why a database and not a queue" argument
- * — never fires on its own. This is the button that fires it.
- *
- * The answer names the orphaned task so a viewer knows what to watch, and says
- * how long the lease has left, because the fifteen seconds of nothing happening
- * is the part that needs narrating.
- */
-document.getElementById("kill-robot").addEventListener("click", async () => {
-  const button = document.getElementById("kill-robot");
-  button.disabled = true;
-  try {
-    const res = await (
-      await fetch("/api/failure/kill-robot", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      })
-    ).json();
-    const box = document.getElementById("comparison");
-    if (res.error) {
-      box.textContent = res.error;
-    } else {
-      const orphan = res.orphaned_tasks?.[0];
-      box.innerHTML =
-        `<b>${res.killed} is down</b> at tick ${res.tick}` +
-        (orphan
-          ? ` — holding ${orphan.kind} at ${orphan.target.join(",")}. ` +
-            `Its lease lapses in ${res.lease_seconds}s, then anyone can claim it.`
-          : " — it was not holding any work.");
-    }
-  } catch {
-    /* the button is a demo aid; never let it break the render loop */
-  } finally {
-    button.disabled = false;
-  }
-});
 document.getElementById("panel-close").addEventListener("click", closePanel);
 window.addEventListener("keydown", (e) => {
   if (e.key === "s") showSectors = !showSectors;   // FR-16's grid, on demand

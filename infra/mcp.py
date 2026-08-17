@@ -14,13 +14,16 @@ claims, and this module is about both:
     uv run python ../infra/mcp.py config    print the client config snippet
     uv run python ../infra/mcp.py check     assert the posture before wiring it
 
-**The managed endpoint needs a CockroachDB Cloud cluster**, which is the one
-item still parked in TODO.md — it takes an account and card details this repo
-cannot supply. Everything else is done: the questions the console asks are in
-`colony/console/questions.py` and tested against a live cluster, the read-only
-role is applied and verified by `credentials.py`, and the config below is
-generated rather than hand-copied. When the cluster exists, `config` takes its
-id and the hookup is a paste, not a build.
+The cluster exists (CockroachDB Cloud, v26.2.5) and the schema and grants are
+applied to it, so the only input left is the cluster id from the Cloud console's
+connect dialog:
+
+    uv run python ../infra/mcp.py config --cluster-id <id>   # or $CRDB_CLUSTER_ID
+
+`commander` really does hold SELECT and nothing else on that cluster —
+`credentials.py verify` asserts it there, not only on the local rig — so the
+read-only claim is a property of the grant and survives anyone flipping a
+setting.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ def config(
                 "readOnly": True,
                 "description": (
                     "Colony fleet memory — working, episodic, provenance and "
-                    "semantic tables. Read-only; the console asks the five "
+                    "semantic tables. Read-only; the console asks the six "
                     "canned questions in colony/console/questions.py."
                 ),
                 "env": {
@@ -96,9 +99,9 @@ def main() -> int:
     print(json.dumps(config(args.cluster_id), indent=2))
     if not (args.cluster_id or os.environ.get("CRDB_CLUSTER_ID")):
         print(
-            "\n# No cluster id: the managed endpoint needs a CockroachDB Cloud\n"
-            "# cluster (parked in TODO.md — needs an account and card details).\n"
-            "# Re-run with --cluster-id once it exists; nothing else changes.",
+            "\n# No cluster id. Take it from the Cloud console's connect dialog\n"
+            "# and re-run with --cluster-id, or set CRDB_CLUSTER_ID.\n"
+            "# Nothing else in this snippet changes.",
             file=sys.stderr,
         )
     return 0

@@ -18,9 +18,32 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-from fleetmem.types import BLOCKED, DONE, OPEN, Belief, Match, Plan, Task
+from fleetmem.types import (
+    BLOCKED,
+    DONE,
+    INTERVENTION_PREFIX,
+    OPEN,
+    Belief,
+    Hazard,
+    Match,
+    Lesson,
+    Plan,
+    Task,
+)
 
 DEFAULT_DSN = "postgresql://root@localhost:26257/colony?sslmode=disable"
+
+
+def resolve_dsn(dsn: str | None = None) -> str:
+    """Where fleet memory lives: explicit argument, else `COLONY_DSN`, else local.
+
+    One function because every connection in the process has to agree. A second
+    opinion is not a second connection to the same cluster, it is a connection to
+    a different one — and against the local dev cluster both happen to be right,
+    so the disagreement only surfaces on Cloud.
+    """
+    return dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN)
+
 
 # Cosine distance below which two observations are the same belief (§4.2 step 3
 # states the gate as >=0.82 cosine *similarity*; distance = 1 - similarity).
@@ -68,7 +91,7 @@ class CockroachFleetMem:
         tests can open one connection per identity.
         """
         self.conn = psycopg.connect(
-            dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN),
+            resolve_dsn(dsn),
             autocommit=True,
             row_factory=dict_row,
         )
@@ -213,6 +236,93 @@ class CockroachFleetMem:
             params.append(kind)
         rows = self.conn.execute(" ".join(sql), params).fetchall()
         return [_belief(r) for r in rows]
+
+    # --- semantic memory --------------------------------------------------
+
+    def remember_lesson(
+        self,
+        mission_id: UUID,
+        situation: str,
+        lesson: str,
+        embedding: Sequence[float] | None = None,
+        evidence: dict[str, Any] | None = None,
+        confidence: float = 0.5,
+    ) -> UUID:
+        """Write down a tactic this mission learned.
+
+        `situation` is what gets embedded — retrieval asks what the current
+        moment resembles, so the vector has to describe conditions rather than
+        the advice. Storing the lesson text unembedded also means a lesson can
+        be reworded without moving in the index.
+        """
+        row = self.conn.execute(
+            "INSERT INTO mission_memories"
+            "  (mission_id, situation, lesson, embedding, evidence, confidence)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                mission_id,
+                situation,
+                lesson,
+                _vec(embedding),
+                json.dumps(evidence or {}),
+                confidence,
+            ),
+        ).fetchone()
+        return row["id"]
+
+    def recall_lessons(
+        self,
+        embedding: Sequence[float] | None,
+        limit: int = 3,
+    ) -> list[Lesson]:
+        """The tactics most like the situation described by `embedding`.
+
+        The second place CockroachDB's vector indexing carries real weight, and
+        the only search in the SDK that crosses missions *and* maps. There is no
+        scope argument on purpose: a lesson learned clearing rubble on one map
+        is exactly what should surface while clearing rubble on another, and any
+        filter here would partition the knowledge this is built to generalise.
+
+        Without an embedding it degrades to the most recently learned. Recall
+        still works with no Bedrock credentials; it just stops being semantic.
+        """
+        if embedding is None:
+            rows = self.conn.execute(
+                "SELECT *, 0.0 AS distance FROM mission_memories"
+                " ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+        else:
+            vec = _vec(embedding)
+            # No `WHERE embedding IS NOT NULL`, and that is not an oversight.
+            # Measured against v26.2: adding it moves the plan from
+            # `vector search` on mm_situation_idx to a FULL SCAN of the primary
+            # index. Only filters matching a prefix column keep the vector index
+            # engaged, and this one matches nothing — so the guard that looks
+            # like hygiene silently costs the capability.
+            #
+            # It is not needed anyway: `<=>` against a NULL embedding is NULL,
+            # and NULLs sort last on ASC, so an unembedded lesson falls off the
+            # end of the top-k on its own. `_lesson` still guards the mapper, in
+            # case one is the only row there is.
+            rows = self.conn.execute(
+                "SELECT *, embedding <=> %s AS distance FROM mission_memories"
+                " ORDER BY embedding <=> %s LIMIT %s",
+                (vec, vec, limit),
+            ).fetchall()
+        return [_lesson(r) for r in rows if r.get("embedding") is not None]
+
+    def mark_recalled(self, lesson_ids: Sequence[UUID]) -> None:
+        """Count a retrieval. A lesson nothing ever retrieves is dead weight,
+        and this is what lets the console say which tactics the fleet actually
+        leans on rather than merely which ones it wrote down."""
+        if not lesson_ids:
+            return
+        self.conn.execute(
+            "UPDATE mission_memories SET times_recalled = times_recalled + 1"
+            " WHERE id = ANY(%s)",
+            (list(lesson_ids),),
+        )
 
     # --- tasks ------------------------------------------------------------
 
@@ -424,6 +534,58 @@ class CockroachFleetMem:
         ).fetchall()
         return [_task(r) for r in rows]
 
+    # --- hazards and operator interventions -------------------------------
+
+    def record_intervention(
+        self,
+        mission_id: UUID,
+        kind: str,
+        area: dict[str, Any],
+        severity: int = 1,
+        caused_by: str = "operator",
+    ) -> UUID:
+        """Write an operator's disruption to fleet memory (issue #22).
+
+        This is the whole of the operator's channel. The console writes a row;
+        the fleet finds out the way it finds out about everything else. Nothing
+        reaches into the sim, and there is no path from a person to a robot that
+        does not go through this table — which is the same claim the project
+        makes about robot-to-robot messaging, held to for the operator too.
+
+        Returning before anything has been applied is deliberate: the caller is
+        an HTTP handler, and the disruption becomes real when the listener picks
+        the row up, not when the request returns.
+        """
+        row = self.conn.execute(
+            "INSERT INTO hazards (mission_id, kind, area, severity, active)"
+            " VALUES (%s, %s, %s, %s, true) RETURNING id",
+            (
+                mission_id,
+                f"{INTERVENTION_PREFIX}{kind}",
+                json.dumps({**area, "caused_by": caused_by}),
+                severity,
+            ),
+        ).fetchone()
+        return row["id"]
+
+    def active_hazards(
+        self, mission_id: UUID, interventions_only: bool = False
+    ) -> list[Hazard]:
+        """Live hazards for this mission, newest last.
+
+        Read by the console panel and by the fake's listener. Agents do **not**
+        call this: a robot learns what is in its way by looking at the world,
+        and a query that hands it the operator's tile list would be ground truth
+        arriving without anyone sensing it (§4.8).
+        """
+        sql = "SELECT * FROM hazards WHERE mission_id = %s AND active"
+        params: list[Any] = [mission_id]
+        if interventions_only:
+            sql += " AND kind LIKE %s"
+            params.append(f"{INTERVENTION_PREFIX}%")
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_hazard(r) for r in rows]
+
     # --- robots and log ---------------------------------------------------
 
     def heartbeat(
@@ -433,12 +595,19 @@ class CockroachFleetMem:
         battery: int | None = None,
         status: str | None = None,
         lease_seconds: int = LEASE_SECONDS,
+        renew: bool = True,
     ) -> None:
         """Report status **and renew every lease this robot holds** (§4.3, §4.4).
 
         The renewal is the load-bearing half. `robots.heartbeat_at` now exists
         only so the orchestrator can mark a robot `lost` for the UI and event
         log; nothing reads it to recover work.
+
+        The two are separate statements — two round trips — and they are wanted
+        on different cadences: the status write feeds a 10s staleness window and
+        the renewal a 15s lease. `renew=False` sends the status write alone, so
+        a caller on the faster cadence does not pay for the slower one. Against
+        a Cloud cluster at ~40ms RTT the pair was over half the tick budget.
         """
         self.conn.execute(
             "UPDATE robots SET heartbeat_at = now(),"
@@ -453,7 +622,8 @@ class CockroachFleetMem:
                 robot_id,
             ),
         )
-        self.renew_leases(robot_id, lease_seconds)
+        if renew:
+            self.renew_leases(robot_id, lease_seconds)
 
     def register_robot(
         self, robot_id: str, role: str, pos: tuple[int, int], battery: int
@@ -486,6 +656,7 @@ class CockroachFleetMem:
         chosen: dict[str, Any],
         rationale: str,
         based_on: Sequence[UUID] = (),
+        recalled_from: Sequence[UUID] = (),
     ) -> UUID:
         """Record a decision and the memories that drove it (FR-17, §4.0).
 
@@ -494,10 +665,17 @@ class CockroachFleetMem:
         into a traceable answer to "why?" — the commander console joins these
         back to `observations`, and clicking a robot in the UI shows rationale
         plus sources.
+
+        `recalled_from` is the same idea for the other kind of memory: the
+        tactics retrieved from `mission_memories` that were in the prompt. Two
+        columns rather than one because they resolve against two tables, and an
+        id in the wrong one resolves to nothing at all — which turns a decision
+        trace back into a plausible story, quietly.
         """
         row = self.conn.execute(
-            "INSERT INTO plans (mission_id, robot_id, trigger, chosen, rationale, based_on)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO plans"
+            "  (mission_id, robot_id, trigger, chosen, rationale, based_on, recalled_from)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 mission_id,
                 robot_id,
@@ -505,6 +683,7 @@ class CockroachFleetMem:
                 json.dumps(chosen),
                 rationale,
                 list(based_on) or None,
+                list(recalled_from) or None,
             ),
         ).fetchone()
         return row["id"]
@@ -528,9 +707,29 @@ class CockroachFleetMem:
     ) -> None:
         """Append to the mission log. Every §4.7 metric is derived from these, so
         log the transition, not the intention."""
+        self.log_events(mission_id, [(actor, verb, detail)])
+
+    def log_events(
+        self,
+        mission_id: UUID,
+        rows: Sequence[tuple[str, str, dict[str, Any] | None]],
+    ) -> None:
+        """Append many events in one round trip.
+
+        A tick emits several events and they were inserted one statement at a
+        time, which on a Cloud cluster is several times the latency of the
+        insert itself. The rows are independent appends to the same log, so
+        nothing about the order or the content changes by sending them together.
+        """
+        if not rows:
+            return
+        values = ", ".join(["(%s, %s, %s, %s)"] * len(rows))
+        params: list[Any] = []
+        for actor, verb, detail in rows:
+            params += [mission_id, actor, verb, json.dumps(detail or {})]
         self.conn.execute(
-            "INSERT INTO events (mission_id, actor, verb, detail) VALUES (%s, %s, %s, %s)",
-            (mission_id, actor, verb, json.dumps(detail or {})),
+            f"INSERT INTO events (mission_id, actor, verb, detail) VALUES {values}",
+            params,
         )
 
     def events(self, mission_id: UUID) -> list[dict[str, Any]]:
@@ -563,6 +762,31 @@ def _belief(r: dict[str, Any]) -> Belief:
     )
 
 
+def _lesson(r: dict[str, Any]) -> Lesson:
+    return Lesson(
+        id=r["id"],
+        mission_id=r.get("mission_id"),
+        situation=r["situation"] or "",
+        lesson=r["lesson"] or "",
+        evidence=r["evidence"] or {},
+        confidence=float(r["confidence"] or 0.0),
+        times_recalled=int(r["times_recalled"] or 0),
+        distance=float(r["distance"] or 0.0),
+        created_at=r.get("created_at"),
+    )
+
+
+def _hazard(r: dict[str, Any]) -> Hazard:
+    return Hazard(
+        id=r["id"],
+        mission_id=r.get("mission_id"),
+        kind=r["kind"] or "",
+        area=r["area"] or {},
+        severity=int(r["severity"] or 1),
+        active=bool(r["active"]),
+    )
+
+
 def _plan(r: dict[str, Any]) -> Plan:
     return Plan(
         id=r["id"],
@@ -572,6 +796,7 @@ def _plan(r: dict[str, Any]) -> Plan:
         chosen=r["chosen"] or {},
         rationale=r["rationale"] or "",
         based_on=list(r["based_on"] or []),
+        recalled_from=list(r.get("recalled_from") or []),
         at=r["at"],
     )
 

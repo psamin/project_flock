@@ -1,8 +1,8 @@
-"""The five canned demo questions (§5.1 lane 4, FR-10, §6.2).
+"""The six canned demo questions (§5.1 lane 4, FR-10, §6.2).
 
 Canned rather than free-form on purpose. §5.4 puts demo reliability above
 cleverness — a live model improvising SQL in front of judges is the one part of
-the console that can fail in a way nobody can recover from on camera. These five
+the console that can fail in a way nobody can recover from on camera. These six
 are the questions the demo actually asks, they are the ones the MCP server would
 end up issuing, and each is a plain read anyone can run by hand.
 
@@ -14,6 +14,11 @@ They are chosen so that between them they interrogate all four memory systems
     what_do_we_know      EPISODIC     observations, with the merge count visible
     who_holds_what       WORKING      tasks x robots, and the lease on each
     aftershock_response  PROVENANCE   what the fleet re-decided, and when
+    what_did_we_learn    SEMANTIC     mission_memories, the tactics learned
+
+The last one carries no scope at all — not a mission, not a map. A tactic
+learned clearing rubble on one map is meant to apply on the next, so scoping it
+would defeat the point of having it.
 
 "Why did robot X do Y" is the one §5.1 names explicitly, and it is the reason
 `plans.based_on` exists: it answers with the rows that were in the prompt, not
@@ -243,6 +248,42 @@ def _render_aftershock(rows: list[dict[str, Any]]) -> str:
     )
 
 
+# --- SEMANTIC: the only question no single mission can answer ----------------
+
+# No mission scope and no map scope: a tactic learned on one map is meant to
+# apply on the next, so scoping this would defeat it. `times_recalled` is the
+# column worth reading — a lesson nothing ever retrieves is dead weight, and the
+# difference between "we wrote this down" and "the fleet leans on this" is the
+# difference between a table and a memory.
+WHAT_DID_WE_LEARN = """
+SELECT m.created_at,
+       m.situation,
+       m.lesson,
+       m.times_recalled,
+       round(m.confidence::numeric, 2) AS confidence
+  FROM mission_memories m
+ ORDER BY m.times_recalled DESC, m.created_at DESC
+ LIMIT 10
+"""
+
+
+def _render_learned(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return (
+            "nothing yet — no mission has finished and had tactics derived from it"
+        )
+    used = [r for r in rows if (r["times_recalled"] or 0) > 0]
+    lead = f"{len(rows)} tactic(s) learned across earlier missions"
+    if used:
+        top = used[0]
+        return (
+            f"{lead}; {len(used)} have been retrieved into a live decision. "
+            f"Most used ({top['times_recalled']}x): when {top['situation']} — "
+            f"{top['lesson']}"
+        )
+    return f"{lead}, none retrieved into a decision yet. First: {rows[0]['lesson']}"
+
+
 QUESTIONS: tuple[Question, ...] = (
     Question(
         id="why_did_robot",
@@ -283,6 +324,14 @@ QUESTIONS: tuple[Question, ...] = (
         sql=AFTERSHOCK_RESPONSE,
         params=("mission_id",),
         render=_render_aftershock,
+    ),
+    Question(
+        id="what_did_we_learn",
+        prompt="What tactics has the fleet learned from earlier missions?",
+        memory="semantic",
+        sql=WHAT_DID_WE_LEARN,
+        params=(),
+        render=_render_learned,
     ),
 )
 

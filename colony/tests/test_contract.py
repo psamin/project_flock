@@ -21,6 +21,9 @@ SDK_METHODS = [
     "heartbeat",
     "log_plan",
     "log_event",
+    # the batched form: a tick's events in one round trip, which is what the
+    # sim loop uses. log_event() is the single-row convenience on top of it.
+    "log_events",
     # lease mechanics (§4.4) — recovery lives here, so the fake must match
     "renew_leases",
     "release_task",
@@ -33,6 +36,16 @@ SDK_METHODS = [
     "stale_robots",
     "events",
     "plans_for",
+    # semantic memory (§4.0): the only search in the SDK that crosses missions
+    "remember_lesson",
+    "recall_lessons",
+    "mark_recalled",
+    # operator interventions (issue #22). On the SDK surface rather than beside
+    # the server because writing the row *is* the operator's entire channel —
+    # the fleet learns about a disruption the same way it learns everything,
+    # and the fake has to offer that path too or the feature needs a cluster.
+    "record_intervention",
+    "active_hazards",
     "close",
 ]
 

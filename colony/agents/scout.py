@@ -24,7 +24,10 @@ from uuid import UUID
 from agents import logistics, planning
 from agents.pathing import find_move_plan, find_path
 from agents.planning import BEDROCK, RULES
-from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE
+# Both agent types report status on the same cadence and there is no reason for
+# them to disagree about it, so the constants have one home rather than two.
+from agents.worker import HEARTBEAT_EVERY_TICKS, RENEW_EVERY_TICKS
+from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE, WORLD_CHANGED
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, Percept, World
 from world.map_format import DEBRIS, FIRE, RUBBLE_HEAVY, WALL
@@ -103,10 +106,16 @@ class Scout:
     # 40x30 map, so a scout that never goes back strands itself mid-sweep.
     homing: bool = False
     seen_escalations: int = 0
+    # Escalations *and* operator interventions (issue #22).
+    seen_disruptions: int = 0
     # tile -> tick this scout last had eyes on it. Turns "everything is
     # explored" into "this is the stalest ground I know", which is what a scout
     # needs after the map changes under it (FR-7).
     last_seen: dict[tuple[int, int], int] = field(default_factory=dict)
+    # Ticks the status write and the sector-lease renewal last went out. None
+    # means "never", so both fire on this scout's first tick.
+    _heartbeat_at: int | None = field(default=None)
+    _renew_at: int | None = field(default=None)
 
     def __post_init__(self) -> None:
         self.rng = random.Random(self.seed)
@@ -132,14 +141,39 @@ class Scout:
         else:
             action = self._think(world, percept)  # think
 
-        self.mem.heartbeat(
-            self.robot_id,
-            pos=(robot.x, robot.y),
-            battery=robot.battery,
-            status=robot.status,
-            lease_seconds=SECTOR_LEASE_SECONDS,
-        )
+        self._report_status(world, robot)
         return action  # act (the sim applies it)
+
+    def _report_status(self, world: World, robot: Any) -> None:
+        """Status write and sector-lease renewal, each on its own cadence.
+
+        Two statements, two round trips, two different deadlines (§4.3, §4.4).
+        The sector lease is the longer of the fleet's two at 20s, so a renewal
+        every 5s leaves three that may be missed before it lapses.
+        """
+        tick = world.tick
+        beat_due = (
+            self._heartbeat_at is None
+            or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
+        )
+        renew_due = (
+            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
+        )
+        if beat_due:
+            self.mem.heartbeat(
+                self.robot_id,
+                pos=(robot.x, robot.y),
+                battery=robot.battery,
+                status=robot.status,
+                lease_seconds=SECTOR_LEASE_SECONDS,
+                renew=renew_due,
+            )
+            self._heartbeat_at = tick
+            if renew_due:
+                self._renew_at = tick
+        elif renew_due:
+            self.mem.renew_leases(self.robot_id, SECTOR_LEASE_SECONDS)
+            self._renew_at = tick
 
     # --- battery (§3.3) ---------------------------------------------------
 
@@ -196,21 +230,31 @@ class Scout:
         not downloaded, and a scout that knew where the new victim was without
         flying there would be ground truth wearing a robot costume.
         """
-        if world.escalations_fired <= self.seen_escalations:
+        if world.disruptions_felt <= self.seen_disruptions:
             return
+        # Which kind of disruption, told from two counts the scout can already
+        # see rather than from anyone's tile list (issue #22).
+        by_operator = world.escalations_fired <= self.seen_escalations
+        self.seen_disruptions = world.disruptions_felt
         self.seen_escalations = world.escalations_fired
         self.explored.clear()
         self.frontier_target = None
         if self.sector_task is not None:
             self.mem.release_task(self.sector_task.id)
             self.sector_task = None
+        cause = "the ground shifted" if by_operator else "aftershock felt"
         self._log_plan(
             world,
-            trigger=AFTERSHOCK,
+            trigger=WORLD_CHANGED if by_operator else AFTERSHOCK,
             chosen={"action": "explore", "sector": None, "source": RULES},
-            rationale="aftershock felt; re-sweeping from what I can see now",
+            rationale=f"{cause}; re-sweeping from what I can see now",
         )
-        self._say(world, "🌐 aftershock — re-sweeping")
+        self._say(
+            world,
+            "🌐 something moved — re-sweeping"
+            if by_operator
+            else "🌐 aftershock — re-sweeping",
+        )
 
     def _say(self, world: World, text: str) -> None:
         """Set the thought bubble the renderer already carries (§3.6)."""
@@ -444,12 +488,24 @@ class Scout:
                 for t in self.mem.open_tasks(self.mission_id)
                 if t.kind.startswith("explore_sector:")
             ),
+            # Priority first, then distance. Priority is what semantic memory
+            # sets (seed_sector_tasks): sectors earlier missions found victims
+            # in get swept before empty ground. Without this term the priority
+            # bump changes nothing and recall is inert while appearing to work —
+            # the same failure shape as an l2 index answering a cosine query.
+            #
+            # Safe by construction on a cold database: with no memories every
+            # sector is priority 1, `-1` is constant, and this key is
+            # order-identical to the distance-only one it replaces. X2's
+            # byte-identical-log condition holds unless memories exist.
+            #
             # Ties break on the sector name, never on the row id. `str(t.id)` is a
             # freshly generated UUID, so two equidistant sectors were decided by
             # whichever id happened to sort first — the same seed picked C1 on one
             # run and A3 on the next, and X2 could not pass. The name is stable
             # across runs and carries the same "pick one, consistently" intent.
             key=lambda t: (
+                -t.priority,
                 abs((t.target[0] or 0) - robot.x) + abs((t.target[1] or 0) - robot.y),
                 t.kind,
             ),
@@ -654,19 +710,25 @@ class Scout:
         return (x, y)
 
 
-def seed_sector_tasks(mem, mission_id, world_map) -> list:
+def seed_sector_tasks(mem, mission_id, world_map, hot_sectors=()) -> list:
     """One `explore_sector` task per sector at mission bootstrap (FR-16).
 
     The sector id rides in the task kind so a scout can read it back without a
     second lookup, and so the event ticker says `explore_sector:C2` rather than
     an opaque uuid — legible to a judge watching the demo.
+
+    `hot_sectors` is where semantic memory enters the mission: sectors earlier
+    runs on this map found victims in are seeded at a higher priority, so the
+    fleet sweeps them first. Setting priority at creation rather than bumping it
+    afterwards keeps this to one parameter instead of a new SDK method.
     """
+    hot = set(hot_sectors)
     return [
         mem.create_task(
             mission_id,
             f"explore_sector:{sector['id']}",
             (sector["x"], sector["y"]),
-            priority=1,
+            priority=2 if sector["id"] in hot else 1,
         )
         for sector in world_map.sectors
     ]

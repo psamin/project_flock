@@ -23,7 +23,7 @@ from agents.planning import (
     role_card,
     task_lines,
 )
-from bedrock.adapter import RECORD, REPLAY, BedrockAdapter, Plan
+from bedrock.adapter import LIVE, RECORD, REPLAY, BedrockAdapter, Plan
 from fleetmem.fake import FakeFleetMem
 from fleetmem.types import Task
 from sim.world import Robot
@@ -246,7 +246,11 @@ class _AlwaysAnswers:
     and the concurrency rules from whether a cassette happens to hit."""
 
     def __init__(self, live=False):
-        self.mode = RECORD if live else REPLAY
+        # LIVE rather than RECORD: the two used to be interchangeable here, and
+        # are not any more. RECORD now calls the adapter synchronously so the
+        # cassette traces the trajectory replay will retrace; LIVE is the async
+        # path these tests are about.
+        self.mode = LIVE if live else REPLAY
 
     def knows_plan(self, *args, **kwargs):
         return True
