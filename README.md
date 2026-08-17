@@ -178,4 +178,4 @@ credentials at all, and `plans.chosen.source` records which one decided — so
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
