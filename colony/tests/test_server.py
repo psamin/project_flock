@@ -189,6 +189,35 @@ def test_metrics_are_not_recomputed_every_tick(mission):
     assert mission._metrics_at == computed_at, "recomputed on a consecutive tick"
 
 
+def test_finished_mission_bypasses_the_metrics_cache(mission):
+    """The final rescue can happen between scheduled metric refreshes.
+
+    Once the world finishes, the recorded result must include every event
+    rather than reusing the previous tick's cached scoreboard values.
+    """
+    mission.tick_once()  # populate the metrics cache
+
+    events = []
+    for victim_id, victim in mission.world.victims.items():
+        victim.state = "stabilized"
+        events.append(
+            (
+                "m1",
+                "victim_stabilized",
+                {"tick": mission.world.tick, "victim": victim_id},
+            )
+        )
+
+    mission.mem.log_events(mission.mission_id, events)
+    assert mission.world.finished
+
+    final = mission.metrics()
+
+    assert final["victims_stabilized"] == len(mission.world.victims)
+    assert final["rescue_rate"] == 1.0
+    assert final["ticks"] == mission.world.tick
+
+
 def test_provenance_resolves_the_memories_behind_a_decision(mission):
     """FR-17's payoff and §3.6's bubble click. `based_on` stores observation ids
     because that is the right thing to store; a panel showing a column of UUIDs
