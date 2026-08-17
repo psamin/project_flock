@@ -154,21 +154,37 @@ setting).
 Distributed vector indexing carries weight in **two** places, which is worth
 separating because they pull in opposite directions:
 
-| | scope | index | what it answers |
-|---|---|---|---|
-| reconcile gate | *within* one mission | `obs_embedding_idx (mission_id, …)` | is this the victim we already know about? |
-| tactical recall | *across every mission and map* | `mm_situation_idx (embedding)` | what do we know about a moment like this? |
+| | scope | index | what it answers | plan |
+|---|---|---|---|---|
+| tactical recall | *across every mission and map* | `mm_situation_idx (embedding)` | what do we know about a moment like this? | **`vector search`** |
+| reconcile gate | *within* one mission | `obs_embedding_idx (mission_id, …)` | is this the victim we already know about? | **`FULL SCAN`**, on purpose |
 
 Both are cosine (`vector_cosine_ops`, `<=>`) and they scope in opposite
-directions, which is the whole reason they are worth reading together. The gate
-prefixes on `mission_id`, and a prefixed vector index is used *only* when the
-prefix is constrained to an exact value — a filter that is not a prefix column
-is applied after the top-k. Tactical recall has no prefix at all, because any
-scope would partition exactly the knowledge it exists to generalise.
+directions, which is the whole reason they are worth reading together. Tactical
+recall has no prefix at all, because any scope would partition exactly the
+knowledge it exists to generalise — and that is the one carrying the weight
+here: it ranks every lesson from every past mission against "what does this
+moment resemble?", and its plan is a real `vector search`.
+
+**The gate deliberately does not use the index, and it is worth saying so before
+a judge runs `EXPLAIN` and finds out.** It constrains `kind` and a 5-tile
+pos box alongside the vector order-by. Neither is a prefix column of
+`obs_embedding_idx`, and v26.2 will not serve an approximate top-k it then has
+to filter — it declines the index rather than risk dropping a real match.
+Measured at 1047 rows, so this is a property of the query shape, not of demo
+scale.
+
+That is the correct trade. An approximate scan that misses a duplicate makes the
+fleet dispatch two robots to one victim; a full scan over one mission's
+observations does not, and the merge has to be exact for the belief model to
+mean anything. Restoring the index would mean filtering after the top-k, which
+is precisely the bug the gate exists to avoid.
 
 Get either wrong and the query still returns perfectly plausible rows, which is
 why `tests/test_schema.py` and `tests/test_recall.py` assert the `EXPLAIN` plan
-rather than the results.
+rather than the results — including
+`test_the_reconcile_gate_query_uses_the_index`, kept as a **strict xfail** so
+the gap stays visible and cannot quietly regress into a pass nobody rechecked.
 
 **AWS Bedrock** — Claude for planning at decision boundaries, Titan Text
 Embeddings V2 at 512 dims for observations. Rate-capped per §3.5, with rules as
@@ -178,4 +194,4 @@ credentials at all, and `plans.chosen.source` records which one decided — so
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).

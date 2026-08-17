@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from agents.planning import Planner
 from bedrock.adapter import REPLAY, adapter_from_env
 from console import questions as console_questions
 from console.reader import NotReadOnly, ReadOnlyReader
+from fleetmem.client import LEASE_SECONDS
 from orchestrator.lost import LostWatch
 from sim import interventions as interventions_mod
 from sim import metrics as metrics_mod
@@ -47,6 +49,14 @@ METRICS_EVERY_TICKS = TICK_HZ
 # running it four times a second would ask the same question four times for the
 # same answer.
 LOST_SCAN_EVERY_TICKS = TICK_HZ
+# How many operator disruptions the coordination feed keeps in mind when
+# deciding whether a decision was a response to one. A handful: the demo drops
+# two or three, and an unbounded list would tag half a mission as "adapting".
+DISRUPTIONS_REMEMBERED = 6
+# How long after a disruption a nearby decision still counts as a response to
+# it. 40 ticks is 10s at 4 Hz — long enough for a scout to fly over, report, and
+# a worker to re-plan; short enough that unrelated later work is not claimed.
+DISRUPTION_WINDOW_TICKS = 40
 
 # Semantic memory (§4.0): derive tactics when a mission ends. Retrieval happens
 # per plan boundary inside the agents; this switch governs the write, and gives
@@ -171,6 +181,18 @@ class Mission:
         # Separate from `self.mem` on purpose: the sim writes and the console
         # does not, so they are different identities against the same cluster.
         self._reader: ReadOnlyReader | None = None
+        # Robots killed on cue (§3.6). They stay in `agents` — a killed robot is
+        # not gone, it has stopped answering, and the difference is the point:
+        # its rows are still in fleet memory and its lease is still ticking down.
+        # robot id -> when it was killed. The time is what lets the fleet panel
+        # say how long until its lease lapses; `in` still reads the same.
+        self.disabled: dict[str, Any] = {}
+        # Operator disruptions, newest last, for the coordination feed.
+        self.recent_disruptions: list[dict[str, Any]] = []
+        # Cumulative, per mission, and never trimmed: `recent_disruptions` is
+        # capped for display, and a count used to qualify a published number
+        # must not silently forget the seventh intervention.
+        self.interference = {"interventions": 0, "robots_killed": 0}
         self._build(coordinated=True)
 
     # --- the commander console (FR-10) ------------------------------------
@@ -213,6 +235,11 @@ class Mission:
         )
         self._metrics: dict[str, Any] = {}
         self._metrics_at = -1
+        # A restart is a new mission; nobody is dead in it yet, and nothing has
+        # been broken in it either.
+        self.disabled = {}
+        self.recent_disruptions = []
+        self.interference = {"interventions": 0, "robots_killed": 0}
         # Lane 4's heartbeat scan (§4.4). Scoped to this fleet because `robots`
         # has no mission_id — see LostWatch. Live only: `run_mission` is the
         # seeded, deterministic path §3.5 records the golden run from, and
@@ -308,6 +335,64 @@ class Mission:
         self._metrics_at = self.world.tick
         return {**self.world.metrics(), **self._metrics}
 
+    def _held_by(self, robot_id: str) -> Any:
+        """The task this robot is working, or None.
+
+        Workers hold `task`; scouts hold `sector_task`. Neither is visible in
+        `open_tasks` while its lease is live, which is the whole point of the
+        lease — so the agent is the only place to ask.
+        """
+        agent = self.agents.get(robot_id)
+        return getattr(agent, "task", None) or getattr(agent, "sector_task", None)
+
+    def kill_robot(self, robot_id: str) -> dict[str, Any]:
+        """Stop a robot dead, mid-task, on cue (§3.6, FR-5).
+
+        Nothing is released and nothing is reassigned. The robot simply stops
+        stepping, which stops its heartbeat, which stops its lease renewals —
+        and 15 seconds later `claim_task`'s expiry predicate makes its work
+        claimable by anyone. Recovery is the absence of a mechanism, and this
+        button is the only honest way to show that.
+
+        AUDIT B measured 0 contended claims in 31 across a normal run (B-5), so
+        the takeover branch — the whole "why a database and not a queue"
+        argument — never executes on its own. This is what makes it execute in
+        front of someone.
+
+        Deliberately not `release_task`: releasing would be a second recovery
+        path racing the lease, and the claim this demonstrates is that there is
+        no second path.
+        """
+        if robot_id not in self.agents:
+            return {"error": f"no robot {robot_id!r} in this mission"}
+        if robot_id in self.disabled:
+            return {"error": f"{robot_id} is already down"}
+
+        self.disabled[robot_id] = datetime.now(timezone.utc)
+        self.interference["robots_killed"] += 1
+        # Asked of the agent, not of `open_tasks`. `open_tasks` returns what is
+        # *claimable* — open, or claimed on a lapsed lease — so a task being
+        # actively held on a live lease is deliberately absent from it. Looking
+        # there for the robot's current work finds nothing, every time.
+        held = [t for t in (self._held_by(robot_id),) if t is not None]
+        self.mem.log_event(
+            self.mission_id,
+            robot_id,
+            "robot_killed",
+            {"held_tasks": [str(t.id) for t in held], "tick": self.world.tick},
+        )
+        return {
+            "killed": robot_id,
+            "tick": self.world.tick,
+            # What is now sitting on an un-renewed lease, so a viewer knows what
+            # to watch for someone else to pick up.
+            "orphaned_tasks": [
+                {"id": str(t.id), "kind": t.kind, "target": list(t.target)}
+                for t in held
+            ],
+            "lease_seconds": LEASE_SECONDS,
+        }
+
     def _lessons_known(self) -> int:
         """How many tactics the fleet is carrying into this mission.
 
@@ -342,6 +427,165 @@ class Mission:
             return best.pos
         robot = next(iter(self.world.robots.values()), None)
         return None if robot is None else (robot.x, robot.y)
+
+    def coordination(self, limit: int = 12) -> list[dict[str, Any]]:
+        """Decisions, each named with the robot whose belief caused it (§3.6).
+
+        The ticker says what happened. This says who told whom, which is the
+        product: `m1` went to (12,10) because `s2` wrote an observation there.
+
+        There is no message bus to tap — robots never talk to each other, they
+        read and write rows — so a feed of rows *is* the coordination feed. Every
+        line here is one `plans` row joined to the `observations` in its
+        `based_on`, which is the same join the commander console answers
+        "why did robot X do that" with; the only new thing is streaming it.
+
+        A plan citing only its own author's beliefs is not coordination, it is a
+        robot acting on what it personally saw, so `cross_agent` marks the
+        difference rather than letting every line look like teamwork.
+        """
+        beliefs = {b.id: b for b in self.mem.get_beliefs(self.mission_id)}
+        out: list[dict[str, Any]] = []
+        for plan in self.mem.plans_for(self.mission_id)[-limit:]:
+            responds_to = self._disruption_behind(plan, beliefs)
+            sources = [beliefs[b] for b in (plan.based_on or []) if b in beliefs]
+            # Whose knowledge this robot acted on, excluding its own.
+            others = sorted(
+                {b.robot_id for b in sources if b.robot_id != plan.robot_id}
+            )
+            lead = max(sources, key=lambda b: b.sightings, default=None)
+            out.append(
+                {
+                    "robot": plan.robot_id,
+                    "trigger": plan.trigger,
+                    "rationale": plan.rationale,
+                    "chosen": plan.chosen or {},
+                    "source": (plan.chosen or {}).get("source", "rules"),
+                    "cross_agent": bool(others),
+                    "informed_by": others,
+                    "lead_belief": None
+                    if lead is None
+                    else {
+                        "kind": lead.kind,
+                        "x": lead.pos[0],
+                        "y": lead.pos[1],
+                        "author": lead.robot_id,
+                        "sightings": lead.sightings,
+                        "confidence": round(lead.confidence, 2),
+                    },
+                    "sources": len(sources),
+                    # Set when this decision looks like a response to something
+                    # the operator broke: a belief inside the blast radius,
+                    # written after it landed.
+                    "responds_to": responds_to,
+                }
+            )
+        out.reverse()  # newest first; the feed reads top-down
+        return out
+
+    def fleet(self) -> list[dict[str, Any]]:
+        """Every robot, what it holds, and what it last decided (§3.6).
+
+        The map shows where robots are; the ticker shows what happened. Neither
+        answers "what is each unit doing right now, and why" without clicking
+        through them one at a time, which is not a question an operator should
+        have to ask six times.
+
+        Lease seconds are the load-bearing column. A held task is invisible in
+        `open_tasks` until its lease lapses, so the countdown is the only place
+        the takeover mechanism is legible before it fires — and it is what makes
+        the kill-a-robot beat readable rather than fifteen seconds of nothing.
+        """
+        now = datetime.now(timezone.utc)
+        latest: dict[str, Any] = {}
+        for plan in self.mem.plans_for(self.mission_id):
+            latest[plan.robot_id] = plan
+
+        out: list[dict[str, Any]] = []
+        for robot_id, robot in self.world.robots.items():
+            task = self._held_by(robot_id)
+            plan = latest.get(robot_id)
+            # A live robot renews its lease every few ticks, so there is no
+            # countdown to show — "renewing" is the true statement. A killed one
+            # stops renewing, and the row becomes claimable LEASE_SECONDS after
+            # its last heartbeat.
+            #
+            # Estimated from the kill time rather than read from the row: the
+            # SDK has no task-by-id read, and a held task is deliberately absent
+            # from `open_tasks` until its lease lapses. Marked `approx` so the
+            # UI can say "~7s" and never imply it queried the lease.
+            lease_left = None
+            killed_at = self.disabled.get(robot_id)
+            if task is not None and killed_at is not None:
+                elapsed = (now - killed_at).total_seconds()
+                lease_left = max(0, round(LEASE_SECONDS - elapsed))
+            out.append(
+                {
+                    "id": robot_id,
+                    "role": robot.role,
+                    "status": "down" if robot_id in self.disabled else robot.status,
+                    "down": robot_id in self.disabled,
+                    "x": robot.x,
+                    "y": robot.y,
+                    "battery": robot.battery,
+                    "task": None
+                    if task is None
+                    else {
+                        "kind": task.kind,
+                        "target": list(task.target),
+                        "lease_seconds_left": lease_left,
+                        "lease_state": "renewing" if lease_left is None else "lapsing",
+                        "lease_approx": lease_left is not None,
+                    },
+                    "last_decision": None
+                    if plan is None
+                    else {
+                        "rationale": plan.rationale,
+                        "trigger": plan.trigger,
+                        "source": (plan.chosen or {}).get("source", "rules"),
+                        "sources": len(plan.based_on or []),
+                    },
+                }
+            )
+        out.sort(key=lambda r: (r["role"], r["id"]))
+        return out
+
+    def _disruption_behind(self, plan: Any, beliefs: dict) -> dict[str, Any] | None:
+        """The operator disruption this decision appears to answer, if any.
+
+        An intervention already changes the fleet's behaviour — beliefs update,
+        routes re-cost, unreachable work gets handed back — but on screen that
+        reads as robots wandering differently. This is what turns it into "I
+        dropped fire, a scout reported it, and a lifter changed its mind".
+
+        Attribution is deliberately conservative and stated rather than implied:
+        a cited belief must sit inside the blast radius *and* have been observed
+        after the disruption landed. Correlation, not proof — a robot may have
+        re-planned for its own reasons — so the field is named `responds_to` and
+        the UI says "after", never "because of".
+        """
+        if not self.recent_disruptions:
+            return None
+        sources = [beliefs[b] for b in (plan.based_on or []) if b in beliefs]
+        if not sources:
+            return None
+        for event in reversed(self.recent_disruptions):
+            if self.world.tick - event["tick"] > DISRUPTION_WINDOW_TICKS:
+                continue
+            for belief in sources:
+                near = (
+                    abs(belief.pos[0] - event["x"]) + abs(belief.pos[1] - event["y"])
+                    <= event["radius"]
+                )
+                if near:
+                    return {
+                        "kind": event["kind"],
+                        "label": event["label"],
+                        "x": event["x"],
+                        "y": event["y"],
+                        "tick": event["tick"],
+                    }
+        return None
 
     def provenance(self, robot_id: str, limit: int = 5) -> list[dict[str, Any]]:
         """Why this robot did what it did, with its sources resolved (FR-17).
@@ -384,7 +628,9 @@ class Mission:
         # fleet rather than in us.
         self._apply_interventions()
         actions = {
-            robot_id: agent.step(self.world) for robot_id, agent in self.agents.items()
+            robot_id: agent.step(self.world)
+            for robot_id, agent in self.agents.items()
+            if robot_id not in self.disabled
         }
         frame = self.world.step(actions)
         # One round trip for the whole tick's events rather than one each: a
@@ -414,6 +660,23 @@ class Mission:
         except Exception as exc:  # noqa: BLE001 - a button, not a mission
             print(f"[sim] intervention listener failed: {type(exc).__name__}: {exc}")
             return []
+        for i in pending:
+            # Remembered so the coordination feed can say which decisions came
+            # *after* an operator broke something, and near enough to it to
+            # plausibly be a response. Without this the fleet does adapt and it
+            # reads as robots wandering differently.
+            self.recent_disruptions.append(
+                {
+                    "kind": i.kind,
+                    "label": i.label,
+                    "x": i.origin[0],
+                    "y": i.origin[1],
+                    "radius": i.radius,
+                    "tick": self.world.tick,
+                }
+            )
+        self.interference["interventions"] += len(pending)
+        del self.recent_disruptions[:-DISRUPTIONS_REMEMBERED]
         return [self.world.apply_intervention(i) for i in pending]
 
     def _scan_for_lost(self, frame: Any) -> list[str]:
@@ -448,13 +711,61 @@ class Mission:
                 )
         return self.lost_watch.lost_ids()
 
+    @property
+    def fleet_lost(self) -> bool:
+        """Every robot is down, so nothing further can happen.
+
+        `world.finished` cannot see this: it ends a mission when every victim is
+        stabilized or lost, and with no robots left that is when the last vitals
+        deadline passes — tick 700 on Aftershock. A fleet killed at tick 127
+        therefore left the mission running for **573 ticks, about 143 seconds**,
+        during which nothing could occur and nothing on screen said so.
+
+        An operator who clicks "kill a robot" until the fleet is gone is
+        entitled to be told that is what happened.
+        """
+        return bool(self.agents) and len(self.disabled) >= len(self.agents)
+
     async def run(self) -> None:
         self.running = True
-        while self.running and not self.world.finished:
+        while self.running and not self.world.finished and not self.fleet_lost:
             frame = self.tick_once()
             await self._broadcast(frame)
             await asyncio.sleep(TICK_SECONDS)
         self.running = False
+        if self.fleet_lost and not self.world.finished:
+            # Ends the mission rather than leaving it ticking, and says why in
+            # the log the ticker reads from, so the reason reaches the screen.
+            self.mem.log_event(
+                self.mission_id,
+                "world",
+                "fleet_lost",
+                {
+                    "tick": self.world.tick,
+                    "robots": sorted(self.disabled),
+                    "unrescued": sum(
+                        1
+                        for v in self.world.victims.values()
+                        if v.state not in ("stabilized", "lost")
+                    ),
+                },
+            )
+            self.record_run()
+            await self._broadcast(
+                {
+                    "kind": "diff",
+                    "tick": self.world.tick,
+                    "events": [
+                        {
+                            "tick": self.world.tick,
+                            "actor": "world",
+                            "verb": "fleet_lost",
+                            "detail": {"robots": sorted(self.disabled)},
+                        }
+                    ],
+                    "metrics": self.metrics(),
+                }
+            )
         if self.world.finished:
             # Recorded the moment the mission ends, not when somebody navigates
             # away from it: a run that has just finished is exactly the one the
@@ -467,6 +778,14 @@ class Mission:
         self.last_runs[self.mode] = {
             **self.metrics(),
             "finished": self.world.finished,
+            # Whether an operator broke this run. §4.7's comparison is the
+            # number the whole project rests on, and interventions are a
+            # headline feature — the one thing they must not do is quietly
+            # poison it. A coordinated run whose fleet was killed scores like
+            # the baseline, and without this the panel would publish
+            # "coordination gain 0%" from a run somebody sabotaged.
+            "interference": dict(self.interference),
+            "interfered": any(self.interference.values()),
         }
         if self.world.finished and self.coordinated:
             self._remember()
@@ -727,6 +1046,99 @@ async def console_catalog() -> dict[str, Any]:
     }
 
 
+@app.get("/api/fleet")
+async def fleet() -> dict[str, Any]:
+    """Per-robot status: what it holds, its lease countdown, its last decision."""
+    return {"tick": mission.world.tick, "robots": mission.fleet()}
+
+
+@app.get("/api/coordination")
+async def coordination(limit: int = 12) -> dict[str, Any]:
+    """The coordination feed: decisions, each with the robot that caused it.
+
+    Read straight off `plans` joined to `observations` — the fleet's actual
+    communication, since it has no other kind.
+    """
+    return {"tick": mission.world.tick, "lines": mission.coordination(limit=limit)}
+
+
+@app.post("/api/failure/kill-robot")
+async def kill_robot(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Stop one robot, on cue (§3.6's first failure beat, FR-5).
+
+    With no `robot` named, kills whichever robot currently holds work — the only
+    choice that produces the beat worth showing, since killing an idle robot
+    orphans nothing and looks like nothing happened.
+    """
+    body = body or {}
+    robot_id = body.get("robot")
+    if robot_id is None:
+        # Whoever is actually mid-job. Asked of the agents, because a task on a
+        # live lease is deliberately absent from `open_tasks`.
+        live = [r for r in mission.agents if r not in mission.disabled]
+        robot_id = next(
+            (r for r in live if mission._held_by(r) is not None),
+            next(iter(live), None),
+        )
+    if robot_id is None:
+        return {"error": "every robot in this mission is already down"}
+    return mission.kill_robot(robot_id)
+
+
+@app.get("/api/memory")
+async def memory_rail() -> dict[str, Any]:
+    """Row counts per memory table, for this mission (§3.6, §4.0).
+
+    The data layer is the thesis and it is the one part of the demo with nothing
+    on screen: a judge watching sees robots moving and has to take on faith that
+    any of it is going through a database. This is the cheapest possible answer —
+    live counts, grouped by the four memory types the schema is organised around,
+    so "the fleet is writing to CockroachDB right now" is something you can watch
+    rather than something you are told.
+
+    Read-only, and it goes through the same `ReadOnlyReader` the console uses, so
+    it inherits the `commander` grant rather than opening a second write-capable
+    path for the sake of a HUD.
+    """
+    if not mission.console_available:
+        return {"available": False, "memory": mission.memory_kind}
+
+    # Grouped as §4.0 groups them. `mission_memories` is cross-mission by
+    # definition, so it is counted whole rather than scoped to this run.
+    scoped = {
+        "working": ("tasks", "victims", "hazards"),
+        "episodic": ("observations",),
+        "provenance": ("plans", "events"),
+    }
+    counts: dict[str, dict[str, int]] = {}
+    try:
+        reader = mission.reader()
+        for group, tables in scoped.items():
+            counts[group] = {
+                table: reader.read(
+                    f"SELECT count(*) AS n FROM {table} WHERE mission_id = %s",
+                    (mission.mission_id,),
+                )[0]["n"]
+                for table in tables
+            }
+        counts["semantic"] = {
+            "mission_memories": reader.read(
+                "SELECT count(*) AS n FROM mission_memories", ()
+            )[0]["n"]
+        }
+    except psycopg.Error as exc:
+        return {"available": False, "memory": mission.memory_kind, "error": str(exc)}
+
+    return {
+        "available": True,
+        "memory": mission.memory_kind,
+        "mission_id": str(mission.mission_id),
+        "tick": mission.world.tick,
+        "counts": counts,
+        "total": sum(n for group in counts.values() for n in group.values()),
+    }
+
+
 @app.post("/api/console/ask")
 async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
     """Answer one canned question from live fleet memory, read-only.
@@ -786,6 +1198,37 @@ async def console_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
         "summary": result.summary,
         "rows": json.loads(json.dumps(result.rows, default=str)),
     }
+
+
+@app.post("/api/compare")
+async def compare() -> dict[str, Any]:
+    """Run both modes headless on one seed and return §4.7's comparison.
+
+    Producing this live costs a mission per mode at 4 Hz — coordinated finishes
+    around tick 312 and baseline runs to ~560 *because it fails* — so roughly
+    three and a half minutes of watching, in a video that has to be under three.
+    The same two missions run headless in seconds because nothing is throttled
+    to a frame rate.
+
+    Deliberately against the in-memory fake and a fresh store per arm, not the
+    live mission's cluster: this must not write two more missions' worth of rows
+    into the database the demo is showing, and the baseline must not inherit the
+    coordinated run's beliefs. The seed is the running mission's, so the numbers
+    describe the same world on screen.
+    """
+    from fleetmem.fake import FakeFleetMem
+    from sim.mission import compare_modes
+
+    result = await asyncio.to_thread(
+        compare_modes,
+        load_map(mission.map_path),
+        FakeFleetMem,
+        seed=mission.seed or 0,
+    )
+    payload = result.to_json()
+    payload["headless"] = True
+    payload["seed"] = mission.seed or 0
+    return payload
 
 
 @app.get("/api/runs")

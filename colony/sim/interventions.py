@@ -237,9 +237,7 @@ def would_strand(world: Any, intervention: Intervention) -> list[str]:
 
     blocked = set(intervention.tiles)
     pending = [
-        v
-        for v in world.victims.values()
-        if v.state not in ("stabilized", "lost")
+        v for v in world.victims.values() if v.state not in ("stabilized", "lost")
     ]
     if not pending:
         return []
@@ -363,7 +361,9 @@ class InterventionWatch:
             self._feed = None
 
 
-def _ground_reachable(world: Any, extra_blocked: set[tuple[int, int]]) -> set[tuple[int, int]]:
+def _ground_reachable(
+    world: Any, extra_blocked: set[tuple[int, int]]
+) -> set[tuple[int, int]]:
     """Flood fill from every ground robot over tiles a lifter could eventually
     open. Walls and fire stop it; debris and rubble do not."""
     starts = [(r.x, r.y) for r in world.robots.values() if not r.flying]

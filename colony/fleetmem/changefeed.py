@@ -325,6 +325,4 @@ class HazardFeed(_RowFeed):
 
     def interventions(self, timeout: float = 0.0) -> list[HazardChange]:
         """Only live operator interventions."""
-        return [
-            c for c in self.poll(timeout) if c.is_intervention and c.active
-        ]
+        return [c for c in self.poll(timeout) if c.is_intervention and c.active]

@@ -49,16 +49,28 @@ def health(monkeypatch):
     return ask
 
 
-def test_the_default_configuration_reports_no_aws_calls(health):
-    """`make sim` on a bare laptop. Every robot runs on rules, and the numbers
-    say so rather than leaving it to be inferred from the absence of a log."""
+def test_the_default_configuration_replays_without_calling_aws(health):
+    """`make sim` on a bare laptop: Claude's recorded decisions, no network.
+
+    This used to assert `cassette_entries: 0` — the honest reading of the day it
+    was written, because nothing loaded the committed cassette. The file was
+    checked in so that "a seeded demo run reproduces with no AWS credentials and
+    no venue wifi", and `adapter_from_env` never supplied its path, so every
+    lookup missed and every robot fell through to rules. The default now loads
+    it.
+
+    `calls` staying 0 is the part that still matters and is still asserted:
+    replay must not touch AWS. What changed is that there is now something to
+    replay.
+    """
     bedrock = health()["bedrock"]
-    assert bedrock == {
-        "requested": "replay",
-        "mode": "replay",
-        "calls": 0,
-        "cassette_entries": 0,
-    }
+    assert bedrock["requested"] == "replay"
+    assert bedrock["mode"] == "replay"
+    assert bedrock["calls"] == 0, "replay reached the network"
+    assert bedrock["cassette_entries"] > 0, (
+        "the committed cassette is not being loaded — every decision will fall "
+        "through to rules while the mode still reads 'replay'"
+    )
 
 
 def test_a_credential_downgrade_is_visible_as_a_disagreement(health, monkeypatch):
@@ -88,7 +100,14 @@ def test_an_empty_cassette_is_distinguishable_from_a_loaded_one(health, tmp_path
     """Replay with nothing to replay is the other silent no-op: every
     `knows_plan` misses, so the fleet runs on rules while the mode still reads
     `replay`. The entry count is what separates the two."""
-    assert health()["bedrock"]["cassette_entries"] == 0
+    # An explicitly empty cassette, rather than the default — the default now
+    # carries the committed golden run, and pointing at a real-but-empty file is
+    # the case this test is actually about.
+    empty = tmp_path / "empty.json"
+    empty.write_text("{}")
+    assert (
+        health(COLONY_BEDROCK_CASSETTE=str(empty))["bedrock"]["cassette_entries"] == 0
+    )
 
     cassette = tmp_path / "cassette.json"
     cassette.write_text(json.dumps({"plan:abc": "{}", "embed:def": [0.0, 1.0]}))

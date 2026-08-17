@@ -69,6 +69,30 @@ export async function refreshComparison() {
       box.textContent = co || base ? "run the other mode to compare" : "";
       return;
     }
+    // A run somebody broke is not a measurement. Interventions are a headline
+    // feature, and the one thing they must not do is quietly poison §4.7's
+    // number: a coordinated run whose fleet was killed scores like the
+    // baseline, and publishing that as "coordination gain 0%" would be the
+    // demo lying about its own central claim.
+    const spoiled = [
+      ["coordinated", co],
+      ["baseline", base],
+    ].filter(([, r]) => r.interfered);
+    if (spoiled.length) {
+      const what = spoiled
+        .map(([mode, r]) => {
+          const i = r.interference || {};
+          const bits = [];
+          if (i.interventions) bits.push(`${i.interventions} disruption(s)`);
+          if (i.robots_killed) bits.push(`${i.robots_killed} robot(s) killed`);
+          return `${mode}: ${bits.join(", ")}`;
+        })
+        .join(" · ");
+      box.innerHTML =
+        `<b>not a fair comparison</b> — an operator interfered with this run ` +
+        `(${what}). Restart both modes to measure again.`;
+      return;
+    }
     if (!co.finished || !base.finished) {
       // Comparing a finished run against one that was cut short would report a
       // coordination gain the fleet never earned, in either direction.
@@ -119,11 +143,14 @@ export const TICKER_TEXT = {
   restocked: () => "restocked kits",
   fire_spread: (e) => `fire spread to ${e.detail.x},${e.detail.y}`,
   aftershock: () => "AFTERSHOCK — the map just changed",
+  fleet_lost: (e) =>
+    `the fleet is gone — ${(e.detail.robots || []).join(", ")} are down, mission over`,
   robot_lost: (e) => `SIGNAL LOST — silent ${e.detail.silent_for_seconds}s`,
   robot_recovered: () => "back on the air",
 };
 
 export const TICKER_CLASS = {
+  fleet_lost: "bad",
   victim_found: "found",
   victim_stabilized: "good",
   victim_lost: "bad",
@@ -367,5 +394,242 @@ export async function initInterventions() {
   // not to do.
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && armed) disarm();
+  });
+}
+
+// --- the data layer, on screen (§3.6) ----------------------------------------
+
+/** Live row counts per memory type, so CockroachDB is watchable not asserted.
+ *
+ * The data layer is the thesis and it was the one part of the demo with nothing
+ * to look at: a viewer saw robots moving and had to take on faith that any of it
+ * went through a database. Grouped by the four memory types the schema is
+ * organised around, so the four-memory claim is legible at a glance.
+ *
+ * Zeros render dimmer rather than being hidden. A memory type with no rows is
+ * worth seeing — that is how a gap gets closed rather than quietly shipped.
+ */
+export async function refreshMemoryRail() {
+  const box = document.getElementById("memory-rail");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/memory")).json();
+    if (!data.available) {
+      box.textContent = `fleet memory: ${data.memory} — no cluster, counts unavailable`;
+      return;
+    }
+    const groups = Object.entries(data.counts)
+      .map(([group, tables]) => {
+        const cells = Object.entries(tables)
+          .map(([t, n]) => `<span class="${n ? "" : "zero"}">${t} <b>${n}</b></span>`)
+          .join(" ");
+        return `<span class="grp"><em>${group}</em> ${cells}</span>`;
+      })
+      .join("");
+    box.innerHTML =
+      `<span class="grp"><em>cockroachdb</em> <b>${data.total}</b> rows</span>` +
+      groups;
+  } catch {
+    /* the rail is decoration; never let it break the render loop */
+  }
+}
+
+/** §3.6's first failure beat: kill a robot, watch its work get taken over.
+ *
+ * AUDIT B measured zero contended claims across a whole normal run, so the
+ * lease-takeover branch — the entire "why a database and not a queue" argument
+ * — never fires on its own. This is the button that fires it.
+ *
+ * The answer names the orphaned task and the remaining lease seconds, because
+ * the fifteen seconds of nothing happening is the part that needs narrating.
+ */
+export function initKillRobot() {
+  const button = document.getElementById("kill-robot");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const res = await (
+        await fetch("/api/failure/kill-robot", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      ).json();
+      const box = document.getElementById("comparison");
+      if (!box) return;
+      if (res.error) {
+        box.textContent = res.error;
+      } else {
+        const orphan = res.orphaned_tasks?.[0];
+        box.innerHTML =
+          `<b>${res.killed} is down</b> at tick ${res.tick}` +
+          (orphan
+            ? ` — holding ${orphan.kind} at ${orphan.target.join(",")}. ` +
+              `Its lease lapses in ${res.lease_seconds}s, then anyone can claim it.`
+            : " — it was not holding any work.");
+      }
+    } catch {
+      /* a demo aid; never let it break the render loop */
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+// --- the coordination feed (§3.6) --------------------------------------------
+
+const VERB = {
+  claim_task: "claimed",
+  explore: "swept",
+  return_to_base: "returned to base",
+};
+
+/** "m1 claimed deliver_kit at 12,10 — because s2 reported a victim there."
+ *
+ * Robots never message each other. Their only communication is rows, so a feed
+ * of rows is the coordination feed, and naming both ends of each one is the
+ * thesis stated in the demo's own words rather than in narration over it.
+ *
+ * Solo decisions are shown too, dimmed. Hiding them would make every visible
+ * line look like teamwork and quietly overstate the thing being demonstrated.
+ */
+export async function refreshCoordination() {
+  const box = document.getElementById("coordination");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/coordination?limit=14")).json();
+    if (!data.lines?.length) {
+      box.innerHTML = `<div class="co-empty">no decisions yet</div>`;
+      return;
+    }
+    box.innerHTML = data.lines
+      .map((ln) => {
+        const act = ln.chosen?.kind ?? VERB[ln.chosen?.action] ?? ln.trigger;
+        const at = ln.chosen?.target ? ` at ${ln.chosen.target.join(",")}` : "";
+        const brain = ln.source === "bedrock" ? "claude" : "rules";
+        const why = ln.cross_agent
+          ? `because <b>${ln.informed_by.join(", ")}</b> reported ` +
+            `${ln.lead_belief?.kind ?? "something"}` +
+            (ln.lead_belief ? ` at ${ln.lead_belief.x},${ln.lead_belief.y}` : "") +
+            (ln.lead_belief?.sightings > 1
+              ? ` (${ln.lead_belief.sightings} sightings)`
+              : "")
+          : `on what it saw itself`;
+        // "after", never "because of": a belief inside the blast radius written
+        // after the disruption is correlation, and the robot may have re-planned
+        // for its own reasons. Overclaiming here would be the one place this
+        // panel could mislead.
+        const after = ln.responds_to
+          ? `<span class="co-after">after ${ln.responds_to.label} ` +
+            `at ${ln.responds_to.x},${ln.responds_to.y}</span>`
+          : "";
+        return (
+          `<div class="co-line ${ln.cross_agent ? "crossed" : "solo"}` +
+          `${ln.responds_to ? " disrupted" : ""}">` +
+          `<span class="co-who">${ln.robot}</span> ${act}${at}` +
+          `<span class="co-why">${why}</span>` +
+          after +
+          `<span class="co-brain ${brain}">${brain}</span>` +
+          `</div>`
+        );
+      })
+      .join("");
+  } catch {
+    /* a panel; never let it break the render loop */
+  }
+}
+
+// --- the fleet panel (§3.6) --------------------------------------------------
+
+/** Every unit, what it holds, its lease countdown, and what it last decided.
+ *
+ * The map says where robots are and the ticker says what happened. Neither
+ * answers "what is each unit doing, and why" without clicking through them one
+ * at a time — six clicks for a question an operator asks continuously.
+ *
+ * The lease countdown is the column that earns its place: a held task is
+ * invisible in `open_tasks` until its lease lapses, so this is the only place
+ * the takeover mechanism can be watched *before* it fires. It is what turns the
+ * kill-a-robot beat from fifteen seconds of nothing into a visible timer.
+ */
+export async function refreshFleet() {
+  const box = document.getElementById("fleet");
+  if (!box) return;
+  try {
+    const data = await (await fetch("/api/fleet")).json();
+    box.innerHTML = (data.robots || [])
+      .map((r) => {
+        const job = r.task
+          ? `${r.task.kind} @ ${r.task.target.join(",")}` +
+            // "renewing" while the robot is alive, an approximate countdown
+            // once it is not. The tilde is load-bearing: this is derived from
+            // when the robot stopped, not read off the lease column.
+            (r.task.lease_seconds_left != null
+              ? ` <span class="lease ${r.task.lease_seconds_left <= 5 ? "low" : ""}">` +
+                `lapses ~${r.task.lease_seconds_left}s</span>`
+              : ` <span class="lease">lease renewing</span>`)
+          : `<span class="idle">idle</span>`;
+        const d = r.last_decision;
+        const why = d
+          ? `<span class="fl-why" title="${d.rationale.replace(/"/g, "&quot;")}">` +
+            `${d.rationale}</span>` +
+            `<span class="co-brain ${d.source === "bedrock" ? "claude" : "rules"}">` +
+            `${d.source === "bedrock" ? "claude" : "rules"}</span>`
+          : "";
+        return (
+          `<div class="fl-row ${r.down ? "down" : ""}">` +
+          `<span class="fl-id ${r.role}">${r.id}</span>` +
+          `<span class="fl-job">${r.down ? "<b>DOWN</b>" : job}</span>` +
+          why +
+          `</div>`
+        );
+      })
+      .join("");
+  } catch {
+    /* a panel; never let it break the render loop */
+  }
+}
+
+
+/** §4.7's comparison, without waiting three and a half minutes for it.
+ *
+ * Watching both modes play out costs a mission per arm at 4 Hz — coordinated
+ * finishes near tick 312, baseline runs to ~560 *because it fails* — which is
+ * longer than the entire video. The same two missions run headless in about
+ * two and a half seconds.
+ *
+ * Labelled as headless on screen. It is the same code path and the same seed as
+ * the mission being watched, but it is not the run on screen, and a number
+ * presented as though it were would be the demo overclaiming about itself.
+ */
+export function initCompare() {
+  const button = document.getElementById("compare");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    const box = document.getElementById("comparison");
+    button.disabled = true;
+    if (box) box.textContent = "running both modes on this seed…";
+    try {
+      const d = await (await fetch("/api/compare", { method: "POST" })).json();
+      const co = d.coordinated;
+      const base = d.baseline;
+      const lives = base.victims_lost - co.victims_lost;
+      if (box) {
+        box.innerHTML =
+          (lives > 0
+            ? `<b>${lives} more people died without shared memory</b> ` +
+              `(${co.victims_lost} vs ${base.victims_lost}) · `
+            : "") +
+          `rescued ${co.victims_stabilized}/${co.victims_total} coordinated ` +
+          `vs ${base.victims_stabilized}/${base.victims_total} baseline · ` +
+          `gain ${Math.round((d.coordination_gain ?? 0) * 100)}% ` +
+          `<span class="co-why">seed ${d.seed}, both modes run headless</span>`;
+      }
+    } catch {
+      if (box) box.textContent = "comparison failed — the mission is unaffected";
+    } finally {
+      button.disabled = false;
+    }
   });
 }

@@ -22,8 +22,10 @@ from typing import Any
 from uuid import UUID
 
 from agents import logistics, planning
+from sim import recall as recall_mod
 from agents.pathing import find_move_plan, find_path
 from agents.planning import BEDROCK, RULES
+
 # Both agent types report status on the same cadence and there is no reason for
 # them to disagree about it, so the constants have one home rather than two.
 from agents.worker import HEARTBEAT_EVERY_TICKS, RENEW_EVERY_TICKS
@@ -99,6 +101,9 @@ class Scout:
     # rules only, which is a complete scout.
     planner: Any = None
 
+    # Tactics retrieved for the current decision, so provenance can record
+    # which ones were in front of the model without retrieving twice.
+    recalled: list = field(default_factory=list)
     explored: set[tuple[int, int]] = field(default_factory=set)
     reported: set[tuple[str, int, int]] = field(default_factory=set)
     frontier_target: tuple[int, int] | None = field(default=None)
@@ -156,9 +161,7 @@ class Scout:
             self._heartbeat_at is None
             or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
         )
-        renew_due = (
-            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
-        )
+        renew_due = self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
         if beat_due:
             self.mem.heartbeat(
                 self.robot_id,
@@ -421,6 +424,33 @@ class Scout:
             if world.ground[y][x] != WALL
         ]
 
+    def _recall(self, robot: Any, candidates: list) -> list:
+        """Tactics from earlier missions that match this moment (§4.0 SEMANTIC).
+
+        Mirrors `Worker._recall` deliberately, including its two refusals: a
+        scout with no embedder cannot form a query vector, and a baseline scout
+        must not read what coordinated runs learned or the ON/OFF comparison
+        starts measuring its own history rather than coordination.
+
+        A scout has no `coordinated` flag — its baseline tell is an empty sector
+        share (`mission.py` hands it `sectors=()`), because seeded sector tasks
+        are the coordinated path. Retrieval failure costs this decision its
+        memory, never the mission.
+        """
+        if self.embedder is None:
+            self.recalled = []
+            return []
+        try:
+            situation = recall_mod.situation_of(
+                robot, self.mem.get_beliefs(self.mission_id), candidates
+            )
+            self.recalled = recall_mod.recall(self.mem, self.embedder, situation)
+            self.mem.mark_recalled([m.id for m in self.recalled])
+        except Exception as exc:  # noqa: BLE001 - a missing memory is not a stall
+            print(f"[{self.robot_id}] could not recall tactics: {exc!r}")
+            self.recalled = []
+        return self.recalled
+
     def _sector_coverage(self, world: World, sector_id: str) -> float:
         tiles = self._sector_tiles(world, sector_id)
         if not tiles:
@@ -516,8 +546,22 @@ class Scout:
         # §4.3: the model picks which sector, the rules fly it there. A choice
         # it cannot justify costs one lost claim race, no more.
         digest = planning.build_digest(self.mem, self.mission_id, robot)
+        # Semantic memory reaches this decision too. It used to reach only
+        # lifters and medics, which left the one role that decides *where the
+        # fleet looks* as the only one with no memory of previous missions —
+        # and sector choice is exactly what a tactic like "sweep the dense-debris
+        # sectors first" is about. `sim/recall.py` describes the loop ending in
+        # "put those tactics in the planning prompt"; for scouts it stopped
+        # short of that.
+        lessons = self._recall(robot, candidates)
         plan = (
-            self.planner.plan(robot, world.tick, digest, candidates)
+            self.planner.plan(
+                robot,
+                world.tick,
+                digest,
+                candidates,
+                recall_mod.as_prompt_lines(lessons),
+            )
             if self.planner is not None
             else None
         )

@@ -85,7 +85,9 @@ def test_the_snapshot_carries_usable_zones(world):
         assert {"name", "x", "y", "width", "height"} <= set(zone), zone
         assert isinstance(zone["name"], str) and zone["name"]
         for field in ("x", "y", "width", "height"):
-            assert isinstance(zone[field], int), f"{zone['name']}.{field} must be an int"
+            assert isinstance(zone[field], int), (
+                f"{zone['name']}.{field} must be an int"
+            )
         assert zone["x"] + zone["width"] <= got["width"]
         assert zone["y"] + zone["height"] <= got["height"]
 

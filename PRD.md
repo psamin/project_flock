@@ -147,7 +147,7 @@ Lines the video and Devpost writeup should use, each backed by a source in §7:
 | FR-7 | Aftershock event invalidates affected path/claim state (release = status→open, lease cleared) and triggers replans. | P0 |
 | FR-8 | Fog-of-war UI: per-robot vision, with the shared known-world overlay filling in for all as any robot explores. | P0 |
 | FR-9 | Live scoreboard + coordination ON/OFF toggle and side-by-side metrics. | P0 |
-| FR-10 | Commander console: natural-language questions answered from live memory via CockroachDB managed MCP Server, read-only credentials. | P0 |
+| FR-10 | Commander console: six audited questions answered from live fleet memory, each shown beside the SQL that produced it. Read-only by grant, not merely by setting — the `commander` role holds `SELECT` and nothing else. | P0 |
 | FR-11 | Node-kill resilience: killing 1 of 3 CRDB nodes mid-mission causes zero task loss and no fleet stall. | P0 |
 | FR-12 | Mission event log supports full replay of a run. | P1 |
 | FR-13 | Cross-mission memory: post-run summaries embedded; new missions retrieve top-k similar past situations at planning time. | P1 |
@@ -425,7 +425,7 @@ How to actually build the Smallville-style engine described in §3.6 — server-
 - [ ] Playtest & tune stat blocks + lease/sector knobs (twice: Aug 8, Aug 12)
 - [ ] AWS deploy: S3/CloudFront frontend, ECS backend, public URL
 - [ ] Video: script, record beats + backups, edit to <3 min; writeup + video open with the four-memory table (§4.0); include the bubble-click provenance beat
-- [ ] Repo hygiene: README, MIT license visible, setup instructions, architecture diagram
+- [ ] Repo hygiene: README, OSI license (Apache 2.0) visible, setup instructions, architecture diagram
 - [ ] Devpost writeup incl. tools-used section + CRDB feedback
 
 Pairing note: lanes 2↔4 sync daily (agents consume orchestration). Lane 5 owns the deadline and holds scope veto from Aug 13.
@@ -489,14 +489,14 @@ Everything below is from the official Devpost rules/resources pages (fetched Aug
 | **Tie-breaks follow criteria order**, starting with Agentic Memory Design | If we're tied with anyone, memory design wins the tie. It's already our strongest axis; §4.0 exists to over-invest there deliberately. |
 | Judges **may judge from the video + description alone** and are not required to test | The 3-minute video and text description carry most of the weight. Treat lane 5's deliverables as first-class engineering, not garnish. |
 | Video: <3 min, must show the project functioning **and the CockroachDB memory layer at work**, public on YouTube/Vimeo, **no third-party trademarks or copyrighted music** | Show live SQL/table views of tasks flipping states during the rescue — that's "memory layer at work," literally. Royalty-free or no music. Watch stray logos in screen recordings. |
-| Repo must be public with an OSI license **visible in the About section** | MIT, added day 1, pinned in repo About — not just a LICENSE file buried in the tree. |
+| Repo must be public with an OSI license **visible in the About section** | Apache 2.0, added day 1, pinned in repo About — not just a LICENSE file buried in the tree. GitHub detects it from `LICENSE` and shows it; verified. |
 | "All required CockroachDB and AWS components must be **meaningfully integrated — not just initialized**" | Their words. Our writeup answers "what did the agent actually do with each tool" per tool, one paragraph each (§6.2, §6.4 give the answers). |
 
 ### 6.2 CockroachDB tooling — tool-by-tool integration plan
 
 | Tool | What it actually is (per docs) | How Colony uses it | Status |
 |---|---|---|---|
-| **Managed MCP Server** | Managed endpoint (`cockroachlabs.cloud/mcp`); config snippet copied from Cloud Console into Claude Code/Cursor/VS Code. Tools: list databases/tables, describe schemas & indexes, inspect cluster health and running queries, run read-only SQL + `EXPLAIN`; writes only when explicitly enabled. | **Runtime:** the commander console — a human asks natural-language questions ("which victims are unreached and why?") and the AI answers by querying live fleet memory, read-only; v3.1 adds decision tracing ("why did L1 stop?") via `plans.based_on` joins. **Dev-time:** every teammate wires the MCP config into Claude Code/Cursor for schema inspection while building. | Required tool #1 ✅ |
+| **Managed MCP Server** | Managed endpoint (`cockroachlabs.cloud/mcp`); config snippet copied from Cloud Console into Claude Code/Cursor/VS Code. Tools: list databases/tables, describe schemas & indexes, inspect cluster health and running queries, run read-only SQL + `EXPLAIN`; writes only when explicitly enabled. | **Runtime:** the commander console — six audited questions over live fleet memory, each answered with the SQL shown beside it, including decision tracing ("why did L1 stop?") via `plans.based_on` joins. **Not** free-form NL→SQL, and deliberately so: §5.4 puts demo reliability first, and a model improvising SQL live is the one part of this that can fail in a way nobody recovers from on camera. Fixed queries are also the stronger claim — a judge can read the statement, run it themselves, and check the answer. **Dev-time:** every teammate wires the MCP config into Claude Code/Cursor for schema inspection while building, which is where the managed endpoint itself is exercised. | Required tool #1 ✅ |
 | **Distributed Vector Indexing** | Native `VECTOR` column type; `CREATE VECTOR INDEX`; similarity operators `<->` (L2), `<#>` (inner product), `<=>` (cosine); vectors, JSONB, and relational data in the same table, same transaction, serializable by default. | The reconcile-before-broadcast gate (cosine `<=>` search over `observations.embedding` inside the insert transaction) and `mission_memories` cross-mission recall. One system for beliefs + tasks + vectors = the "no consistency gap" story from their own docs, demonstrated. | Required tool #2 ✅ |
 | **Agent Skills Repo** | Open-source repo (`cockroachlabs/cockroachdb-skills`) of machine-executable skills per the agentskills.io spec — including domains for resilience & disaster recovery, observability, security/governance, and specific skills like validating production readiness and auditing user privileges. | Two uses. (1) Dev: schema/query design skills during lane 1's build. (2) **Judge-visible:** run the production-readiness, privilege-audit, and backup/DR-posture skills against our cluster before submission and commit the outputs to `/ops-audit` in the repo. A disaster-relief fleet that audited its own disaster-recovery posture with the sponsor's skills repo — that paragraph writes itself. | Strong tool #3 ✅ |
 | **ccloud CLI** | Agent-ready CLI for the Cloud control plane: create clusters, manage IP allowlists, SQL users, connection info; JSON output; service-account RBAC. | Cluster provisioning + per-robot SQL user creation scripted via ccloud in `infra/` (reproducible setup, shown in README). Optional — nice fourth tool, zero extra architecture. | Optional #4 |
@@ -537,7 +537,7 @@ This is stronger than pretending: it shows we understand the deployment models, 
 1. All five: create Devpost accounts, join the hackathon, form the team; Praneeth registered as Representative.
 2. Praneeth: CockroachDB Cloud signup (free, no card) → create cluster → copy MCP config snippet into Claude Code/Cursor for everyone → create per-robot SQL users (via ccloud if adopting tool #4).
 3. AWS account: enable **Bedrock model access** (Claude + Titan V2) in the target region immediately — approval isn't always instant. Set the billing alarm.
-4. Repo: init public, MIT license visible in About, README skeleton with the tools-used section stubbed, first commit today (in-window timestamp).
+4. Repo: init public, OSI license (Apache 2.0) visible in About, README skeleton with the tools-used section stubbed, first commit today (in-window timestamp).
 5. Clone `cockroachlabs/cockroachdb-skills`; lane 1 skims the schema-design and resilience/DR skills before writing the migration.
 
 ---

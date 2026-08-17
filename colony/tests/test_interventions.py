@@ -28,7 +28,7 @@ from agents.planning import (
     RESERVED_CALLS_PER_MINUTE,
     Planner,
 )
-from fleetmem.changefeed import HazardChange, _parse_hazard
+from fleetmem.changefeed import _parse_hazard
 from fleetmem.fake import FakeFleetMem
 from fleetmem.types import INTERVENTION_PREFIX
 from sim import interventions as iv
@@ -246,7 +246,9 @@ def test_a_no_op_intervention_still_counts(world):
 
 def test_escalations_and_interventions_both_count():
     data = _map(
-        escalations=[{"tick": 1, "kind": "aftershock", "block_tiles": [{"x": 3, "y": 3}]}]
+        escalations=[
+            {"tick": 1, "kind": "aftershock", "block_tiles": [{"x": 3, "y": 3}]}
+        ]
     )
     world = World(parse_map(data), seed=1)
     world.step({})
@@ -306,7 +308,10 @@ def test_a_resolved_timestamp_row_is_not_a_hazard():
 def test_a_delete_is_not_a_hazard():
     import json
 
-    assert _parse_hazard({"table": "hazards", "value": json.dumps({"after": None})}) is None
+    assert (
+        _parse_hazard({"table": "hazards", "value": json.dumps({"after": None})})
+        is None
+    )
 
 
 def test_a_jsonb_area_arriving_as_text_is_parsed():
@@ -511,7 +516,9 @@ def test_the_route_writes_a_row_and_does_not_touch_the_world(server):
 
 def test_an_intervention_is_applied_exactly_once(server):
     client, module = server
-    client.post("/api/intervene", json={"kind": iv.COLLAPSE, "x": 6, "y": 6, "radius": 0})
+    client.post(
+        "/api/intervene", json={"kind": iv.COLLAPSE, "x": 6, "y": 6, "radius": 0}
+    )
     module.mission.tick_once()
     felt = module.mission.world.disruptions_felt
     module.mission.tick_once()
@@ -533,13 +540,17 @@ def test_an_off_map_target_is_a_400(server):
 
 def test_a_non_integer_coordinate_is_a_400(server):
     client, _ = server
-    reply = client.post("/api/intervene", json={"kind": iv.COLLAPSE, "x": "left", "y": 5})
+    reply = client.post(
+        "/api/intervene", json={"kind": iv.COLLAPSE, "x": "left", "y": 5}
+    )
     assert reply.status_code == 400
 
 
 def test_the_catalog_reports_what_has_landed(server):
     client, module = server
-    client.post("/api/intervene", json={"kind": iv.COLLAPSE, "x": 6, "y": 6, "radius": 0})
+    client.post(
+        "/api/intervene", json={"kind": iv.COLLAPSE, "x": 6, "y": 6, "radius": 0}
+    )
     module.mission.tick_once()
     applied = client.get("/api/interventions").json()["applied"]
     assert len(applied) == 1 and applied[0]["kind"] == iv.COLLAPSE
@@ -611,8 +622,7 @@ def test_an_intervention_puts_held_work_back_in_the_pool(mem, mission):
     released = [
         e
         for e in mem.events(mission)
-        if e["verb"] == "task_released"
-        and e["detail"].get("reason") == "intervention"
+        if e["verb"] == "task_released" and e["detail"].get("reason") == "intervention"
     ]
     assert released, "the medic held work through an operator intervention"
     assert released[0]["detail"]["task"] == str(held.id)
@@ -645,7 +655,9 @@ def test_an_aftershock_is_still_logged_as_an_aftershock(mem, mission):
     from fleetmem.types import AFTERSHOCK
 
     world = _fleet_world(
-        escalations=[{"tick": 3, "kind": "aftershock", "block_tiles": [{"x": 9, "y": 9}]}]
+        escalations=[
+            {"tick": 3, "kind": "aftershock", "block_tiles": [{"x": 9, "y": 9}]}
+        ]
     )
     mem.register_victim(mission, (15, 15), reported_by="s1")
     medic = Worker(robot_id="m1", role="medic", mission_id=mission, mem=mem)
@@ -740,14 +752,21 @@ class _StubPlanner:
     def __init__(self, plan=None):
         from bedrock.adapter import Plan
 
-        self.plan_result = plan if plan is not None else Plan(
-            action="explore", rationale="the corridor is gone; going around"
+        self.plan_result = (
+            plan
+            if plan is not None
+            else Plan(action="explore", rationale="the corridor is gone; going around")
         )
         self.calls: list[dict] = []
 
     def plan(self, robot, tick, digest, open_tasks, tactics=(), reserved=False):
         self.calls.append(
-            {"robot": robot.id, "tick": tick, "reserved": reserved, "tasks": len(open_tasks)}
+            {
+                "robot": robot.id,
+                "tick": tick,
+                "reserved": reserved,
+                "tasks": len(open_tasks),
+            }
         )
         return self.plan_result
 
@@ -874,3 +893,93 @@ def test_a_planner_that_raises_does_not_stop_the_mission(mem, mission):
     _run(world, [medic], 3)
     world.apply_intervention(iv.plan(world, iv.COLLAPSE, 10, 10, radius=1))
     medic.step(world)  # must not raise
+
+
+def test_a_decision_after_a_disruption_is_marked_in_the_coordination_feed(monkeypatch):
+    """§3.6: show the fleet *noticing*, not just moving differently.
+
+    Dropping fire on a route already changes behaviour — beliefs update, routes
+    re-cost, unreachable work is handed back — but on screen that reads as
+    robots wandering. Marking the decisions that cite a belief inside the blast
+    radius, written after it landed, is what turns it into a visible
+    report -> re-plan chain.
+
+    The attribution is correlation and the test holds it to that: a decision
+    citing beliefs nowhere near the disruption must NOT be marked, or the panel
+    would credit the operator for everything the fleet does next.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from sim.server import Mission
+
+    mission = Mission()
+    for _ in range(60):
+        mission.tick_once()
+
+    # Nothing has been broken yet, so nothing may claim to be a response to it.
+    assert all(ln["responds_to"] is None for ln in mission.coordination(limit=50))
+
+    # A disruption far from anything the fleet is currently looking at.
+    mission.recent_disruptions.append(
+        {
+            "kind": "fire",
+            "label": "fire",
+            "x": 0,
+            "y": 0,
+            "radius": 1,
+            "tick": mission.world.tick,
+        },
+    )
+    assert all(ln["responds_to"] is None for ln in mission.coordination(limit=50)), (
+        "a disruption in an empty corner was credited with decisions elsewhere"
+    )
+
+    # One that covers the whole map: now the beliefs really are inside it.
+    mission.recent_disruptions.append(
+        {
+            "kind": "fire",
+            "label": "fire",
+            "x": 20,
+            "y": 15,
+            "radius": 999,
+            "tick": mission.world.tick,
+        },
+    )
+    marked = [ln for ln in mission.coordination(limit=50) if ln["responds_to"]]
+    assert marked, "a disruption covering every belief marked nothing"
+    assert marked[0]["responds_to"]["label"] == "fire"
+
+
+def test_an_interfered_run_is_recorded_as_such(monkeypatch):
+    """§4.7's comparison is the number the project rests on.
+
+    Interventions are a headline feature and the one thing they must not do is
+    quietly poison it. Killing a coordinated run's fleet makes it score like the
+    baseline; without a marker the panel would publish "coordination gain 0%"
+    from a run somebody sabotaged.
+
+    Asserts both directions — a clean run must NOT be flagged, or the flag
+    means nothing and the panel refuses every comparison.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from sim.server import Mission
+
+    mission = Mission()
+    for _ in range(20):
+        mission.tick_once()
+
+    mission.record_run()
+    clean = mission.last_runs[mission.mode]
+    assert clean["interfered"] is False
+    assert clean["interference"] == {"interventions": 0, "robots_killed": 0}
+
+    mission.kill_robot(next(iter(mission.agents)))
+    mission.record_run()
+    spoiled = mission.last_runs[mission.mode]
+    assert spoiled["interfered"] is True
+    assert spoiled["interference"]["robots_killed"] == 1
+
+    # And a restart is a fresh measurement again.
+    mission._build(coordinated=True)
+    mission.tick_once()
+    mission.record_run()
+    assert mission.last_runs[mission.mode]["interfered"] is False

@@ -44,6 +44,7 @@ def resolve_dsn(dsn: str | None = None) -> str:
     """
     return dsn or os.environ.get("COLONY_DSN", DEFAULT_DSN)
 
+
 # Cosine distance below which two observations are the same belief (§4.2 step 3
 # states the gate as >=0.82 cosine *similarity*; distance = 1 - similarity).
 MERGE_DISTANCE = 0.18
@@ -190,8 +191,18 @@ class CockroachFleetMem:
         # in the mission, the actual match never makes it into the rows, and
         # report_observation inserts a second belief for one victim.
         #
-        # ORDER BY <=> with the mission_id prefix constrained is what lets the
-        # cosine index serve this; see the index comment in schema/v1_1.sql.
+        # That correctness costs the index, and the comment that used to sit here
+        # claimed the opposite. Measured on 1047 rows: this plan is a FULL SCAN.
+        # `kind` and the pos box are not prefix columns of obs_embedding_idx, and
+        # v26.2 will not serve an approximate top-k it then has to filter — it
+        # declines the index outright rather than risk dropping a real match.
+        # `embedding IS NOT NULL` disables it a second, independent time.
+        #
+        # The scan is the correct trade here, not a bug to tune away: exact
+        # results on a 5-tile box beat an approximate scan that merges two
+        # victims into one. `test_the_reconcile_gate_query_uses_the_index` is a
+        # strict xfail holding that line. Tactical recall (`recall_lessons`) is
+        # where the vector index is genuinely load-bearing.
         rows = self.conn.execute(
             "SELECT id, embedding <=> %s AS distance"
             "  FROM observations"

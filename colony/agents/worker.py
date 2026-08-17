@@ -211,9 +211,7 @@ class Worker:
 
         return self._advance(world, here, target)
 
-    def _report_status(
-        self, world: World, robot: Any, here: tuple[int, int]
-    ) -> None:
+    def _report_status(self, world: World, robot: Any, here: tuple[int, int]) -> None:
         """Write the status row and renew leases, each on its own cadence.
 
         Two statements, two round trips, two different deadlines — so they are
@@ -226,9 +224,7 @@ class Worker:
             self._heartbeat_at is None
             or tick - self._heartbeat_at >= HEARTBEAT_EVERY_TICKS
         )
-        renew_due = (
-            self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
-        )
+        renew_due = self._renew_at is None or tick - self._renew_at >= RENEW_EVERY_TICKS
         if beat_due:
             self.mem.heartbeat(
                 self.robot_id,

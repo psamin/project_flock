@@ -38,6 +38,11 @@ import {
   formatEvent,
   initConsole,
   initInterventions,
+  initKillRobot,
+  initCompare,
+  refreshMemoryRail,
+  refreshCoordination,
+  refreshFleet,
   armedIntervention,
   placeIntervention,
 } from "./ui-shared.js";
@@ -528,6 +533,8 @@ function connect() {
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
+        refreshMemoryRail();
+        refreshCoordination();
       }
       // A diff can arrive before the snapshot: the server registers a viewer
       // before sending it, deliberately, so no frame is skipped. Without a
@@ -557,6 +564,15 @@ function connect() {
 // /sim3d tracks its own selection.
 
 initInterventions();
+initKillRobot();
+initCompare();
+// The feed moves with every decision, and snapshots only arrive on boot or a
+// mode switch, so it gets its own cadence rather than riding the frame loop.
+refreshCoordination();
+setInterval(refreshCoordination, 2000);
+// The lease countdown only reads as a countdown if it actually ticks down.
+refreshFleet();
+setInterval(refreshFleet, 1000);
 
 initConsole({
   getRobots: () => robots,

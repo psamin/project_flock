@@ -105,9 +105,7 @@ class Hazard:
     @property
     def intervention_kind(self) -> str:
         """`collapse` from `intervention:collapse`; '' for anything else."""
-        return (
-            self.kind[len(INTERVENTION_PREFIX) :] if self.is_intervention else ""
-        )
+        return self.kind[len(INTERVENTION_PREFIX) :] if self.is_intervention else ""
 
 
 @dataclass(frozen=True)

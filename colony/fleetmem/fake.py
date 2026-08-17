@@ -514,8 +514,7 @@ class FakeFleetMem:
                 if h["active"]
                 and h["mission_id"] == mission_id
                 and (
-                    not interventions_only
-                    or h["kind"].startswith(INTERVENTION_PREFIX)
+                    not interventions_only or h["kind"].startswith(INTERVENTION_PREFIX)
                 )
             ]
 

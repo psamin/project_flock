@@ -321,3 +321,59 @@ def test_semantic_recall_uses_the_vector_index(db):
         assert "mm_situation_idx" in plan, plan
     finally:
         db.conn.execute("DELETE FROM mission_memories")
+
+
+def test_a_scout_puts_remembered_tactics_in_front_of_the_model():
+    """§4.0 SEMANTIC, reaching the role that decides where the fleet looks.
+
+    Recall used to reach lifters and medics only, which left scouts — the one
+    role choosing *which ground gets swept* — with no memory of previous
+    missions. Sector choice is exactly what a tactic like "sweep the dense
+    sectors first" is about, and `sim/recall.py` describes the loop ending in
+    "put those tactics in the planning prompt".
+
+    Asserts the lessons reach the planner call, not merely that retrieval ran:
+    a scout that recalls and then drops the result on the floor would pass a
+    weaker test while changing no decision.
+    """
+    import uuid as _uuid
+
+    from agents.scout import Scout
+    from fleetmem.fake import FakeFleetMem
+
+    mem = FakeFleetMem()
+    mission = _uuid.uuid4()
+    mem.remember_lesson(
+        mission,
+        situation="rubble-heavy sector, victims behind debris",
+        lesson="sweep dense-debris sectors before open ground",
+        embedding=[1.0] + [0.0] * 511,
+        confidence=0.9,
+    )
+
+    seen: dict = {}
+
+    class RecordingPlanner:
+        def plan(self, robot, tick, digest, candidates, lessons=None):
+            seen["lessons"] = lessons
+            return None
+
+    class StubEmbedder:
+        def embed(self, text):
+            return [1.0] + [0.0] * 511
+
+    scout = Scout(
+        robot_id="s1",
+        mission_id=mission,
+        mem=mem,
+        embedder=StubEmbedder(),
+        planner=RecordingPlanner(),
+    )
+
+    class _R:
+        x, y, role, battery, status = 3, 3, "scout", 100, "idle"
+
+    lessons = scout._recall(_R(), [])
+    assert lessons, "the scout retrieved nothing it had just been told"
+    lines = recall_mod.as_prompt_lines(lessons)
+    assert any("dense-debris" in line for line in lines), lines

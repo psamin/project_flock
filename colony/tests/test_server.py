@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from fleetmem.client import LEASE_SECONDS
 from sim.server import QUEUE_FRAMES, TICK_SECONDS, Mission, Viewer
 
 
@@ -391,3 +392,200 @@ def test_the_comparison_payload_carries_lives_lost(mission):
     for field in ("victims_lost", "victims_stabilized", "victims_total", "finished"):
         assert field in recorded, f"the comparison panel cannot render without {field}"
     assert isinstance(recorded["victims_lost"], int)
+
+
+def test_killing_a_robot_leaves_its_work_on_an_expiring_lease(mission):
+    """FR-5, and §3.6's first failure beat.
+
+    A killed robot is not removed and its task is not released. It simply stops
+    stepping, which stops its heartbeat, which stops its lease renewals — and
+    the claiming predicate does the rest 15 seconds later. Recovery here is the
+    *absence* of a mechanism, so the test asserts the absence: nothing was
+    reassigned, nothing was released, the row still says the dead robot owns it.
+
+    AUDIT B measured 0 contended claims in 31 across a normal run, so this path
+    never executes on its own. This is what makes it executable on demand.
+    """
+    # Long enough for a scout to find someone and a worker to claim the job.
+    # A skip here would prove nothing, so the test fails rather than skips if
+    # the fleet never claims: that would itself be a regression worth seeing.
+    # Asked of the agents, not of `open_tasks`. `open_tasks` returns what is
+    # *claimable* — open, or claimed on a lapsed lease — so a task held on a
+    # live lease is deliberately absent from it, and looking there for the
+    # current holder finds nothing every time. That mistake was in the endpoint
+    # too until this test caught it.
+    holders: list = []
+    for _ in range(200):
+        mission.tick_once()
+        holders = [r for r in mission.agents if mission._held_by(r) is not None]
+        if holders:
+            break
+    assert holders, "no robot claimed any work in 200 ticks"
+    victim_robot = holders[0]
+
+    result = mission.kill_robot(victim_robot)
+    assert result["killed"] == victim_robot
+    assert result["lease_seconds"] > 0
+
+    # Still a member of the fleet: it stopped answering, it did not vanish.
+    assert victim_robot in mission.agents
+    assert victim_robot in mission.disabled
+
+    # And crucially, nothing tidied up after it: the agent still holds its task
+    # and no release was issued on its behalf. Recovery is the lease lapsing,
+    # and nothing else.
+    assert mission._held_by(victim_robot) is not None, (
+        "the task was released — that is a second recovery path racing the lease"
+    )
+
+    # It stops acting from the next tick on.
+    before = mission.world.robots[victim_robot].x, mission.world.robots[victim_robot].y
+    for _ in range(5):
+        mission.tick_once()
+    after = mission.world.robots[victim_robot].x, mission.world.robots[victim_robot].y
+    assert before == after, "a killed robot kept moving"
+
+
+def test_the_coordination_feed_names_who_told_whom(mission):
+    """§3.6's thesis, streamed rather than asked for.
+
+    The ticker says what happened; this says why, and the why is the product.
+    Robots have no channel to each other — they read and write rows — so a plan
+    citing another robot's observation *is* the coordination, and the feed has
+    to name both ends of it or it is just a second event log.
+    """
+    for _ in range(120):
+        mission.tick_once()
+
+    lines = mission.coordination(limit=50)
+    assert lines, "no decisions were recorded in 120 ticks"
+
+    # Newest first: an operator reads a feed top-down. Checked against the store
+    # rather than against itself, so the assertion can actually fail.
+    stored = mission.mem.plans_for(mission.mission_id)[-50:]
+    assert [ln["robot"] for ln in lines] == [p.robot_id for p in reversed(stored)], (
+        "the feed is not newest-first, or it dropped rows"
+    )
+
+    for line in lines:
+        assert line["robot"], "a decision with no decider"
+        assert "cross_agent" in line
+        # A robot must never be listed as having informed itself — that would
+        # make solo work look like teamwork, which is the one thing this feed
+        # exists to distinguish.
+        assert line["robot"] not in line["informed_by"]
+
+    crossed = [ln for ln in lines if ln["cross_agent"]]
+    assert crossed, (
+        "no decision cited another robot's belief in 120 ticks — either the feed "
+        "is not resolving based_on, or the fleet is not actually coordinating"
+    )
+    lead = crossed[0]["lead_belief"]
+    assert lead and lead["author"] and lead["author"] != crossed[0]["robot"]
+
+
+def test_the_fleet_panel_reports_holdings_and_lease_countdown(mission):
+    """§3.6: what every unit is doing and why, without clicking six times.
+
+    The lease countdown is the load-bearing column. A held task is deliberately
+    absent from `open_tasks` until its lease lapses, so this is the only place
+    the takeover mechanism is legible *before* it fires — which is what makes
+    the kill-a-robot beat readable rather than fifteen seconds of nothing.
+    """
+    for _ in range(120):
+        mission.tick_once()
+
+    # Holdings come and go — a robot that completed on the sampled tick holds
+    # nothing on it — so this waits for one rather than assuming a tick count.
+    rows: list = []
+    holding: list = []
+    for _ in range(200):
+        mission.tick_once()
+        rows = mission.fleet()
+        holding = [r for r in rows if r["task"]]
+        if holding:
+            break
+
+    assert rows, "a running mission reported no robots"
+    assert {r["id"] for r in rows} == set(mission.world.robots)
+    assert holding, "nobody was holding work in 320 ticks"
+    # A live robot renews, so there is no countdown to show — "renewing" is the
+    # true statement and a number there would be invented.
+    for row in holding:
+        assert row["task"]["lease_seconds_left"] is None
+        assert row["task"]["lease_state"] == "renewing"
+
+    decided = [r for r in rows if r["last_decision"]]
+    assert decided, "no robot had a last decision to report"
+    assert all(r["last_decision"]["source"] in ("rules", "bedrock") for r in decided)
+
+    # A killed robot must read as down here, or the panel disagrees with the
+    # thing the operator just did.
+    victim = holding[0]["id"]
+    mission.kill_robot(victim)
+    after = {r["id"]: r for r in mission.fleet()}
+    assert after[victim]["down"] is True
+    assert after[victim]["status"] == "down"
+    # Once it stops renewing, the panel counts down to the takeover — flagged
+    # approximate, because it is derived from the kill time rather than read
+    # off a lease column the SDK cannot query.
+    lease = after[victim]["task"]["lease_seconds_left"]
+    assert lease is not None and 0 <= lease <= LEASE_SECONDS, lease
+    assert after[victim]["task"]["lease_state"] == "lapsing"
+    assert after[victim]["task"]["lease_approx"] is True
+
+
+def test_a_dead_fleet_ends_the_mission_instead_of_ticking_on(mission):
+    """§3.6's kill button, followed to its conclusion.
+
+    `world.finished` cannot see a dead fleet: it ends a mission when every
+    victim is stabilized or lost, and with nobody left to rescue anyone that is
+    when the last vitals deadline passes — tick 700 on Aftershock. Measured: a
+    fleet killed at tick 127 left the mission running 573 more ticks, about 143
+    seconds, in which nothing could happen and nothing said so.
+
+    An operator who kills every robot is entitled to be told that is what they
+    did.
+    """
+    for _ in range(20):
+        mission.tick_once()
+
+    assert mission.fleet_lost is False
+    for robot_id in list(mission.agents):
+        mission.kill_robot(robot_id)
+    assert mission.fleet_lost is True
+
+    # And it is not merely a flag: the run is recorded, so the scoreboard shows
+    # what the fleet had achieved when it died rather than nothing at all.
+    asyncio.run(mission.run())
+    assert mission.running is False
+    assert mission.mode in mission.last_runs
+    verbs = [e["verb"] for e in mission.mem.events(mission.mission_id)]
+    assert "fleet_lost" in verbs, "the mission ended without saying why"
+
+
+def test_the_headless_comparison_matches_the_live_one(monkeypatch):
+    """§4.7 in seconds rather than three and a half minutes.
+
+    Watching both arms play out costs a mission each at 4 Hz — coordinated ends
+    near tick 312, baseline runs to ~560 because it fails — which is longer than
+    the whole video. This runs the same two missions headless.
+
+    The point of the test is that it is the *same* measurement: same map, same
+    seed, same code path. A shortcut that produced different numbers would be
+    worse than the wait.
+    """
+    monkeypatch.setenv("COLONY_MEMORY", "fake")
+    from fleetmem.fake import FakeFleetMem
+    from sim.mission import compare_modes
+    from world.map_format import load_map
+
+    from sim.server import DEFAULT_MAP
+
+    first = compare_modes(load_map(DEFAULT_MAP), FakeFleetMem, seed=0).to_json()
+    second = compare_modes(load_map(DEFAULT_MAP), FakeFleetMem, seed=0).to_json()
+
+    assert first == second, "the comparison is not reproducible on one seed"
+    assert first["coordinated"]["rescue_rate"] > first["baseline"]["rescue_rate"]
+    # The headline the panel leads with has to survive the shortcut.
+    assert first["baseline"]["victims_lost"] > first["coordinated"]["victims_lost"]
