@@ -128,10 +128,55 @@ def test_asking_for_the_fake_still_works_with_a_dsn_set(monkeypatch):
 
 def test_no_dsn_still_degrades_quietly_to_the_fake(monkeypatch):
     """`make sim` on a bare laptop, which is how lanes 2 and 4 were unblocked.
-    Nobody named a cluster, so there is nothing to be wrong about."""
+    Nobody named a cluster, so there is nothing to be wrong about.
+
+    "Bare laptop" is two conditions, and unsetting the environment only
+    establishes one of them. `resolve_dsn` falls back to `DEFAULT_DSN`, so with
+    no `COLONY_DSN` the sim still tries `localhost:26257` — and finds a cluster
+    on any machine running `make dev`, and on CI, which starts one on that exact
+    port so the database tests cannot silently skip. The assertion then reads
+    `cockroach`, correctly, and the test fails for being wrong about its
+    environment rather than about the code.
+
+    So the default address is pointed somewhere unreachable too. Now nobody has
+    named a cluster *and* there is none to find, which is what the docstring
+    claimed all along.
+    """
     monkeypatch.delenv("COLONY_MEMORY", raising=False)
     monkeypatch.delenv("COLONY_DSN", raising=False)
+    # Port 1 is reserved and nothing listens there — the same address the two
+    # tests above use to mean "no cluster here".
+    monkeypatch.setattr(
+        "fleetmem.client.DEFAULT_DSN",
+        "postgresql://root@127.0.0.1:1/colony?sslmode=disable",
+    )
     assert _fresh_server().get("/health").json()["memory"] == "fake"
+
+
+def test_the_quiet_degradation_is_the_default_address_not_the_env(monkeypatch):
+    """Guards the fix above from being "corrected" back.
+
+    The distinction `_make_memory` draws is between a cluster somebody *named*
+    and one merely tried: the first is fatal, the second degrades. Both tests
+    now point at port 1, so the only thing separating them is whether
+    `COLONY_DSN` is set — which is exactly the line the guard draws, and worth
+    pinning so a future edit cannot collapse the two into one behaviour.
+    """
+    monkeypatch.delenv("COLONY_MEMORY", raising=False)
+    monkeypatch.delenv("COLONY_DSN", raising=False)
+    monkeypatch.setattr(
+        "fleetmem.client.DEFAULT_DSN",
+        "postgresql://root@127.0.0.1:1/colony?sslmode=disable",
+    )
+    # Unreachable and unnamed: quiet.
+    assert _fresh_server().get("/health").json()["memory"] == "fake"
+
+    # The same unreachable address, now named: fatal.
+    monkeypatch.setenv(
+        "COLONY_DSN", "postgresql://root@127.0.0.1:1/colony?sslmode=disable"
+    )
+    with pytest.raises(RuntimeError, match="COLONY_DSN is set"):
+        _fresh_server()
 
 
 def test_the_two_modes_do_not_collide(health):
