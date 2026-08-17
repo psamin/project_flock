@@ -27,7 +27,7 @@ from agents.planning import BEDROCK, RULES
 # Both agent types report status on the same cadence and there is no reason for
 # them to disagree about it, so the constants have one home rather than two.
 from agents.worker import HEARTBEAT_EVERY_TICKS, RENEW_EVERY_TICKS
-from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE
+from fleetmem.types import AFTERSHOCK, IDLE_TRIGGER, TASK_DONE, WORLD_CHANGED
 from sim.protocol import DIRECTIONS, Action
 from sim.world import ROLES, Percept, World
 from world.map_format import DEBRIS, FIRE, RUBBLE_HEAVY, WALL
@@ -106,6 +106,8 @@ class Scout:
     # 40x30 map, so a scout that never goes back strands itself mid-sweep.
     homing: bool = False
     seen_escalations: int = 0
+    # Escalations *and* operator interventions (issue #22).
+    seen_disruptions: int = 0
     # tile -> tick this scout last had eyes on it. Turns "everything is
     # explored" into "this is the stalest ground I know", which is what a scout
     # needs after the map changes under it (FR-7).
@@ -228,21 +230,31 @@ class Scout:
         not downloaded, and a scout that knew where the new victim was without
         flying there would be ground truth wearing a robot costume.
         """
-        if world.escalations_fired <= self.seen_escalations:
+        if world.disruptions_felt <= self.seen_disruptions:
             return
+        # Which kind of disruption, told from two counts the scout can already
+        # see rather than from anyone's tile list (issue #22).
+        by_operator = world.escalations_fired <= self.seen_escalations
+        self.seen_disruptions = world.disruptions_felt
         self.seen_escalations = world.escalations_fired
         self.explored.clear()
         self.frontier_target = None
         if self.sector_task is not None:
             self.mem.release_task(self.sector_task.id)
             self.sector_task = None
+        cause = "the ground shifted" if by_operator else "aftershock felt"
         self._log_plan(
             world,
-            trigger=AFTERSHOCK,
+            trigger=WORLD_CHANGED if by_operator else AFTERSHOCK,
             chosen={"action": "explore", "sector": None, "source": RULES},
-            rationale="aftershock felt; re-sweeping from what I can see now",
+            rationale=f"{cause}; re-sweeping from what I can see now",
         )
-        self._say(world, "🌐 aftershock — re-sweeping")
+        self._say(
+            world,
+            "🌐 something moved — re-sweeping"
+            if by_operator
+            else "🌐 aftershock — re-sweeping",
+        )
 
     def _say(self, world: World, text: str) -> None:
         """Set the thought bubble the renderer already carries (§3.6)."""

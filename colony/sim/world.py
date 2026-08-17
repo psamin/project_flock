@@ -152,6 +152,11 @@ class World:
         self._explored_delta: list[tuple[int, int]] = []
         self._tiles_changed: list[dict[str, Any]] = []
         self._fired_escalations: set[int] = set()
+        # Operator interventions that have landed (issue #22). Kept separate
+        # from `_fired_escalations` because they are counted the same way and
+        # caused differently: an escalation is the map's, an intervention is a
+        # person's, and the event log has to be able to tell them apart.
+        self._interventions: list[Any] = []
         self._spawn_from_map()
 
     # --- setup ------------------------------------------------------------
@@ -195,8 +200,13 @@ class World:
     def step(self, actions: dict[str, Action] | None = None) -> StateFrame:
         """Advance exactly one tick and return the frame describing it."""
         self.tick += 1
-        self._tiles_changed = []
         self._explored_delta = []
+        # `_tiles_changed` is deliberately NOT cleared here, for the same reason
+        # `events` is not: anything that mutates the world *between* ticks —
+        # an operator intervention (issue #22) — writes tile changes before
+        # step() runs, and clearing at the top threw them away. The renderer
+        # then never learned the tile had changed, and its grid was permanently
+        # wrong for it, because tile diffs are cumulative. Drained on emit.
         # `events` is deliberately NOT cleared here. Agents call percept()
         # before step() (see Mission.tick_once and Scout.step), and percept
         # appends victim_found — clearing at the top of the tick threw those
@@ -469,6 +479,53 @@ class World:
                 },
             )
 
+    def apply_intervention(self, intervention: Any) -> Any:
+        """Land an operator's disruption on the grid (issue #22).
+
+        Takes an already-validated `sim.interventions.Intervention` — bounds,
+        kind and the no-stranding guarantee are settled before anything here
+        mutates, because a half-applied intervention leaves a world no seed
+        reproduces.
+
+        Tiles already carrying the object are skipped, so `tiles_changed` stays
+        an honest account of what moved rather than a restatement of what was
+        asked for. Tiles under a robot are skipped too: §22's first non-goal is
+        that an operator disrupts the *world* and never a robot, and dropping
+        fire onto L1 is destroying a robot by another name.
+        """
+        from sim.interventions import Applied  # local: world.py is imported by it
+
+        changed: list[tuple[int, int]] = []
+        for x, y in intervention.tiles:
+            if self.objects[y][x] == intervention.object:
+                continue
+            if self.occupied(x, y):
+                continue
+            self.objects[y][x] = intervention.object
+            self._tile_changed(x, y)
+            changed.append((x, y))
+
+        applied = Applied(intervention=intervention, tiles=changed)
+        # Appended even when nothing moved. The operator acted, the fleet is
+        # entitled to re-decide, and `disruptions_felt` is what tells it to —
+        # gating that on tiles changing would make a fire dropped on already
+        # burning ground a silent no-op the UI still claimed had happened.
+        self._interventions.append(applied)
+        self._event(
+            intervention.caused_by,
+            "intervention",
+            {
+                "kind": intervention.kind,
+                "label": intervention.label,
+                "x": intervention.origin[0],
+                "y": intervention.origin[1],
+                "radius": intervention.radius,
+                "tiles": len(changed),
+                "screen_shake": True,
+            },
+        )
+        return applied
+
     # --- percepts ---------------------------------------------------------
 
     def _update_vision(self) -> None:
@@ -632,6 +689,7 @@ class World:
             metrics=self.metrics(),
         )
         self.events = []  # drained on emit, so nothing is lost or sent twice
+        self._tiles_changed = []  # likewise: see the note in step()
         return frame
 
     def metrics(self) -> dict[str, Any]:
@@ -667,6 +725,26 @@ class World:
         be ground truth arriving without a robot ever sensing it.
         """
         return len(self._fired_escalations)
+
+    @property
+    def disruptions_felt(self) -> int:
+        """Every world change agents are expected to re-decide against — the
+        map's escalations plus the operator's interventions (issue #22).
+
+        This is what agents watch, rather than `escalations_fired`. An
+        intervention is the same *kind* of event as an aftershock — the ground
+        moved, and what that cost you has to be discovered by looking — so it
+        arrives through the same door and gets the same treatment. Two counters
+        would mean two replan paths to keep in step, and the second one would
+        rot.
+        """
+        return len(self._fired_escalations) + len(self._interventions)
+
+    @property
+    def interventions(self) -> list[Any]:
+        """What an operator has done to this world, in order. Read by the
+        console panel; never read by an agent."""
+        return list(self._interventions)
 
     def victim_at(self, x: int, y: int) -> Victim | None:
         """The victim on this tile, if any. Public: agents ask it to decide
