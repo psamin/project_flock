@@ -710,4 +710,17 @@ async def index() -> FileResponse:
     return FileResponse(CLIENT_DIR / "index.html")
 
 
+@app.get("/sim3d")
+async def sim3d() -> FileResponse:
+    """The digital-twin view (docs/designs/3d-simulation-view.md).
+
+    A second renderer over the same authoritative sim — same `/ws` frames, same
+    numbers — not a second world. It is a separate route rather than a mode on
+    `/` because it requires WebGL and `/` deliberately does not: if a judge's
+    machine cannot run this one, the Canvas 2D view is still there and still
+    shows the whole mission.
+    """
+    return FileResponse(CLIENT_DIR / "sim3d.html")
+
+
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")

@@ -204,9 +204,11 @@
   <div id="ticker"></div>
   <div id="hint">click a robot for its reasoning and sources · press S for the sector grid</div>
 
-  <!-- No CDN, no bundler, no WebGL requirement. See the note at the top of
-       app.js for why the renderer is Canvas 2D, and atlas.js for why the
-       sprites are drawn in code rather than downloaded. -->
+  <!-- No CDN and no bundler anywhere in this project; no WebGL requirement on
+       THIS page. See the note at the top of app.js for why this renderer is
+       Canvas 2D, and atlas.js for why the sprites are drawn in code rather
+       than downloaded. The 3D view at /sim3d does require WebGL, which is the
+       whole reason it is a separate route and this one is not being changed. -->
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

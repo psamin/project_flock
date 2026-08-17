@@ -29,8 +29,21 @@ as an argument, not as DDL.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 617 tests
+make test     # 701 tests
 ```
+
+Two views of the same mission, on the same frames:
+
+| URL | What it is | Needs |
+|---|---|---|
+| [`/`](http://localhost:8000/) | Canvas 2D top-down. Fog of war, thought bubbles, scoreboard. | nothing |
+| [`/sim3d`](http://localhost:8000/sim3d) | Digital twin: an orbitable floating island, robots with sensor volumes and pose telemetry, and a camera that frames the story off the event stream. | WebGL 2 |
+
+`/sim3d` is a second *renderer*, not a second simulation — it reads the same
+`/ws` frames and shows the same numbers. It is a separate route rather than a
+mode because it requires WebGL and `/` deliberately does not: if a machine
+cannot run it, the 2D view still shows the whole mission, and the 3D page says
+so and links there.
 
 `make sim` runs without a cluster too — it falls back to in-memory fleet memory
 and says so, so nothing is blocked on CockroachDB. Database-backed tests skip
@@ -43,7 +56,10 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
 ## Architecture
 
 ```
- Browser ── Canvas 2D renderer · fog of war · scoreboard · ON/OFF toggle
+ Browser ── two views of one mission, same frames, same numbers:
+    │        /       Canvas 2D · fog of war · scoreboard · ON/OFF toggle
+    │        /sim3d  WebGL digital twin · orbitable floating island ·
+    │                sensor volumes · pose telemetry · camera director
     ▲ websocket (state frames, 4 Hz)
     │
  Sim server (Python 3.12 / FastAPI) — authoritative world
@@ -119,7 +135,7 @@ global across every mission and every map, so the index ranks many rows against
 | [`colony/fleetmem/`](colony/fleetmem/) | The SDK every robot writes through, plus an in-memory fake |
 | [`colony/agents/`](colony/agents/) | Scout, lifter, medic — the sense/sync/think/act/report loop |
 | [`colony/sim/`](colony/sim/) | Authoritative world, 4 Hz tick server, websocket protocol |
-| [`colony/client/`](colony/client/) | Renderer, fog of war, thought bubbles, scoreboard |
+| [`colony/client/`](colony/client/) | Both renderers. `app.js`+`atlas.js` are the 2D view, `scene3d.js`+`rigs.js`+`director.js` the 3D one, `ui-shared.js` the HUD, ticker and console they share |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
 | [`colony/console/`](colony/console/) | The commander console's six questions, read-only |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |

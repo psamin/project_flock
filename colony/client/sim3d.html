@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Colony — Aftershock · digital twin</title>
+  <!--
+    The 3D view (docs/designs/3d-simulation-view.md). Same authoritative sim,
+    same /ws frames, same numbers as `/` — a second *view*, not a second world.
+
+    Import map rather than a bundler: the Three.js addons import the bare
+    specifier 'three', and this is the platform's own answer to that. No CDN,
+    no build step, matching the constraint that already produced atlas.js.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/static/vendor/three/three.module.min.js",
+      "three/addons/": "/static/vendor/three/"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      /* Instrument grading, not the cosy §3.6 palette. Cool, dark, low
+         chroma, with colour reserved for meaning — the way Isaac Sim, RViz
+         and Foxglove look, and the reason this view reads as telemetry
+         rather than as a game. */
+      --bg: #07090d;
+      --panel: #10141b;
+      --line: #1e2530;
+      --ink: #d6dde6;
+      --dim: #6b7684;
+      --accent: #63c5da;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+      display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    }
+
+    header {
+      display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+      padding: 8px 14px; border-bottom: 1px solid var(--line); flex: none;
+    }
+    h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.18em; }
+    h1 small { color: var(--dim); font-weight: 400; letter-spacing: 0.1em; margin-left: 6px; }
+    #status { color: var(--dim); }
+    #scenario { color: var(--dim); font-size: 11px; }
+    #mode-badge { font-size: 10px; letter-spacing: 0.1em; padding: 2px 8px; border-radius: 2px; }
+    #mode-badge.on { background: #10241c; color: #5fc98a; border: 1px solid #1d3a2c; }
+    #mode-badge.off { background: #2a1416; color: #e2603f; border: 1px solid #452023; }
+    button {
+      font: inherit; font-size: 11px; color: var(--ink); background: #161c25;
+      border: 1px solid var(--line); border-radius: 3px; padding: 3px 9px; cursor: pointer;
+    }
+    button:hover { background: #1d2530; border-color: #2c3745; }
+    button.armed { border-color: var(--accent); color: var(--accent); }
+
+    #hud {
+      display: flex; gap: 14px; padding: 6px 14px; color: var(--dim);
+      font-size: 11px; flex-wrap: wrap; border-bottom: 1px solid var(--line); flex: none;
+    }
+    #hud b { color: var(--ink); font-weight: 600; }
+
+    #main { display: flex; flex: 1; min-height: 0; }
+    #stage { flex: 1; position: relative; min-width: 0; }
+    #stage canvas { display: block; width: 100%; height: 100%; }
+
+    /* CSS2D telemetry labels ride above the canvas and must not eat clicks. */
+    #labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    /* Compact by default; `.wide` is the selected robot's full readout. Four
+       full blocks on a clustered fleet cover the diorama they annotate. */
+    .tag {
+      font: 9px/1.3 ui-monospace, Menlo, monospace; white-space: pre;
+      background: rgba(7, 9, 13, 0.7); border: 1px solid var(--line);
+      border-left-width: 2px; padding: 1px 4px; border-radius: 2px;
+      transform: translate(9px, -50%); color: var(--ink); opacity: 0.9;
+    }
+    .tag.wide {
+      font-size: 10px; line-height: 1.4; padding: 3px 6px;
+      background: rgba(7, 9, 13, 0.9); opacity: 1;
+    }
+    .tag .who { font-weight: 600; letter-spacing: 0.06em; }
+    .tag .num { color: var(--dim); }
+    .tag .say { color: #b9c2cd; }
+    .tag.lost { opacity: 0.55; border-left-color: #d96a9a !important; }
+
+    #overlay {
+      position: absolute; left: 12px; bottom: 12px; font-size: 10px;
+      color: var(--dim); pointer-events: none; line-height: 1.7;
+    }
+    #overlay .sw { display: inline-block; width: 16px; height: 8px; border: 1px solid #253040;
+                   vertical-align: middle; margin-right: 5px; }
+    #overlay b { color: var(--ink); font-weight: 600; }
+
+    #side {
+      width: 320px; flex: none; border-left: 1px solid var(--line);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    #panel { padding: 10px 12px; border-bottom: 1px solid var(--line);
+             max-height: 42%; overflow-y: auto; display: none; }
+    #panel.open { display: block; }
+    #panel-head { display: flex; justify-content: space-between; align-items: baseline; }
+    #panel-title { font-weight: 600; letter-spacing: 0.06em; }
+    #panel-vitals { color: var(--dim); font-size: 10px; margin-bottom: 8px; }
+    .plan { border-left: 2px solid var(--line); padding: 3px 0 7px 8px; margin-bottom: 7px; }
+    .plan-head { color: var(--accent); font-size: 10px; letter-spacing: 0.06em; }
+    .plan-why { font-size: 11px; margin: 2px 0; }
+    .plan-sources { color: var(--dim); font-size: 10px; }
+
+    /* flex:none + its own scroll, so a long answer never squeezes the ticker
+       out of existence and the sixth question is never clipped. */
+    #console { padding: 10px 12px; border-bottom: 1px solid var(--line);
+               flex: none; max-height: 58%; overflow-y: auto; }
+    #console-head { display: flex; gap: 8px; align-items: baseline;
+                    flex-wrap: wrap; margin-bottom: 7px; }
+    #console-head b { font-size: 11px; letter-spacing: 0.1em; }
+    #console-head span { color: var(--dim); font-size: 10px; }
+    #console-questions { display: flex; flex-direction: column; gap: 4px; }
+    #console-questions button { text-align: left; line-height: 1.35; }
+    #console-questions button .mem { color: var(--accent); font-size: 9px;
+                                     letter-spacing: 0.08em; margin-left: 5px; }
+    #console-answer { margin-top: 8px; font-size: 11px; }
+    #console-summary { margin-bottom: 5px; }
+    #console-summary.err { color: #d96a9a; }
+    #console-sql { color: #5d6875; font-size: 10px; white-space: pre-wrap;
+                   max-height: 120px; overflow-y: auto; border-left: 2px solid var(--line);
+                   padding-left: 7px; margin-bottom: 5px; }
+    #console-rows { color: #8b96a4; font-size: 10px; white-space: pre;
+                    max-height: 120px; overflow: auto; }
+
+    #ticker { flex: 1 1 auto; min-height: 110px; overflow-y: auto; padding: 8px 12px;
+              color: #8b96a4; font-size: 11px; white-space: pre; }
+    #ticker div { padding: 1px 0; }
+    #ticker .found { color: #f2c14e; }
+    #ticker .good  { color: #5fc98a; }
+    #ticker .bad   { color: #d96a9a; }
+    #ticker .sector{ color: var(--accent); }
+    #ticker .shock { color: #e2603f; font-weight: 600; }
+
+    #comparison { padding: 5px 14px; color: #f2c14e; font-size: 11px;
+                  border-top: 1px solid var(--line); flex: none; min-height: 22px; }
+
+    /* T3: WebGL is required for this route only. `/` stays Canvas 2D, so the
+       honest thing is to say so and link there rather than paint black. */
+    #nogl { display: none; margin: auto; max-width: 520px; padding: 40px 24px; text-align: center; }
+    #nogl.show { display: block; }
+    #nogl h2 { font-size: 15px; letter-spacing: 0.08em; }
+    #nogl p { color: var(--dim); font-size: 12px; }
+    #nogl a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>COLONY <small>DIGITAL TWIN</small></h1>
+    <span id="status">connecting…</span>
+    <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. Same seed, same mission."></span>
+    <span id="mode-badge" class="on">SHARED MEMORY</span>
+    <button id="toggle">coordination: ON</button>
+    <button id="director-toggle" class="armed" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
+    <a href="/" style="color:var(--dim);font-size:11px;">2D view →</a>
+  </header>
+
+  <div id="hud">
+    <span title="Simulation tick. The mission horizon is 1200.">tick <b id="m-tick">0</b></span>
+    <span title="Victims the fleet has seen at least once.">seen <b id="m-located">0</b></span>
+    <span title="Victims stabilized by a medic.">stabilized <b id="m-stabilized">0</b></span>
+    <span title="Victims who passed their vitals deadline.">lost <b id="m-lost">0</b></span>
+    <span title="Stabilized divided by total victims on the map.">rescue <b id="m-rescue">0%</b></span>
+    <span title="Median ticks from mission start to stabilization; victims never rescued count at the 1200-tick horizon.">median <b id="m-median">—</b></span>
+    <span title="Tile visits to ground another robot had already covered.">dup effort <b id="m-duplicate">0%</b></span>
+    <span title="Tasks claimed by more than one robot over the mission.">double work <b id="m-doublework">0</b></span>
+    <span title="Share of reachable, non-wall tiles any robot has seen.">tiles seen <b id="m-coverage">0%</b></span>
+    <span title="Tactics learned in earlier missions, stored in mission_memories and retrieved by cosine similarity.">tactics <b id="m-recall">0</b></span>
+    <span title="Amazon Bedrock adapter mode, and calls that actually reached AWS.">bedrock <b id="m-bedrock">—</b></span>
+  </div>
+
+  <div id="main">
+    <div id="stage">
+      <div id="labels"></div>
+      <div id="overlay">
+        <div><span class="sw" style="background:#4a5462"></span>observed now — a robot is looking at this tile</div>
+        <div><span class="sw" style="background:#1b2028"></span><b>remembered</b> — in shared memory, nobody watching</div>
+        <div><span class="sw" style="background:#07090d"></span>unknown — never seen, so it is not built</div>
+        <div style="margin-top:6px">drag orbit · scroll zoom · right-drag pan · click a robot for its reasoning</div>
+      </div>
+    </div>
+    <aside id="side">
+      <div id="panel">
+        <div id="panel-head">
+          <span id="panel-title">robot</span>
+          <button id="panel-close">×</button>
+        </div>
+        <div id="panel-vitals"></div>
+        <div id="panel-body"></div>
+      </div>
+      <section id="console">
+        <div id="console-head">
+          <b>COMMANDER CONSOLE</b>
+          <span id="console-status">read-only · live fleet memory</span>
+        </div>
+        <div id="console-questions"></div>
+        <div id="console-answer">
+          <div id="console-summary"></div>
+          <div id="console-sql"></div>
+          <div id="console-rows"></div>
+        </div>
+      </section>
+      <div id="ticker"></div>
+    </aside>
+  </div>
+  <div id="comparison"></div>
+
+  <div id="nogl">
+    <h2>This view needs WebGL</h2>
+    <p>
+      The digital-twin view renders with WebGL 2, which this browser or machine
+      does not currently provide. The <a href="/">2D view</a> shows the same
+      mission from the same simulation and needs no hardware acceleration.
+    </p>
+    <p style="font-size:11px">
+      Common causes: hardware acceleration disabled in browser settings, a
+      remote desktop session, or a virtual machine without a GPU.
+    </p>
+  </div>
+
+  <script type="module">
+    /* T3 — capability gate. Runs BEFORE Three.js is fetched, so a machine
+       without WebGL never downloads 756K to fail with a black rectangle.
+       `/` deliberately stayed Canvas 2D so this fallback is always real. */
+    function hasWebGL2() {
+      try {
+        const probe = document.createElement("canvas");
+        return !!(window.WebGL2RenderingContext && probe.getContext("webgl2"));
+      } catch {
+        return false;
+      }
+    }
+
+    if (!hasWebGL2()) {
+      document.getElementById("main").style.display = "none";
+      document.getElementById("hud").style.display = "none";
+      document.getElementById("nogl").classList.add("show");
+      document.getElementById("status").textContent = "WebGL unavailable";
+    } else {
+      import("/static/scene3d.js").catch((err) => {
+        document.getElementById("status").textContent = `load error: ${err.message}`;
+        console.error(err);
+      });
+    }
+  </script>
+</body>
+</html>

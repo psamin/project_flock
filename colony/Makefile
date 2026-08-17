@@ -1,4 +1,4 @@
-.PHONY: up down schema schema-cloud test map dev sim seed-memory reset demo demo-cold \
+.PHONY: up down schema schema-cloud test smoke map dev sim seed-memory reset demo demo-cold \
 	cluster-3 cluster-3-health cluster-3-kill cluster-3-down
 
 # One command to a working dev cluster with the schema applied.
@@ -30,6 +30,12 @@ schema-cloud:
 
 test:
 	uv run --extra dev pytest -q
+
+# Both renderers actually load, throw nothing, and draw something. The 701
+# pytest tests say nothing about the browser, and a blank canvas would pass all
+# of them and fail on camera. Needs `make sim` running in another shell.
+smoke:
+	./scripts/smoke.sh
 
 map:
 	uv run python -m world.build_aftershock
