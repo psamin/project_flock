@@ -434,6 +434,18 @@ class FakeFleetMem:
             task["status"] = DONE
             task["lease_expires_at"] = None  # a finished task is not abandoned work
 
+            # T-05c, mirroring CockroachFleetMem: a finished deliver_kit is a
+            # stabilized victim. The fake has to behave like the real thing, not
+            # merely share its signatures — see conftest's `mem` fixture.
+            if task["kind"] == "deliver_kit":
+                for v in self._victims.values():
+                    if (
+                        v["mission_id"] == task["mission_id"]
+                        and v["pos_x"] == task["target_x"]
+                        and v["pos_y"] == task["target_y"]
+                    ):
+                        v["state"] = "stabilized"
+
             unblocked = []
             for other in self._tasks.values():
                 if other["status"] != BLOCKED or task_id not in other["depends_on"]:
