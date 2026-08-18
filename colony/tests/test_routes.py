@@ -19,6 +19,8 @@ real files, not what the files contain; the renderers themselves are checked by
 the smoke target in the Makefile, which needs a browser.
 """
 
+import pathlib
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,7 +42,7 @@ def test_the_root_is_the_digital_twin(client):
     response = client.get("/")
     assert response.status_code == 200
     body = response.text
-    assert "<title>Colony" in body
+    assert "<title>Project-Flock" in body
     # The import map is what lets the vendored Three.js addons resolve their
     # bare 'three' specifier with no bundler. Without it the page is blank.
     assert '"three":' in body
@@ -53,7 +55,7 @@ def test_the_2d_view_is_served_at_its_own_route(client):
     response = client.get("/2d")
     assert response.status_code == 200
     body = response.text
-    assert "<title>Colony" in body
+    assert "<title>Project-Flock" in body
     assert "/static/app.js" in body
 
 
@@ -86,7 +88,9 @@ def test_the_webgl_escape_hatch_is_not_a_self_link(client):
     "2D view →" link is a different element with the same job.
     """
     body = client.get("/").text
-    notice = body[body.index('id="nogl"') : body.index("</div>", body.index('id="nogl"'))]
+    notice = body[
+        body.index('id="nogl"') : body.index("</div>", body.index('id="nogl"'))
+    ]
     assert 'href="/2d"' in notice
     assert 'href="/"' not in notice, "the WebGL notice links to itself"
 
@@ -128,17 +132,18 @@ def test_every_client_module_is_reachable(client, path):
 # runs on both pages. Absent on one => that feature silently does not exist
 # there, which is exactly the failure mode being guarded.
 SHARED_FEATURE_IDS = [
-    "memory-rail",       # refreshMemoryRail
-    "fleet",             # refreshFleet
-    "coordination",      # refreshCoordination
-    "intervene-kinds",   # initInterventions
+    "memory-rail",  # refreshMemoryRail
+    "fleet",  # refreshFleet
+    "coordination",  # refreshCoordination
+    "intervene-kinds",  # initInterventions
     "intervene-radius",
     "intervene-status",
-    "kill-robot",        # initKillRobot
-    "compare",           # initCompare
-    "comparison",        # refreshComparison
-    "console-questions", # initConsole
-    "console-ask",       # the free-form tier
+    "kill-robot",  # initKillRobot
+    "compare",  # initCompare
+    "comparison",  # refreshComparison
+    "console-questions",  # initConsole
+    "console-suggest",  # showQuestions — the fold-away toggle
+    "console-ask",  # the free-form tier
     "console-steps",
     "ticker",
 ]
@@ -166,8 +171,14 @@ def test_the_twin_wires_up_the_shared_features_it_now_has_markup_for(client):
     setInterval by reference and never appear with parentheses.
     """
     body = client.get("/static/scene3d.js").text
-    for name in ("initInterventions", "initKillRobot", "initCompare",
-                 "refreshMemoryRail", "refreshCoordination", "refreshFleet"):
+    for name in (
+        "initInterventions",
+        "initKillRobot",
+        "initCompare",
+        "refreshMemoryRail",
+        "refreshCoordination",
+        "refreshFleet",
+    ):
         wired = f"{name}(" in body or f"setInterval({name}" in body
         assert wired, f"scene3d.js imports {name} but never wires it up"
 
@@ -181,3 +192,73 @@ def test_the_twin_can_place_an_intervention(client):
     assert "intersectPlane" in body, "no ground-plane raycast: tiles unclickable"
     assert "placeIntervention(" in body
     assert "armedIntervention()" in body
+
+
+# --- the scoreboard and the console, after the readability pass --------------
+#
+# Both changes are the kind that regress by accretion: a metric is easy to add
+# back "just this one", and a panel is easy to reorder while editing something
+# near it. These say what the pass decided so a later edit has to argue with it.
+
+# Cut from the strip on purpose. `duplicate effort` and `double work` are
+# genuinely different metrics that sound like one, so a viewer trusts neither;
+# `seen` and `stabilized` are both inside `rescue`; `tiles seen` counts tiles
+# beside numbers that count people. All five are still computed and still on
+# /api/runs — this guards the strip, not the measurement.
+DROPPED_HUD_IDS = ["m-located", "m-stabilized", "m-median", "m-duplicate", "m-coverage"]
+
+# What a viewer reads at a glance: the mission in lives, the rate, the
+# coordination number, and the two integration claims the demo makes out loud.
+KEPT_HUD_IDS = ["m-tick", "m-lost", "m-rescue", "m-doublework", "m-recall", "m-bedrock"]
+
+
+@pytest.mark.parametrize("element_id", DROPPED_HUD_IDS)
+@pytest.mark.parametrize("route", ["/", "/2d"])
+def test_the_scoreboard_stays_trimmed(client, route, element_id):
+    """updateHud no longer writes these, so markup carrying one would render a
+    label with a value frozen at its initial 0 — worse than not showing it."""
+    assert f'id="{element_id}"' not in client.get(route).text, (
+        f"{route} still shows #{element_id}; ui-shared.js stopped filling it, "
+        f"so it would sit at its placeholder for the whole mission"
+    )
+
+
+@pytest.mark.parametrize("element_id", KEPT_HUD_IDS)
+@pytest.mark.parametrize("route", ["/", "/2d"])
+def test_the_scoreboard_keeps_the_six_that_earn_their_place(client, route, element_id):
+    assert f'id="{element_id}"' in client.get(route).text
+
+
+@pytest.mark.parametrize("route", ["/", "/2d"])
+def test_the_console_answer_sits_above_the_question_list(client, route):
+    """The answer renders directly under the box that asked for it.
+
+    It used to render under the six canned-question buttons, which in the 380px
+    rail meant every answer opened below the fold — you asked, and the panel
+    appeared not to respond. Order in the DOM is what fixes it, so order in the
+    DOM is what this asserts.
+    """
+    body = client.get(route).text
+    assert body.index('id="console-answer"') < body.index('id="console-questions"'), (
+        f"{route} renders the console answer below the question list, so an "
+        f"answer opens off-screen in a narrow rail"
+    )
+
+
+def test_uuids_are_kept_out_of_everything_a_human_reads():
+    """Surrogate keys are elided in the console; robot ids are not.
+
+    The distinction is the whole point: `mission_id = '249456ae-…'` is 36
+    characters an operator cannot act on, while `s1` and `m1` are the names on
+    the map. A redaction that ate both would make the console useless.
+    """
+    body = (
+        pathlib.Path(__file__).resolve().parents[1] / "client" / "ui-shared.js"
+    ).read_text()
+    assert "redactIds" in body
+    for call in ("redactIds(answer.text)", "redactIds(answer.sql)"):
+        assert call in body, f"{call} missing: uuids reach the console again"
+    # Anchored at both ends, so it can only match a value that is *entirely* a
+    # uuid. Without the anchors it would drop any column containing one.
+    assert "UUID_WHOLE = /^[0-9a-f]{8}-" in body
+    assert "}$/i" in body

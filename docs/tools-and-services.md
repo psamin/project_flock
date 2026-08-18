@@ -1,4 +1,6 @@
-# Tools and services — what we used, and what the agent did with it
+# project flock — tools and services
+
+*What we used, and what the agent actually did with it.*
 
 Submission answers for "which CockroachDB tools", "which AWS services", the
 optional architecture diagram, and the optional feedback. Every claim points at
@@ -7,7 +9,7 @@ a file you can open. Where a named tool was **not** used, this says so.
 - Repo: <https://github.com/psamin/project_flock> (public, Apache 2.0)
 - Cluster: CockroachDB v26.2.5 — a Cloud cluster with the schema and
   least-privilege grants applied, plus a 3-node Docker rig for the chaos runs
-- Suite: 896 tests, `make test`
+- Suite: 926 tests, `make test`
 
 ---
 
@@ -15,9 +17,9 @@ a file you can open. Where a named tool was **not** used, this says so.
 
 | Tool | Used | Where |
 |---|---|---|
-| **Distributed Vector Indexing** | ✅ load-bearing | [`colony/schema/v1_1.sql`](../colony/schema/v1_1.sql), [`colony/fleetmem/client.py`](../colony/fleetmem/client.py), [`colony/sim/recall.py`](../colony/sim/recall.py) |
-| **Managed MCP Server** | ✅ load-bearing at runtime | [`colony/console/mcp_client.py`](../colony/console/mcp_client.py), [`colony/console/agent.py`](../colony/console/agent.py), [`infra/mcp.py`](../infra/mcp.py) |
-| **Agent Skills** | ✅ routed on at runtime | [`colony/console/skills.py`](../colony/console/skills.py), [`colony/scripts/fetch_skills.sh`](../colony/scripts/fetch_skills.sh) |
+| **Distributed Vector Indexing** | ✅ used at runtime | [`colony/schema/v1_1.sql`](../colony/schema/v1_1.sql), [`colony/fleetmem/client.py`](../colony/fleetmem/client.py), [`colony/sim/recall.py`](../colony/sim/recall.py) |
+| **Managed MCP Server** | ✅ used at runtime | [`colony/console/mcp_client.py`](../colony/console/mcp_client.py), [`colony/console/agent.py`](../colony/console/agent.py), [`infra/mcp.py`](../infra/mcp.py) |
+| **Agent Skills** | ✅ used at runtime | [`colony/console/skills.py`](../colony/console/skills.py), [`colony/scripts/fetch_skills.sh`](../colony/scripts/fetch_skills.sh) |
 | **ccloud CLI** | ❌ not used | — |
 
 ### Distributed vector indexing
@@ -56,7 +58,7 @@ what would transfer — *"when a robot has cleared debris to reach a victim and 
 medic is not yet present, bring the medic rather than continuing to explore"* —
 and each lesson's **situation** is embedded into `mission_memories`. At the next
 plan boundary a robot describes what it is facing, cosine search returns the top
-3 tactics from situations like it, and those ride into the planning prompt. This
+3 tactics from situations like it, and those go into the planning prompt. This
 index carries **no prefix column at all**, because any scope would partition
 exactly the knowledge it exists to generalise.
 
@@ -94,7 +96,7 @@ still returns perfectly plausible rows.
 
 ### Managed MCP Server
 
-Two paths reach the managed endpoint, and only one of them is load-bearing.
+Two paths reach the managed endpoint, and only one of them runs during the demo.
 
 **The editor path.** [`infra/mcp.py`](../infra/mcp.py) prints the config snippet
 §6.2 describes — the one a teammate pastes into Claude Code, Cursor or VS Code:
@@ -104,14 +106,27 @@ uv run python ../infra/mcp.py config --cluster-id <id>
 ```
 
 **The runtime path — what the agent actually does.** The commander console's
-free-form tier ([`colony/console/agent.py`](../colony/console/agent.py)) is a
-Bedrock brain with MCP hands. Ask it a question in the UI and Claude Haiku 4.5
+free-form tier ([`colony/console/agent.py`](../colony/console/agent.py)) is
+Claude deciding and MCP executing. Ask it a question in the UI and Claude Haiku 4.5
 runs a bounded tool loop (`MAX_TURNS = 8`) against
 [`colony/console/mcp_client.py`](../colony/console/mcp_client.py), reading live
 fleet memory through the managed server with a six-tool read allowlist:
 `select_query`, `explain_query`, `get_table_schema`, `list_tables`,
 `show_running_queries` and `show_statement`. So the tool is doing work *during
 the demo*, not at development time.
+
+**What we had to do to make the loop economical.** Left to itself the model
+opened almost every question by guessing a column — `SELECT id, goal, status
+FROM tasks` is the reasonable guess, and it is wrong, because a task's objective
+is `kind` plus `target_x`/`target_y`. The endpoint refused it, the model then
+called `get_table_schema` twice, and the operator watched a red ✕ scroll past
+before any answer arrived. Two round trips and a visible error, for information
+that never changes. The fix is to put all eight tables' columns in the system
+prompt with the traps named out loud (*"there is no `goal`, `name`,
+`description` or `position` column anywhere"*), so `get_table_schema` is now
+what the agent calls to check an **index or a default** — not to look up a name
+it should already have. That is the difference between a tool loop that answers
+in one turn and one that answers in four.
 
 Auth is OAuth 2.1. The endpoint advertises `authorization_code` and
 `refresh_token` only — there is no `client_credentials` grant, so a server-side
@@ -144,7 +159,7 @@ amount of prompting reaches them. `assert_read_only` is imported from
 [`console/reader.py`](../colony/console/reader.py) rather than reimplemented, so
 the two paths cannot drift about what counts as a read.
 
-**The canned tier is still the demo's spine.** Seven audited questions that
+**The seven fixed questions still carry the demo.** Audited queries that
 between them interrogate all four memory systems:
 
 | question | memory | what it reads |
@@ -238,7 +253,7 @@ rationale}`. The rationale becomes the thought bubble in the UI and the row in
 `plans`. Global state is never in the prompt, because a robot that can read
 everything is not solving the problem we set.
 
-**Rules are the floor, not the fallback.** A mission runs identically with no AWS
+**Rules are not a fallback — they are a complete second implementation.** A mission runs identically with no AWS
 credentials at all, and `plans.chosen.source` records `bedrock` or `rules` per
 decision — so *"the LLM is driving this"* is checkable in SQL rather than
 asserted. In a full mission, 15 of 36 decisions are Bedrock's.
@@ -253,8 +268,8 @@ asserted. In a full mission, 15 of 36 decisions are Bedrock's.
 - **Transient vs. fatal is classified, not blanket-caught.** Throttling, quota
   and timeouts fall back to rules; `AccessDeniedException`,
   `ValidationException` and `ResourceNotFoundException` surface — treating a
-  broken IAM policy as weather would mean shipping an AWS integration that never
-  once called AWS while looking perfectly healthy.
+  broken IAM policy as a transient blip would mean shipping an AWS integration
+  that never once called AWS while looking perfectly healthy.
 - **Rate cap** of 4 plan calls per robot per minute
   ([`colony/agents/planning.py`](../colony/agents/planning.py)), with a separate
   smaller reserve for world-changed replans so ordinary planning cannot eat it.
@@ -281,58 +296,51 @@ boto3 chain.
 
 ## 3. Architecture
 
-```
-   Browser                                    ┌──────────────────────────────┐
-   ┌────────────────────────┐                 │            AWS               │
-   │ /     WebGL twin       │                 │  ┌────────────────────────┐  │
-   │ /2d   Canvas 2D        │                 │  │ Amazon Bedrock         │  │
-   │       + commander      │                 │  │  · Claude Haiku 4.5    │  │
-   └───────▲────────────┬───┘                 │  │      robot planning,   │  │
-           │ websocket  │ ask anything        │  │      lessons, commander│  │
-           │ 4 Hz       │                     │  │  · Titan Embeddings V2 │  │
-   ┌───────┴────────────▼───┐                 │  │      512-dim, every    │  │
-   │ Sim server             │                 │  │      belief + lesson   │  │
-   │ FastAPI, 4 Hz          │                 │  └────────▲───────────────┘  │
-   │ authoritative world    │                 │           │ boto3            │
-   └───────▲────────────────┘                 └───────────┼──────────────────┘
-           │ percepts / validated actions                 │
-   ┌───────┴──────────────────────────────────────────────┤
-   │ Robot agents — scout · lifter · medic                 │ rate-capped,
-   │   sense → sync → think → act → report                 │ plan boundaries
-   │   no robot-to-robot channel, by construction          │ only
-   └───────┬───────────────────────────────────────────────┘
-           │ fleetmem SDK (psycopg 3, SERIALIZABLE)
-           │ report_observation · claim_task · complete_task
-           │ get_beliefs · heartbeat · log_plan · log_event
-   ┌───────▼──────────────────────────────────────────────────────────┐
-   │ CockroachDB v26.2.5                                              │
-   │                                                                  │
-   │  WORKING     robots · tasks (leases) · victims · hazards         │
-   │  EPISODIC    observations  VECTOR(512) → obs_embedding_idx       │
-   │  PROVENANCE  plans (based_on) · events                           │
-   │  SEMANTIC    mission_memories VECTOR(512) → mm_situation_idx     │
-   │                                                                  │
-   │  changefeed ──► operator interventions reach the fleet           │
-   │  AS OF SYSTEM TIME ──► the console reads the past                │
-   └───▲───────────────────▲──────────────────────▲───────────────────┘
-       │ psycopg as        │ Managed MCP Server   │ kill a node
-       │ `commander`       │ as `managed-mcp`     │ mid-mission
-       │ (SELECT grant)    │ (tool allowlist)     │
-   ┌───┴───────────┐  ┌────┴─────────────────┐  ┌─┴─────────────────┐
-   │ 7 canned      │  │ Commander agent      │  │ Chaos rig, 3 nodes│
-   │ questions     │  │ Bedrock brain,       │  │ infra/cluster3.sh │
-   │ console/      │  │ MCP hands, equipped  │  └───────────────────┘
-   │ questions.py  │  │ from Agent Skills ───┼──► cockroachdb-skills
-   └───────────────┘  └──────────────────────┘    (pinned, catalog +
-                                                   load-on-match)
+Robots talk **only** to CockroachDB. Bedrock is called **only** when a robot
+needs a new task. Both halves of the console can read the cluster and neither can
+write to it — the left half because of a database grant, the right half because
+of a tool allowlist we control.
+
+```mermaid
+flowchart TB
+    Browser["Browser<br/>/ 3D view — /2d 2D view — commander console"]
+    Sim["Sim server — FastAPI, 4 ticks per second<br/>holds the map, robots, victims, hazards"]
+    Agents["Robot agents — scout, lifter, medic<br/>each sees only its own patch of the map<br/>no robot-to-robot messages exist"]
+    Bedrock["Amazon Bedrock<br/>Claude Haiku 4.5: robot planning, end-of-mission<br/>lessons, and the commander agent<br/>Titan Embeddings V2: 512 dims, every belief and lesson"]
+    Fleetmem["fleetmem SDK — psycopg 3, SERIALIZABLE<br/>report_observation, claim_task, complete_task,<br/>get_beliefs, heartbeat, log_plan, log_event"]
+    DB[("CockroachDB v26.2.5<br/>WORKING: robots, tasks with leases, victims, hazards<br/>EPISODIC: observations VECTOR(512), obs_embedding_idx<br/>PROVENANCE: plans with based_on, events<br/>SEMANTIC: mission_memories VECTOR(512), mm_situation_idx")]
+    Canned["Seven fixed questions<br/>console/questions.py"]
+    Agent["Commander agent<br/>console/agent.py"]
+    MCP["CockroachDB Managed MCP Server"]
+    Skills["CockroachDB Agent Skills<br/>pinned, catalogue plus load-on-match"]
+    Chaos["Chaos rig — 3 nodes<br/>infra/cluster3.sh"]
+
+    Browser <-->|"websocket, 4 Hz"| Sim
+    Sim -->|"percepts"| Agents
+    Agents -->|"validated actions"| Sim
+    Sim -->|"an operator hazard becomes a row"| Fleetmem
+    Agents -->|"only at planning boundaries, rate-capped"| Bedrock
+    Agents --> Fleetmem
+    Fleetmem --> DB
+    DB -->|"changefeed carries operator hazards to the fleet"| Agents
+    Browser --> Canned
+    Browser --> Agent
+    Canned -->|"psycopg as commander, SELECT grant"| DB
+    Agent -->|"Claude decides, tools execute"| Bedrock
+    Agent --> Skills
+    Agent --> MCP
+    MCP -->|"as managed-mcp, tool allowlist"| DB
+    Chaos -->|"kill a node mid-mission"| DB
 ```
 
-Three arrows carry the whole design: robots talk **only** to CockroachDB, Bedrock
-is consulted **only** at plan boundaries, and both console tiers can read the
-cluster and neither can write to it — the left one because of a grant, the right
-one because of an allowlist.
-
----
+**Reading it in one pass.** The sim holds the world and hands each robot only
+what that robot can see. The robot reports what it saw through `fleetmem`, which
+is the only code path to the database. To choose its next task it reads the
+shared task list — written by every robot — and asks Claude, then claims the task
+with a single conditional `UPDATE` that CockroachDB adjudicates. The operator
+breaks the world by inserting a `hazards` row, and a changefeed is the only way
+that reaches the fleet. The console reads the same cluster two different ways and
+can write through neither.
 
 ## 4. Feedback for CockroachDB
 
@@ -363,6 +371,14 @@ an access-control story on "MCP inherits the `commander` grant" and only found i
 was wrong by running `SELECT current_user` through the endpoint. Either honouring
 that key or documenting the service identity prominently would close a gap that
 is easy to over-claim in exactly the direction a security reviewer cares about.
+
+**There is no cheap "describe the whole database" call.** `get_table_schema`
+is per-table, so an agent facing an unfamiliar schema either spends N round
+trips or — as ours did — guesses and eats a refusal. We solved it by
+hard-coding the schema into the system prompt, which works precisely because
+ours is fixed and small; an agent pointed at a database it does not own cannot
+do that. One `get_schema` returning every table's columns in one payload would
+turn the most common opening move of every MCP agent from N calls into one.
 
 **`readOnly: true` still advertises `insert_rows`, `create_table` and
 `create_database`.** We expected the flag to shrink the tool list. Since it does

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Colony — Aftershock</title>
+  <title>Project-Flock — Aftershock</title>
   <style>
     :root { color-scheme: dark; }
     body {
@@ -192,6 +192,15 @@
     }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    /* The suggestion list's own disclosure. Styled as a label rather than a
+       button: it is a way back to the canned tier, not a control competing
+       with the answer above it. */
+    #console-suggest {
+      background: none; border: none; padding: 0; margin: 12px 0 6px;
+      color: #8a8397; font: inherit; font-size: 11px; letter-spacing: 0.06em;
+      cursor: pointer;
+    }
+    #console-suggest:hover { color: #e8e3d9; background: none; }
     #console-questions { display: flex; gap: 6px; flex-wrap: wrap; }
     #console-questions button { text-align: left; }
     #console-questions button .mem {
@@ -226,7 +235,7 @@
 </head>
 <body>
   <header>
-    <h1>COLONY</h1>
+    <h1>PROJECT-FLOCK</h1>
     <span id="status">connecting…</span>
     <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. The seed is what makes a run reproducible — same seed, same mission."></span>
     <span id="mode-badge" class="on">SHARED MEMORY</span>
@@ -238,23 +247,26 @@
   </header>
 
   <!--
-    Every number carries its definition in a tooltip. The audit found three
-    labels a stranger could not interpret and two that quietly disagreed:
-    "explored" counts tiles while "located" counts victims, so a fully explored
-    map beside unlocated victims reads as a contradiction when it is two
-    different questions; and "median" hides that victims never rescued are
-    counted at the mission horizon rather than dropped from the sample.
+    Every number carries its definition in a tooltip, and there are now six of
+    them rather than eleven. The audit's finding was that some labels disagreed
+    with each other — "tiles seen" counts tiles while "victims seen" counts
+    people, which reads as a contradiction when it is two different questions —
+    and tooltips did not fix it, because a viewer reads the strip and not the
+    tooltips. "duplicate effort" beside "double work" was the worst of it: two
+    genuinely different metrics that sound like one, so neither is trusted.
+
+    Cutting is the fix. `seen` and `stabilized` are both inside `rescue`;
+    `median` and `duplicate effort` are §4.7 comparison numbers and belong in
+    the comparison line, which prints them; `tiles seen` counts the wrong noun.
+    All five are still measured and still on /api/runs — they are off the strip,
+    not out of the mission. What is left is lives, rate, coordination, and the
+    two integration claims the demo makes out loud.
   -->
   <div id="hud">
     <span title="Simulation tick. The mission horizon is 1200.">tick <b id="m-tick">0</b></span>
-    <span title="Victims the fleet has seen at least once. Live simulator state, not derived from the event log.">victims seen <b id="m-located">0</b></span>
-    <span title="Victims stabilized by a medic. Counted from victim_stabilized rows in the event log.">stabilized <b id="m-stabilized">0</b></span>
-    <span title="Victims who passed their vitals deadline. Counted from victim_lost rows in the event log.">lost <b id="m-lost">0</b></span>
+    <span title="Victims who passed their vitals deadline. Counted from victim_lost rows in the event log. The mission stated in lives.">lost <b id="m-lost">0</b></span>
     <span title="Stabilized divided by total victims on the map.">rescue rate <b id="m-rescue">0%</b></span>
-    <span title="Median ticks from mission start to stabilization. Victims never rescued are counted at the 1200-tick horizon rather than dropped, so this is a whole-mission median and not an average over the lucky ones.">median rescue <b id="m-median">—</b><small> ticks</small></span>
-    <span title="Tile visits to ground another robot had already covered, divided by all tile visits. Revisiting your own ground does not count.">duplicate effort <b id="m-duplicate">0%</b></span>
-    <span title="Tasks claimed by more than one robot over the mission — one robot walking to work another had already finished. Distinct from the lease guarantee, which is about two robots holding a task at the same instant.">double work <b id="m-doublework">0</b></span>
-    <span title="Share of reachable, non-wall tiles any robot has seen. Counts tiles, not victims — a fully seen map can still hold victims nobody has reported yet.">tiles seen <b id="m-coverage">0%</b></span>
+    <span title="Tasks claimed by more than one robot over the mission — one robot walking to work another had already finished. The most direct measure that coordination is working: zero with shared memory on, climbing on the baseline. Distinct from the lease guarantee, which is about two robots holding a task at the same instant.">double work <b id="m-doublework">0</b></span>
     <!--
       The two integration claims the demo makes out loud, on the scoreboard.
 
@@ -327,13 +339,17 @@
       <button id="console-ask-go">ask</button>
       <span id="console-agent-note"></span>
     </div>
-    <div id="console-questions"></div>
+    <!-- The answer sits directly under the box that asked for it, and the
+         suggestion list folds away on submit. It used to sit under the six
+         buttons, so every answer opened below whatever they pushed down. -->
     <div id="console-answer">
       <div id="console-summary"></div>
       <div id="console-steps"></div>
       <div id="console-sql"></div>
       <div id="console-rows"></div>
     </div>
+    <button id="console-suggest">▾ suggested questions</button>
+    <div id="console-questions"></div>
   </section>
 
   <!-- §3.6: the coordination feed. The ticker below says what happened; this
