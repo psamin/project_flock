@@ -205,6 +205,10 @@ async function askConsole(question, ctx) {
   summary.textContent = "asking fleet memory…";
   sqlBox.textContent = "";
   rowsBox.textContent = "";
+  // Cleared here too: the two tiers share this panel, and leaving the agent's
+  // tool trace under a canned answer would credit MCP for a plain psycopg read.
+  const steps = document.getElementById("console-steps");
+  if (steps) steps.textContent = "";
 
   const body = { question };
   const subject = subjectRobot(ctx);
@@ -246,6 +250,115 @@ async function askConsole(question, ctx) {
   }
 }
 
+// --- the free-form tier (§6.2 tools #1 and #3) -------------------------------
+//
+// The six buttons above are the reliable path and stay the demo's spine. This
+// is the tier over them: a Bedrock agent that reads the same cluster through
+// the CockroachDB Managed MCP Server and loads CockroachDB Agent Skills as it
+// works. Its steps are rendered rather than hidden, because "an agent answered"
+// is a claim, and the tool calls underneath it are the evidence.
+
+/** Render one agent answer: what it concluded, then how it got there. */
+function renderAgentAnswer(answer) {
+  const summary = document.getElementById("console-summary");
+  const sqlBox = document.getElementById("console-sql");
+  const rowsBox = document.getElementById("console-rows");
+  const steps = document.getElementById("console-steps");
+
+  if (answer.error) {
+    summary.className = "err";
+    summary.textContent = answer.error;
+    if (steps) steps.textContent = "";
+    return;
+  }
+  summary.className = "";
+  summary.textContent = answer.text;
+  sqlBox.textContent = (answer.sql || []).join("\n\n");
+
+  // The provenance line. A judge reading this can see the model chose a skill
+  // and which tools it actually called — neither is inferable from the prose.
+  const bits = [
+    `${answer.turns} turn${answer.turns === 1 ? "" : "s"}`,
+    `${answer.elapsed_s}s`,
+    answer.model.replace(/^us\./, ""),
+  ];
+  if ((answer.skills_used || []).length) {
+    bits.push(`skills: ${answer.skills_used.join(", ")}`);
+  }
+  rowsBox.textContent = bits.join(" · ");
+
+  if (steps) {
+    steps.innerHTML = "";
+    for (const step of answer.steps || []) {
+      const line = document.createElement("div");
+      line.className = step.ok ? "ok" : "bad";
+      const arg = step.argument.replace(/\s+/g, " ").slice(0, 90);
+      line.textContent = `${step.ok ? "→" : "✕"} ${step.tool}${arg ? ` ${arg}` : ""}`;
+      steps.appendChild(line);
+    }
+  }
+}
+
+async function askAgent(ctx) {
+  const input = document.getElementById("console-ask");
+  const summary = document.getElementById("console-summary");
+  const steps = document.getElementById("console-steps");
+  const question = input.value.trim();
+  if (!question) return;
+
+  summary.className = "";
+  // Named rather than a generic spinner: the wait is several seconds and the
+  // two services doing the work are the two tools being claimed.
+  summary.textContent = "asking Claude, reading the cluster over MCP…";
+  document.getElementById("console-sql").textContent = "";
+  document.getElementById("console-rows").textContent = "";
+  if (steps) steps.textContent = "";
+
+  try {
+    const answer = await (
+      await fetch("/api/console/ask-agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      })
+    ).json();
+    renderAgentAnswer(answer);
+  } catch (err) {
+    summary.className = "err";
+    summary.textContent = `agent error: ${err.message}`;
+  }
+}
+
+/** Enable the ask row, or explain why it is off. */
+async function initAgent(ctx) {
+  const row = document.getElementById("console-agent");
+  if (!row) return;
+  const input = document.getElementById("console-ask");
+  const button = document.getElementById("console-ask-go");
+  const note = document.getElementById("console-agent-note");
+
+  const send = () => askAgent(ctx);
+  button.addEventListener("click", send);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") send();
+  });
+
+  try {
+    const state = await (await fetch("/api/console/agent")).json();
+    if (!state.available) {
+      input.disabled = true;
+      button.disabled = true;
+      note.textContent = state.reason || "unavailable";
+      return;
+    }
+    note.textContent = `Claude + MCP · ${state.skills} skills`;
+  } catch {
+    input.disabled = true;
+    button.disabled = true;
+    note.textContent = "unreachable";
+  }
+}
+
 /** Wire the six question buttons.
  *
  * `ctx` supplies the renderer state the questions depend on:
@@ -256,6 +369,7 @@ export async function initConsole(ctx) {
   const holder = document.getElementById("console-questions");
   const status = document.getElementById("console-status");
   if (!holder) return;
+  initAgent(ctx);
   try {
     const data = await (await fetch("/api/console/questions")).json();
     if (!data.available) {

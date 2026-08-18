@@ -510,11 +510,37 @@ class CockroachFleetMem:
             # looking like abandoned work to the takeover query.
             done = self.conn.execute(
                 "UPDATE tasks SET status = %s, done_at = now(), lease_expires_at = NULL"
-                " WHERE id = %s AND claimed_by = %s AND status != %s RETURNING id",
+                " WHERE id = %s AND claimed_by = %s AND status != %s"
+                " RETURNING id, mission_id, kind, target_x, target_y",
                 (DONE, task_id, robot_id, DONE),
             ).fetchone()
             if done is None:
                 return None
+
+            # T-05c. A finished deliver_kit *is* a stabilized victim — the row
+            # and the task are created together in `report_victim`, at the same
+            # tile — but nothing advanced the state, so `victims` was written
+            # once and never updated. Measured on a real cluster: 361 rows, all
+            # 'located', against 21 victim_stabilized events. WORKING memory is
+            # meant to be what is true right now, and this half of it was frozen
+            # at first sighting.
+            #
+            # The console read it and reported it. `unreached_victims` filters
+            # `state != 'stabilized'`, so every rescued victim stayed on the
+            # list forever and "every victim the fleet has found is stabilized"
+            # was unreachable — a judge asking the console after a 9/9 mission
+            # was told nine people still needed help.
+            #
+            # In this transaction, not after it: the completion and the state it
+            # implies commit together, so no reader sees a delivered kit next to
+            # a victim still waiting for one.
+            if done["kind"] == "deliver_kit":
+                self.conn.execute(
+                    "UPDATE victims SET state = 'stabilized'"
+                    " WHERE mission_id = %s AND pos_x = %s AND pos_y = %s"
+                    "   AND state != 'stabilized'",
+                    (done["mission_id"], done["target_x"], done["target_y"]),
+                )
             unblocked = self.conn.execute(
                 "UPDATE tasks SET status = %s"
                 " WHERE status = %s AND %s = ANY(depends_on)"
@@ -539,7 +565,21 @@ class CockroachFleetMem:
             "   AND (status = %s"
             "        OR (status IN ('claimed', 'in_progress')"
             "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
-            " ORDER BY priority DESC",
+            # T-45. priority alone is not a total order, and the remainder used
+            # to be whatever the distributed scan returned. `tasks.id` is
+            # gen_random_uuid(), so equal-priority work came back in an order
+            # that changed between runs of the same seeded mission — two
+            # identical resets measured 327 and 337 ticks, and the lessons
+            # cassette (keyed on a digest carrying the tick count) then missed.
+            #
+            # Tiebreak on what the task *is*, never on its id: the ids differ
+            # across runs by construction, so ORDER BY id would be stable
+            # within a run and useless between them. This is T-08's fix
+            # (tiebreak on the sector name, not str(t.id)) in a second place.
+            #
+            # Rows still tied here are the same kind of work at the same tile
+            # at the same priority, i.e. interchangeable by definition.
+            " ORDER BY priority DESC, kind, target_x, target_y",
             (mission_id, OPEN),
         ).fetchall()
         return [_task(r) for r in rows]

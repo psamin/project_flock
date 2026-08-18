@@ -94,11 +94,13 @@ def test_a_trailing_semicolon_is_still_one_read():
 # --- the catalog ------------------------------------------------------------
 
 
-def test_there_are_six_canned_questions():
+def test_there_are_seven_canned_questions():
     """§5.1 asks for five; the sixth reads semantic memory, which arrived with
-    cross-mission recall. The count is asserted so quietly dropping one to make
-    a test pass shows up here."""
-    assert len(QUESTIONS) == 6
+    cross-mission recall, and the seventh reads the past via AS OF SYSTEM TIME.
+    The count is asserted so quietly dropping one to make a test pass shows up
+    here — the guard is against silent removal, not against deliberate growth,
+    so bump it *with* a reason or not at all."""
+    assert len(QUESTIONS) == 7
 
 
 def test_the_questions_cover_all_four_memory_systems():
@@ -153,7 +155,7 @@ def test_semantic_memory_is_the_only_question_that_leaves_the_mission():
 
 def test_the_catalog_is_json_shaped():
     entries = catalog()
-    assert len(entries) == 6
+    assert len(entries) == 7
     for entry in entries:
         assert {"id", "prompt", "memory", "params"} == set(entry)
 
@@ -352,3 +354,54 @@ def test_the_session_itself_is_read_only(reader):
     through would hit a read-only session."""
     row = reader.read("SHOW default_transaction_read_only")
     assert row[0]["default_transaction_read_only"] == "on"
+
+
+def test_the_time_travel_question_is_still_a_read():
+    """`AS OF SYSTEM TIME` must survive the read-only guard. It reads history
+    rather than writing anything, but the guard scans keywords and a new clause
+    is exactly the kind of thing that trips it."""
+    assert_read_only(BY_ID["beliefs_30s_ago"].sql)
+
+
+def test_the_time_travel_interval_is_a_literal_not_interpolated():
+    """v26.2 accepts only a constant expression after AS OF SYSTEM TIME, so the
+    interval cannot be a placeholder — which means the one way to make it
+    configurable would be building the SQL by hand. Assert nobody does.
+
+    The question takes `mission_id` and nothing else, and every parameter it
+    does take is still bound with %s.
+    """
+    q = BY_ID["beliefs_30s_ago"]
+    assert q.params == ("mission_id",), q.params
+    assert "'-30s'" in q.sql, "the interval should be a literal in the SQL"
+    assert "%s" in q.sql, "mission_id must still be bound, not formatted in"
+    assert ".format(" not in q.sql and "f\"" not in q.sql
+
+
+@needs_db
+def test_time_travel_sees_the_past_not_the_present(db, mission):
+    """The point of the question, and the only assertion that proves it works:
+    a row written *after* the historical timestamp must be invisible to it.
+
+    Without `AS OF SYSTEM TIME` this passes trivially at zero rows and fails the
+    moment anything is written, so it is asserted in both directions.
+    """
+    import time
+
+    db.report_observation(mission, "s1", "victim", (1, 1), confidence=1.0)
+    time.sleep(31)
+    db.report_observation(mission, "s2", "hazard", (40, 40), confidence=1.0)
+
+    reader = ReadOnlyReader()
+    past = answer(reader, "beliefs_30s_ago", mission_id=mission)
+    now = answer(reader, "what_do_we_know", mission_id=mission, x=20, y=20, radius=100)
+
+    past_kinds = {r["kind"] for r in past.rows}
+    now_kinds = {r["kind"] for r in now.rows}
+
+    assert "victim" in past_kinds, "the older row must be visible in the past"
+    assert "hazard" not in past_kinds, (
+        "a row written after the historical timestamp must not be visible; "
+        f"got {past_kinds}"
+    )
+    assert {"victim", "hazard"} <= now_kinds, f"both visible now, got {now_kinds}"

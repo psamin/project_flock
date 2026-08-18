@@ -58,6 +58,24 @@ You can break it live, three ways, and watch it recover:
 A commander console answers questions about the running mission in read-only
 SQL — including *"why did robot m1 do that?"*, which is a join, not a story.
 
+## Why this generalises
+
+Robots are the setting, not the claim. Strip the rubble away and Colony is a
+pattern for **any fleet of agents that must not lose work when one of them
+dies**: ownership is a lease rather than an assignment, so a worker that
+disappears frees its own work with nobody watching; coordination is a property
+of the data model rather than of a message bus, so agents that never address
+each other still hand off; and every decision stores the rows that caused it,
+so "why did that happen" survives the process that decided it.
+
+That shape is the same whether the agents are lifters and medics, a bank of
+document-processing workers, or an LLM agent pool where one call finds
+something the next needs. The parts most systems build for this — a scheduler,
+a heartbeat watchdog, a reassignment sweeper, a message broker — are the parts
+we deleted, and the database does their job under `SERIALIZABLE` without a
+coordinator. The disaster scenario is what makes the failure modes visible and
+the stakes legible; it is not what makes the idea useful.
+
 ## How we built it
 
 **The schema is the thesis.** Four memory systems as named tables, because the
@@ -250,12 +268,42 @@ we designed.
 **Third-party components.** CockroachDB v26.2.5 (CCL distribution, under Cockroach
 Labs' current licensing), FastAPI (MIT), uvicorn (BSD), psycopg 3 (LGPL), and
 boto3 (Apache 2.0) — boto3 is an *optional* extra, lazily imported, which is why
-the demo runs with no AWS SDK installed at all. Our own code is Apache 2.0. No
-third-party trademarks, logos, or copyrighted music appear in the demo video.
+the demo runs with no AWS SDK installed at all. The CockroachDB Agent Skills
+repo (Apache 2.0) is fetched at a pinned commit rather than vendored; see
+[ASSETS.md](../ASSETS.md). Our own code is Apache 2.0. No third-party
+trademarks, logos, or copyrighted music appear in the demo video.
 
 **Tools listed in our plan that we did *not* ship.** Our internal plan named the
-CockroachDB Agent Skills repo and the `ccloud` CLI as additional integrations.
-Neither was delivered, and we are not claiming them.
+`ccloud` CLI as an additional integration. It was not delivered, and we are not
+claiming it. Nothing in this repository shells out to `ccloud`; the SQL roles it
+was going to create are created in SQL by `infra/credentials.py`.
+
+**What "we use these tools" means here, precisely.** Two CockroachDB tools are
+load-bearing in the running demo and a third is load-bearing at development
+time, and those are different claims:
+
+- **Distributed vector indexing** — `mission_memories.mm_situation_idx` serves
+  tactical recall on every plan boundary, and `EXPLAIN` says `vector search`.
+  The console will show you that plan live. The *other* vector query, the
+  reconcile gate on `observations`, is a deliberate `FULL SCAN` — see the README
+  for why exactness beats an approximate top-k there. We would rather state that
+  than have a judge run `EXPLAIN` and think they caught us.
+- **Managed MCP Server** — the commander console's free-form tier reads the live
+  cluster through it. Not a config snippet we printed: `console/mcp_client.py`
+  is an OAuth 2.1 client against `cockroachlabs.cloud/mcp`, and every answer in
+  that tier arrives via `tools/call`. It is also wired into our editors, which
+  is where we first found that the endpoint connects as `managed-mcp` rather
+  than as the `commander` role our config claimed.
+- **Agent Skills repo** — the same tier routes on the 34 skills' descriptions
+  and loads a body when one matches. The console prints which skill it chose;
+  asking it to audit privileges loads `hardening-user-privileges`, and asking
+  why the cluster is slow loads `triaging-live-sql-activity`. That is
+  progressive disclosure as the spec intends, not a skill pasted into a prompt.
+
+The honest caveat on the third: the agent consults a skill when one is relevant
+and does not when none is, so a question about which robots are stuck loads
+nothing. We think that is the tool working rather than the tool idling, but it
+means "used on every question" would be false.
 
 ---
 

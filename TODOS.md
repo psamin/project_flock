@@ -9,7 +9,7 @@ Deferred work, with enough context to be picked up cold. Surfaced by
 ## 1. Consolidate the duplicated websocket transport
 
 **What:** `connect()` and its frame-dispatch logic exist twice — once in
-`colony/client/app.js`, once in the `/sim3d` renderer.
+`colony/client/app.js` (now `/2d`), once in the twin's renderer (now `/`).
 
 **Why:** The eng review extracted the renderer-independent UI code
 (`TICKER_TEXT`, `TICKER_CLASS`, `setText`, `updateHud`, `formatEvent`, the
@@ -35,7 +35,7 @@ the video is recorded and the submission is in, not before.
 
 ## 2. Real browser tests for the renderers
 
-**What:** A Playwright suite covering both `/` and `/sim3d` — canvas renders,
+**What:** A Playwright suite covering both `/` and `/2d` — canvas renders,
 robot click opens the provenance panel, the WebGL-absent path shows the fallback
 notice, the three fog states are visually distinct, mission restart does not leak.
 

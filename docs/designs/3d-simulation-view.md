@@ -18,6 +18,32 @@ visibly perceive and act.
 
 The 2D view at `/` is not modified and remains live.
 
+> **As built — the routes later swapped.** Everything below describes the twin
+> as the second route, and it shipped that way. It is now the *first*: `/` is
+> the twin, `/2d` is the Canvas 2D renderer, and `/sim3d` is kept as an alias
+> because this document and the video script name it.
+>
+> Two things in this design did not survive that swap, and both are worth
+> reading as amendments rather than as errors:
+>
+> 1. **Premise 4's justification inverts.** "WebGL becomes a hard requirement
+>    for `/sim3d` only… defensible only because `/` keeps working — so `/` keeps
+>    working" is still the right principle, but the page that keeps working is
+>    now `/2d`. The capability notice had to be repointed there; pointing it at
+>    `/` would have made it a self-link, and a loop for exactly the visitor with
+>    no other way in. `test_the_webgl_escape_hatch_is_not_a_self_link` exists
+>    because that is the obvious way to get this wrong.
+> 2. **"A second view, not a second world" was true of the simulation and false
+>    of the UI.** The operator panel, coordination feed and fleet panel all
+>    landed after this design and went into `index.html` only, so for two days
+>    the twin was a strictly poorer page and nothing failed — every
+>    `ui-shared.js` function no-ops when its element is missing. Parity is now
+>    asserted by id in `test_routes.py` rather than assumed.
+>
+> The twin also gained what it never had: ground-plane tile picking (it could
+> only raycast robots, so no disruption could be placed there), the sector grid,
+> and a role legend.
+
 ## What Makes This Cool
 
 A city block that **builds itself out of the dark** as the fleet explores, and

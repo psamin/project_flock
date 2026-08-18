@@ -1,0 +1,69 @@
+# The whole demo on one host: database, schema, seeded tactics, and the server.
+#
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#
+# Everything is self-contained on purpose. §6.1 wants a public URL that stays
+# up and free through Sept 15, and every external dependency is one more thing
+# that can quietly expire during judging:
+#
+#   no AWS credentials  - the committed cassette carries Claude's recorded
+#                         decisions, so the box holds no secret to leak.
+#   no Cloud cluster    - CockroachDB runs beside the app. Point COLONY_DSN at
+#                         Cloud instead if you want the managed one; nothing
+#                         else changes.
+#
+# The single-node database is deliberate here. This deployment is the *demo*,
+# not the resilience story — the node-kill runs on the 3-node rig in infra/,
+# which is where killing a node proves something.
+services:
+  cockroach:
+    image: cockroachdb/cockroach:v26.2.5
+    command: start-single-node --insecure
+    volumes:
+      - crdb:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health?ready=1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    restart: unless-stopped
+
+  # One-shot. Applies the schema (idempotent — test_schema_is_idempotent pins
+  # that) and seeds tactics only when SEMANTIC memory is empty, so a restart
+  # does not pile up a fresh set of lessons on every boot.
+  init:
+    build: .
+    depends_on:
+      cockroach:
+        condition: service_healthy
+    environment:
+      COLONY_DSN: postgresql://root@cockroach:26257/colony?sslmode=disable
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        python -m schema.apply "$$COLONY_DSN"
+        n=$$(python -c "
+        from fleetmem.client import CockroachFleetMem
+        m=CockroachFleetMem(); print(len(m.recall_lessons(None, limit=100))); m.close()")
+        if [ "$$n" -eq 0 ]; then
+          echo "seeding tactics (semantic memory is empty)"
+          python -m sim.seed_memory
+        else
+          echo "semantic memory already has $$n tactics; skipping seed"
+        fi
+    restart: "no"
+
+  colony:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      COLONY_DSN: postgresql://root@cockroach:26257/colony?sslmode=disable
+    ports:
+      - "80:8000"
+    restart: unless-stopped
+
+volumes:
+  crdb:

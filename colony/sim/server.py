@@ -181,6 +181,13 @@ class Mission:
         # Separate from `self.mem` on purpose: the sim writes and the console
         # does not, so they are different identities against the same cluster.
         self._reader: ReadOnlyReader | None = None
+        # The commander agent (§6.2 tools #1 and #3), built on first use because
+        # it opens a Bedrock client and reads the skills catalogue off disk, and
+        # a mission nobody asks a free-form question of should pay neither cost.
+        # `False` means "tried once and it is not available here" — distinct from
+        # `None`, which means "not tried yet", so a missing credential is not
+        # re-diagnosed on every keystroke.
+        self._agent: Any | None = None
         # Robots killed on cue (§3.6). They stay in `agents` — a killed robot is
         # not gone, it has stopped answering, and the difference is the point:
         # its rows are still in fleet memory and its lease is still ticking down.
@@ -209,6 +216,26 @@ class Mission:
         if self._reader is None:
             self._reader = ReadOnlyReader()
         return self._reader
+
+    def agent(self) -> Any | None:
+        """The commander agent, or None if this deployment cannot run one.
+
+        Unavailability is normal rather than exceptional — no AWS credentials,
+        or nobody has run the one-time MCP login — and the console is expected
+        to fall back to the canned questions and say why.
+        """
+        if self._agent is None:
+            from console.agent import CommanderAgent
+
+            try:
+                self._agent = CommanderAgent()
+            except Exception:
+                # Broad on purpose: this constructs a boto3 client and reads a
+                # token file, and every way that can fail means the same thing
+                # to the console — no agent, use the canned questions. A missing
+                # credential must not take the whole console down with it.
+                self._agent = False
+        return self._agent or None
 
     # --- mission lifecycle ------------------------------------------------
 
@@ -1046,6 +1073,71 @@ async def console_catalog() -> dict[str, Any]:
     }
 
 
+@app.get("/api/console/agent")
+async def console_agent_status() -> dict[str, Any]:
+    """Whether the free-form tier is usable here, and why not when it is not.
+
+    Reported rather than hidden: "the agent is off because nobody ran the MCP
+    login" is a thing an operator can fix, and a console that silently offers
+    only canned questions looks like a console that never had another tier.
+    """
+    from console.agent import availability
+
+    state = availability()
+    state["console"] = mission.console_available
+    return state
+
+
+@app.post("/api/console/ask-agent")
+async def console_ask_agent(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Answer a free-form question through Bedrock + the Managed MCP Server.
+
+    This is the path that makes both CockroachDB tools load-bearing at runtime:
+    the model reads live fleet memory through MCP and equips itself from the
+    Agent Skills repo while doing it. The canned questions in `/api/console/ask`
+    remain the reliable tier, and a failure here says so rather than pretending.
+
+    Runs in a worker thread: the agent loop is several seconds of blocking HTTP
+    to Bedrock and to the managed endpoint, and the tick loop shares this event
+    loop. Answering a console question must not stall the mission.
+    """
+    body = body or {}
+    question = str(body.get("question", "")).strip()
+    if not question:
+        return {"error": "ask something"}
+    if len(question) > 500:
+        # Not a security boundary — the read-only layers are that. This keeps a
+        # pasted wall of text from becoming a long, expensive tool loop.
+        return {"error": "question too long; keep it under 500 characters"}
+
+    agent = mission.agent()
+    if agent is None:
+        from console.agent import availability
+
+        state = availability()
+        return {
+            "error": (
+                f"the commander agent is unavailable ({state['reason']}). "
+                f"The canned questions still work."
+            ),
+            "fallback": "canned",
+        }
+
+    try:
+        answer = await asyncio.to_thread(
+            agent.ask, question, str(mission.mission_id)
+        )
+    except Exception as exc:
+        # Bedrock throttling, an expired MCP token, a transport failure. The
+        # canned questions do not depend on either service, so the console is
+        # told to fall back rather than shown a stack trace.
+        return {
+            "error": f"the agent could not answer: {exc}",
+            "fallback": "canned",
+        }
+    return answer.as_dict()
+
+
 @app.get("/api/fleet")
 async def fleet() -> dict[str, Any]:
     """Per-robot status: what it holds, its lease countdown, its last decision."""
@@ -1268,20 +1360,51 @@ async def ws(socket: WebSocket) -> None:
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(CLIENT_DIR / "index.html")
+    """The digital-twin view (docs/designs/3d-simulation-view.md).
+
+    The twin is the demo, so it is what a judge who types the bare URL gets.
+    It was the second route for its first two days, and everything built after
+    it — the operator panel, the coordination feed, the fleet panel — landed
+    only on the 2D page, which is the actual reason this swap is more than a
+    line: `/` has to *carry* those, not merely serve a nicer picture.
+
+    Both renderers read the same `/ws` frames and show the same numbers. There
+    is one simulation; this is a view of it.
+
+    The cost of serving it here is that `/` now requires WebGL 2, which it
+    deliberately did not before. `/2d` below is what makes that acceptable: the
+    capability gate in `sim3d.html` runs before Three.js is fetched and sends a
+    machine that cannot render here to a page that needs nothing.
+    """
+    return FileResponse(CLIENT_DIR / "sim3d.html")
 
 
 @app.get("/sim3d")
 async def sim3d() -> FileResponse:
-    """The digital-twin view (docs/designs/3d-simulation-view.md).
+    """Where the twin used to live. Kept because things point at it.
 
-    A second renderer over the same authoritative sim — same `/ws` frames, same
-    numbers — not a second world. It is a separate route rather than a mode on
-    `/` because it requires WebGL and `/` deliberately does not: if a judge's
-    machine cannot run this one, the Canvas 2D view is still there and still
-    shows the whole mission.
+    `docs/designs/3d-simulation-view.md`, `docs/video-script.md` and
+    `docs/deploy.md` all name this URL, and so does anything a teammate
+    bookmarked. Serving the same page costs one line; a 404 on a URL in our own
+    design record costs a judge's confidence.
     """
     return FileResponse(CLIENT_DIR / "sim3d.html")
+
+
+@app.get("/2d")
+async def two_d() -> FileResponse:
+    """The Canvas 2D renderer — the floor under the twin.
+
+    No WebGL, no CDN, no bundler: the sprites are drawn in code (`atlas.js`),
+    so this page renders on a machine with hardware acceleration disabled, in a
+    VM without a GPU, or over remote desktop. That is the entire reason it
+    still exists now that it is not the front door.
+
+    `sim3d.html`'s WebGL notice links here, so this path is load-bearing rather
+    than legacy — if it moves, that notice becomes a dead end for exactly the
+    visitor who most needs it.
+    """
+    return FileResponse(CLIENT_DIR / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")

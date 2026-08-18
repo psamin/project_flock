@@ -170,6 +170,28 @@
       margin-bottom: 8px;
     }
     #console-head span { color: #8a8397; font-size: 11px; letter-spacing: 0.06em; }
+    #console-agent {
+      display: flex; gap: 6px; align-items: center; margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    #console-ask {
+      flex: 1 1 320px; min-width: 0; background: #14121a; color: #e8e3d9;
+      border: 1px solid #2e2939; border-radius: 3px; padding: 6px 8px;
+      font: inherit; font-size: 12px;
+    }
+    #console-ask:focus { outline: none; border-color: #63c5da; }
+    #console-ask:disabled { color: #6d6779; }
+    #console-agent-note {
+      color: #8a8397; font-size: 11px; letter-spacing: 0.04em;
+    }
+    /* The agent's tool trace. Monospace and dim: it is evidence sitting under
+       the answer, not something to read first. */
+    #console-steps {
+      font-size: 11px; color: #6d6779; margin-bottom: 6px;
+      max-height: 110px; overflow-y: auto;
+    }
+    #console-steps .ok { color: #7f96a8; }
+    #console-steps .bad { color: #a8737f; }
     #console-questions { display: flex; gap: 6px; flex-wrap: wrap; }
     #console-questions button { text-align: left; }
     #console-questions button .mem {
@@ -211,6 +233,8 @@
     <button id="toggle">coordination: ON</button>
     <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
     <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
+    <a href="/" style="color:#8a8397;font-size:11px;"
+       title="The digital twin: the same mission in 3D. Needs WebGL 2.">digital twin →</a>
   </header>
 
   <!--
@@ -294,9 +318,19 @@
       <b>COMMANDER CONSOLE</b>
       <span id="console-status">read-only · answers from live fleet memory</span>
     </div>
+    <!-- The free-form tier. The buttons below stay the reliable path; this row
+         is a Bedrock agent reading the same cluster through the Managed MCP
+         Server, with the CockroachDB Agent Skills repo available to it. -->
+    <div id="console-agent">
+      <input id="console-ask" type="text" maxlength="500"
+             placeholder="ask the fleet anything — e.g. which robots are stuck, and why?" />
+      <button id="console-ask-go">ask</button>
+      <span id="console-agent-note"></span>
+    </div>
     <div id="console-questions"></div>
     <div id="console-answer">
       <div id="console-summary"></div>
+      <div id="console-steps"></div>
       <div id="console-sql"></div>
       <div id="console-rows"></div>
     </div>

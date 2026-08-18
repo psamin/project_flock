@@ -29,21 +29,40 @@ as an argument, not as DDL.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 701 tests
+make test     # 896 tests
+```
+
+The commander console's free-form tier needs two more things, both optional and
+both one-time. Without them the console still answers its canned questions,
+which is the tier the demo leans on:
+
+```bash
+make skills      # fetch the CockroachDB Agent Skills repo (pinned)
+make mcp-login   # authorise once in a browser; every later run is headless
+make console-check   # is it wired up here? prints why not, if not
 ```
 
 Two views of the same mission, on the same frames:
 
 | URL | What it is | Needs |
 |---|---|---|
-| [`/`](http://localhost:8000/) | Canvas 2D top-down. Fog of war, thought bubbles, scoreboard. | nothing |
-| [`/sim3d`](http://localhost:8000/sim3d) | Digital twin: an orbitable floating island, robots with sensor volumes and pose telemetry, and a camera that frames the story off the event stream. | WebGL 2 |
+| [`/`](http://localhost:8000/) | Digital twin: an orbitable floating island, robots with sensor volumes and pose telemetry, a camera that frames the story off the event stream — and every panel below. | WebGL 2 |
+| [`/2d`](http://localhost:8000/2d) | Canvas 2D top-down. Fog of war, thought bubbles, scoreboard. | nothing |
 
-`/sim3d` is a second *renderer*, not a second simulation — it reads the same
-`/ws` frames and shows the same numbers. It is a separate route rather than a
-mode because it requires WebGL and `/` deliberately does not: if a machine
-cannot run it, the 2D view still shows the whole mission, and the 3D page says
-so and links there.
+`/2d` is a second *renderer*, not a second simulation — it reads the same `/ws`
+frames and shows the same numbers, and both pages share `ui-shared.js` for the
+HUD, memory rail, fleet panel, coordination feed, operator controls and
+commander console.
+
+It is a separate route rather than a mode because the twin requires WebGL and
+`/2d` deliberately does not. That is now load-bearing rather than tidy: the
+front door is the page that can fail on a laptop with hardware acceleration
+off, so the twin checks for WebGL *before* it fetches 756K of Three.js and
+sends anyone it cannot serve to `/2d`. A test asserts that notice does not link
+to itself, which is the obvious way to get this wrong.
+
+`/sim3d` still resolves to the twin — the design doc and video script name that
+URL.
 
 `make sim` runs without a cluster too — it falls back to in-memory fleet memory
 and says so, so nothing is blocked on CockroachDB. Database-backed tests skip
@@ -57,9 +76,9 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
 
 ```
  Browser ── two views of one mission, same frames, same numbers:
-    │        /       Canvas 2D · fog of war · scoreboard · ON/OFF toggle
-    │        /sim3d  WebGL digital twin · orbitable floating island ·
-    │                sensor volumes · pose telemetry · camera director
+    │        /       WebGL digital twin · orbitable island · sensor volumes ·
+    │                pose telemetry · camera director · operator · console
+    │        /2d     Canvas 2D · fog of war · scoreboard · no WebGL needed
     ▲ websocket (state frames, 4 Hz)
     │
  Sim server (Python 3.12 / FastAPI) — authoritative world
@@ -76,7 +95,11 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
        │                              ▲                    ▲
  Orchestrator ────────────────────────┘                    │
     · lost-marking only — allocation and unblocking live in the data model
- Commander console ── read-only SQL / CockroachDB Managed MCP Server
+ Commander console ── two tiers, both read-only
+    · seven canned questions ─ psycopg as `commander` (SELECT-only grant)
+    · ask anything ────────── Claude on Bedrock, reading the cluster through the
+      CockroachDB Managed MCP Server, equipping itself from the CockroachDB
+      Agent Skills repo
  Operator console ── breaks the world on cue. The command is a `hazards` row and
     a CRDB changefeed carries it to the fleet; there is no other path in.
  Chaos rig ── kills a CockroachDB node on cue
@@ -137,19 +160,36 @@ global across every mission and every map, so the index ranks many rows against
 | [`colony/fleetmem/`](colony/fleetmem/) | The SDK every robot writes through, plus an in-memory fake |
 | [`colony/agents/`](colony/agents/) | Scout, lifter, medic — the sense/sync/think/act/report loop |
 | [`colony/sim/`](colony/sim/) | Authoritative world, 4 Hz tick server, websocket protocol |
-| [`colony/client/`](colony/client/) | Both renderers. `app.js`+`atlas.js` are the 2D view, `scene3d.js`+`rigs.js`+`director.js` the 3D one, `ui-shared.js` the HUD, ticker and console they share |
+| [`colony/client/`](colony/client/) | Both renderers. `scene3d.js`+`rigs.js`+`director.js` are the twin at `/`, `app.js`+`atlas.js` the 2D view at `/2d`, `ui-shared.js` every panel they share |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
 | [`colony/sim/interventions.py`](colony/sim/interventions.py) | Operator interventions: what may be broken, and what the world refuses |
-| [`colony/console/`](colony/console/) | The commander console's six questions, read-only |
+| [`colony/console/`](colony/console/) | Both console tiers, read-only: `questions.py` the seven canned reads — including one that reads the past with `AS OF SYSTEM TIME` — plus `agent.py` the Bedrock+MCP agent, `mcp_client.py` the managed-endpoint client, `skills.py` the Agent Skills loader |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |
 | [`docs/`](docs/) | Setup, lane handoffs, the changefeed spike |
 | [`PRD.md`](PRD.md) | The specification everything above cites by section |
 
 ## Tools
 
-**CockroachDB** — serializable claiming, survival of a node kill, and the Managed
-MCP Server behind the commander console (read-only by grant, not merely by
-setting).
+**CockroachDB** — serializable claiming, survival of a node kill, the Managed
+MCP Server as the commander agent's hands, and the Agent Skills repo as its
+reference.
+
+The console has two tiers and they are read-only for *different* reasons, which
+is worth separating because it is easy to state as one story and be wrong:
+
+| | who it connects as | what stops a write |
+|---|---|---|
+| seven canned questions | `commander` | the grant — SELECT and nothing else, asserted on the Cloud cluster by `credentials.py verify` |
+| ask anything | `managed-mcp` | a read-only tool allowlist, `assert_read_only` on every statement, and the managed server's own refusals |
+
+The second row is the correction. We assumed MCP would connect as `commander`
+and inherit the grant; `SELECT current_user` through the endpoint says
+`managed-mcp`, and the `CRDB_SQL_USER` key in the published config snippet is
+inert. The managed server also still *offers* `insert_rows`, `create_table` and
+`create_database` with `readOnly: true` set — which is why the agent is handed
+an explicit five-tool allowlist rather than whatever the endpoint advertises.
+`infra/mcp.py` records this, and the test that used to assert the wrong version
+now asserts against it.
 
 Distributed vector indexing carries weight in **two** places, which is worth
 separating because they pull in opposite directions:

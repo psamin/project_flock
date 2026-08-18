@@ -56,13 +56,32 @@
       border: 1px solid var(--line); border-radius: 3px; padding: 3px 9px; cursor: pointer;
     }
     button:hover { background: #1d2530; border-color: #2c3745; }
-    button.armed { border-color: var(--accent); color: var(--accent); }
+    /* `.on` is a mode that is currently engaged (the director). `.armed` is a
+       loaded gesture waiting for a target (a disruption). They looked the same
+       when both used `.armed`, which made a page with the director on read as
+       though a disruption were already primed. */
+    button.on { border-color: var(--accent); color: var(--accent); }
+    button.armed { border-color: #d9884a; color: #d9884a; background: #1d1710; }
 
     #hud {
       display: flex; gap: 14px; padding: 6px 14px; color: var(--dim);
       font-size: 11px; flex-wrap: wrap; border-bottom: 1px solid var(--line); flex: none;
     }
     #hud b { color: var(--ink); font-weight: 600; }
+
+    /* §3.6: the data layer, on screen, beside the metrics it produced. A zero
+       renders dimmer rather than hidden — a table with no writer is worth
+       seeing rather than papering over. */
+    #memory-rail {
+      display: flex; gap: 14px; padding: 5px 14px; color: var(--dim);
+      font-size: 10px; flex-wrap: wrap; align-items: center;
+      border-bottom: 1px solid var(--line); flex: none;
+    }
+    #memory-rail .grp { display: flex; gap: 6px; align-items: center; }
+    #memory-rail em { color: var(--accent); font-style: normal; text-transform: uppercase;
+                      letter-spacing: 0.07em; }
+    #memory-rail b { color: var(--ink); font-weight: 600; }
+    #memory-rail .zero b { color: #3d4753; }
 
     #main { display: flex; flex: 1; min-height: 0; }
     #stage { flex: 1; position: relative; min-width: 0; }
@@ -87,6 +106,13 @@
     .tag .say { color: #b9c2cd; }
     .tag.lost { opacity: 0.55; border-left-color: #d96a9a !important; }
 
+    /* Sector labels ride in the same CSS2D layer as the robot tags. Dimmer
+       than a tag on purpose: a sector is a place name, not telemetry. */
+    .sector-tag {
+      font: 10px/1 ui-monospace, Menlo, monospace; color: #63c5da; opacity: 0.55;
+      letter-spacing: 0.1em; pointer-events: none;
+    }
+
     #overlay {
       position: absolute; left: 12px; bottom: 12px; font-size: 10px;
       color: var(--dim); pointer-events: none; line-height: 1.7;
@@ -95,10 +121,34 @@
                    vertical-align: middle; margin-right: 5px; }
     #overlay b { color: var(--ink); font-weight: 600; }
 
+    /* An armed disruption turns the whole viewport into a target. The 2D page
+       does the same at index.html's `body.arming #stage canvas`. */
+    body.arming #stage canvas { cursor: crosshair; }
+
+    /* The rail scrolls as ONE column rather than giving each panel its own
+       max-height. Four panels each with their own scrollbar means four things
+       that can be scrolled past without noticing; one column means the order
+       below is the reading order. Console first because it is the tier that
+       answers questions nobody anticipated. */
     #side {
-      width: 320px; flex: none; border-left: 1px solid var(--line);
-      display: flex; flex-direction: column; min-height: 0;
+      width: 380px; flex: none; border-left: 1px solid var(--line);
+      display: flex; flex-direction: column; min-height: 0; overflow-y: auto;
     }
+    #side > section, #side > #panel {
+      border-bottom: 1px solid var(--line); padding: 10px 12px; flex: none;
+    }
+    .rail-head { display: flex; gap: 7px; align-items: baseline;
+                 margin-bottom: 6px; flex-wrap: wrap; }
+    .rail-head b { font-size: 10px; letter-spacing: 0.1em; color: var(--accent); }
+    .rail-head small { color: var(--dim); font-size: 10px; }
+    /* Collapsible so a long console answer never pushes the fleet off-screen.
+       Open by default: a panel a judge has to discover is a panel they do not
+       see. */
+    details.rail > summary { cursor: pointer; list-style: none; }
+    details.rail > summary::-webkit-details-marker { display: none; }
+    details.rail > summary::before { content: "▾ "; color: var(--dim); }
+    details.rail:not([open]) > summary::before { content: "▸ "; }
+
     #panel { padding: 10px 12px; border-bottom: 1px solid var(--line);
              max-height: 42%; overflow-y: auto; display: none; }
     #panel.open { display: block; }
@@ -118,6 +168,20 @@
                     flex-wrap: wrap; margin-bottom: 7px; }
     #console-head b { font-size: 11px; letter-spacing: 0.1em; }
     #console-head span { color: var(--dim); font-size: 10px; }
+    /* The free-form tier. Stacked rather than inline: this sidebar is narrow
+       and an input beside a button wraps into two ragged rows. */
+    #console-agent { display: flex; gap: 5px; align-items: center;
+                     flex-wrap: wrap; margin-bottom: 7px; }
+    #console-ask { flex: 1 1 100%; min-width: 0; background: var(--panel-2, #10151b);
+                   color: inherit; border: 1px solid var(--line); border-radius: 3px;
+                   padding: 5px 7px; font: inherit; font-size: 11px; }
+    #console-ask:focus { outline: none; border-color: var(--accent); }
+    #console-ask:disabled { color: var(--dim); }
+    #console-agent-note { color: var(--dim); font-size: 10px; }
+    #console-steps { font-size: 10px; color: var(--dim); margin-bottom: 5px;
+                     max-height: 90px; overflow-y: auto; }
+    #console-steps .ok { color: #7f96a8; }
+    #console-steps .bad { color: #a8737f; }
     #console-questions { display: flex; flex-direction: column; gap: 4px; }
     #console-questions button { text-align: left; line-height: 1.35; }
     #console-questions button .mem { color: var(--accent); font-size: 9px;
@@ -131,7 +195,79 @@
     #console-rows { color: #8b96a4; font-size: 10px; white-space: pre;
                     max-height: 120px; overflow: auto; }
 
-    #ticker { flex: 1 1 auto; min-height: 110px; overflow-y: auto; padding: 8px 12px;
+    /* The fleet panel. The lease countdown is the column that earns its place:
+       a held task is invisible in open_tasks until the lease lapses, so this is
+       the only place a takeover can be watched before it fires. */
+    #fleet { font-size: 10px; line-height: 1.6; }
+    #fleet .fl-row { display: flex; gap: 7px; align-items: baseline; }
+    #fleet .fl-row.down { opacity: 0.45; }
+    #fleet .fl-id { font-weight: 600; min-width: 22px; }
+    #fleet .fl-id.scout { color: #63c5da; }
+    #fleet .fl-id.lifter { color: #d9884a; }
+    #fleet .fl-id.medic { color: #d96a9a; }
+    #fleet .fl-job { color: #b9c2cd; min-width: 140px; }
+    #fleet .idle { color: var(--dim); }
+    #fleet .lease { color: var(--dim); }
+    #fleet .lease.low { color: #d9884a; font-weight: 600; }
+    #fleet .fl-why { color: var(--dim); overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; max-width: 100%; }
+
+    /* The coordination feed. Cross-agent lines are the point, so solo ones are
+       dimmed rather than hidden — hiding them would make every visible line
+       read as teamwork. */
+    #coordination { max-height: 190px; overflow-y: auto; font-size: 10px;
+                    line-height: 1.5; border-left: 2px solid var(--line); padding-left: 7px; }
+    #coordination .co-line { display: flex; gap: 6px; flex-wrap: wrap;
+                             align-items: baseline; padding: 1px 0; }
+    #coordination .co-line.solo { opacity: 0.42; }
+    #coordination .co-who { color: var(--ink); font-weight: 600; }
+    #coordination .co-why { color: var(--dim); }
+    #coordination .co-why b { color: var(--accent); font-weight: 600; }
+    #coordination .co-brain { margin-left: auto; font-size: 9px; padding: 0 5px;
+                              border-radius: 8px; }
+    #coordination .co-brain.claude { color: #07090d; background: #d9cfa8; }
+    #coordination .co-brain.rules { color: var(--dim); border: 1px solid var(--line); }
+    #coordination .co-empty { color: var(--dim); }
+    /* A decision that followed something the operator broke. Marked, not
+       claimed: "after" is correlation — the robot may have re-planned anyway. */
+    #coordination .co-line.disrupted { border-left: 2px solid #d9884a;
+                                       margin-left: -7px; padding-left: 5px; }
+    #coordination .co-after { color: #d9884a; }
+
+    /* The dock. Operator and ticker share the bottom strip, full width, so the
+       island stays visible while a disruption is armed — you cannot aim at a
+       map a sidebar is covering, which is the whole reason this is not in the
+       rail with everything else. */
+    #dock {
+      display: flex; gap: 0; flex: none; border-top: 1px solid var(--line);
+      height: 116px;
+    }
+    /* Wide enough for three kind buttons and the radius on one row. At 380px
+       they wrapped, and since this column scrolls, wrapping pushed the
+       "pick a disruption, then click a tile" instruction out of view — losing
+       the one line that says the gesture is two steps. */
+    #intervene {
+      width: 470px; flex: none; border-right: 1px solid var(--line);
+      padding: 8px 12px; overflow-y: auto;
+    }
+    /* Pinned, so the status line stays readable even if the kinds do wrap on a
+       narrow window. It is where a refusal is reported. */
+    #intervene > .rail-head {
+      position: sticky; top: 0; background: var(--bg); z-index: 1;
+    }
+    #intervene-status { color: var(--dim); font-size: 10px; }
+    #intervene-status.ok { color: #5fc98a; }
+    #intervene-status.err { color: #d96a9a; }
+    #intervene-controls { display: flex; gap: 6px; flex-wrap: wrap;
+                          align-items: center; margin-top: 6px; }
+    #intervene-kinds { display: flex; gap: 5px; flex-wrap: wrap; }
+    #intervene-kinds button .mem { color: var(--dim); font-size: 9px;
+                                   letter-spacing: 0.07em; margin-left: 5px; }
+    #intervene-radius-wrap { display: flex; gap: 5px; align-items: center;
+                             color: var(--dim); font-size: 10px; }
+    #intervene-radius { width: 70px; }
+
+    #ticker { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 8px 12px;
               color: #8b96a4; font-size: 11px; white-space: pre; }
     #ticker div { padding: 1px 0; }
     #ticker .found { color: #f2c14e; }
@@ -143,8 +279,11 @@
     #comparison { padding: 5px 14px; color: #f2c14e; font-size: 11px;
                   border-top: 1px solid var(--line); flex: none; min-height: 22px; }
 
-    /* T3: WebGL is required for this route only. `/` stays Canvas 2D, so the
-       honest thing is to say so and link there rather than paint black. */
+    /* T3: this route requires WebGL, and since it is now `/` the escape hatch
+       matters more than it used to — a judge who lands here without hardware
+       acceleration has typed the bare URL and has nowhere else to go. The
+       notice must therefore link to `/2d`, NOT to `/`: linking to `/` from `/`
+       is a loop that reads as a broken site. */
     #nogl { display: none; margin: auto; max-width: 520px; padding: 40px 24px; text-align: center; }
     #nogl.show { display: block; }
     #nogl h2 { font-size: 15px; letter-spacing: 0.08em; }
@@ -159,8 +298,11 @@
     <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. Same seed, same mission."></span>
     <span id="mode-badge" class="on">SHARED MEMORY</span>
     <button id="toggle">coordination: ON</button>
-    <button id="director-toggle" class="armed" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
-    <a href="/" style="color:var(--dim);font-size:11px;">2D view →</a>
+    <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
+    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
+    <button id="director-toggle" class="on" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
+    <a href="/2d" style="color:var(--dim);font-size:11px;"
+       title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D view →</a>
   </header>
 
   <div id="hud">
@@ -170,12 +312,15 @@
     <span title="Victims who passed their vitals deadline.">lost <b id="m-lost">0</b></span>
     <span title="Stabilized divided by total victims on the map.">rescue <b id="m-rescue">0%</b></span>
     <span title="Median ticks from mission start to stabilization; victims never rescued count at the 1200-tick horizon.">median <b id="m-median">—</b></span>
-    <span title="Tile visits to ground another robot had already covered.">dup effort <b id="m-duplicate">0%</b></span>
+    <span title="Tile visits to ground another robot had already covered. Without shared memory two scouts sweep the same street; with it they do not.">dup effort <b id="m-duplicate">0%</b></span>
     <span title="Tasks claimed by more than one robot over the mission.">double work <b id="m-doublework">0</b></span>
     <span title="Share of reachable, non-wall tiles any robot has seen.">tiles seen <b id="m-coverage">0%</b></span>
-    <span title="Tactics learned in earlier missions, stored in mission_memories and retrieved by cosine similarity.">tactics <b id="m-recall">0</b></span>
-    <span title="Amazon Bedrock adapter mode, and calls that actually reached AWS.">bedrock <b id="m-bedrock">—</b></span>
+    <span title="Tactics learned in earlier missions, stored in mission_memories as 512-dim vectors and retrieved by cosine similarity against what a robot is facing right now. Deliberately not coordinates — a remembered tile transfers to nothing.">tactics <b id="m-recall">0</b></span>
+    <span title="Amazon Bedrock adapter mode, and calls that actually reached AWS. Rules are the floor, not the fallback: a mission runs identically with no credentials, and plans.chosen.source records which one decided.">bedrock <b id="m-bedrock">—</b></span>
   </div>
+
+  <!-- Filled by refreshMemoryRail() from /api/memory. -->
+  <div id="memory-rail"></div>
 
   <div id="main">
     <div id="stage">
@@ -184,7 +329,12 @@
         <div><span class="sw" style="background:#4a5462"></span>observed now — a robot is looking at this tile</div>
         <div><span class="sw" style="background:#1b2028"></span><b>remembered</b> — in shared memory, nobody watching</div>
         <div><span class="sw" style="background:#07090d"></span>unknown — never seen, so it is not built</div>
-        <div style="margin-top:6px">drag orbit · scroll zoom · right-drag pan · click a robot for its reasoning</div>
+        <div style="margin-top:7px">
+          <span style="color:#63c5da">●</span> <b>scout</b> — sees 6, flies ·
+          <span style="color:#d9884a">●</span> <b>lifter</b> — clears debris ·
+          <span style="color:#d96a9a">●</span> <b>medic</b> — stabilizes victims
+        </div>
+        <div style="margin-top:6px">drag orbit · scroll zoom · right-drag pan · click a robot for its reasoning · <b>S</b> sector grid</div>
       </div>
     </div>
     <aside id="side">
@@ -201,15 +351,60 @@
           <b>COMMANDER CONSOLE</b>
           <span id="console-status">read-only · live fleet memory</span>
         </div>
+        <div id="console-agent">
+          <input id="console-ask" type="text" maxlength="500"
+                 placeholder="ask the fleet anything…" />
+          <button id="console-ask-go">ask</button>
+          <span id="console-agent-note"></span>
+        </div>
         <div id="console-questions"></div>
         <div id="console-answer">
           <div id="console-summary"></div>
+          <div id="console-steps"></div>
           <div id="console-sql"></div>
           <div id="console-rows"></div>
         </div>
       </section>
-      <div id="ticker"></div>
+
+      <!-- Filled by refreshFleet() from /api/fleet, once a second. The lease
+           column is why this is not just the robot list the map already shows. -->
+      <section id="fleet-panel">
+        <details class="rail" open>
+          <summary class="rail-head"><b>FLEET</b> <small>what each unit holds, and why</small></summary>
+          <div id="fleet"></div>
+        </details>
+      </section>
+
+      <!-- Filled by refreshCoordination() from /api/coordination. The robots
+           have no channel; every line here is one robot acting on a row another
+           one wrote. -->
+      <section id="coordination-panel">
+        <details class="rail" open>
+          <summary class="rail-head"><b>COORDINATION</b> <small>who acted on whose memory</small></summary>
+          <div id="coordination"></div>
+        </details>
+      </section>
     </aside>
+  </div>
+
+  <!-- The dock. Full width under the viewport so the island stays visible while
+       a disruption is armed. -->
+  <div id="dock">
+    <section id="intervene">
+      <div class="rail-head">
+        <b>OPERATOR</b>
+        <span id="intervene-status">pick a disruption, then click a tile</span>
+      </div>
+      <div id="intervene-controls">
+        <div id="intervene-kinds"></div>
+        <label id="intervene-radius-wrap">
+          radius
+          <input id="intervene-radius" type="range" min="0" max="3" value="1" />
+          <span id="intervene-radius-label">1</span>
+        </label>
+      </div>
+    </section>
+    <div id="ticker"></div>
   </div>
   <div id="comparison"></div>
 
@@ -217,7 +412,7 @@
     <h2>This view needs WebGL</h2>
     <p>
       The digital-twin view renders with WebGL 2, which this browser or machine
-      does not currently provide. The <a href="/">2D view</a> shows the same
+      does not currently provide. The <a href="/2d">2D view</a> shows the same
       mission from the same simulation and needs no hardware acceleration.
     </p>
     <p style="font-size:11px">
@@ -228,8 +423,8 @@
 
   <script type="module">
     /* T3 — capability gate. Runs BEFORE Three.js is fetched, so a machine
-       without WebGL never downloads 756K to fail with a black rectangle.
-       `/` deliberately stayed Canvas 2D so this fallback is always real. */
+       without WebGL never downloads 756K to fail with a black rectangle. The
+       `/2d` route is what keeps this fallback real now that this page is `/`. */
     function hasWebGL2() {
       try {
         const probe = document.createElement("canvas");
@@ -240,8 +435,14 @@
     }
 
     if (!hasWebGL2()) {
-      document.getElementById("main").style.display = "none";
-      document.getElementById("hud").style.display = "none";
+      // Every piece of chrome, not just the stage. scene3d.js is what fills the
+      // HUD, memory rail, operator kinds and ticker, and it is never imported
+      // on this path — so anything left visible is an empty panel implying a
+      // mission that is running and telling you nothing about it.
+      for (const id of ["main", "hud", "memory-rail", "dock", "comparison"]) {
+        const node = document.getElementById(id);
+        if (node) node.style.display = "none";
+      }
       document.getElementById("nogl").classList.add("show");
       document.getElementById("status").textContent = "WebGL unavailable";
     } else {

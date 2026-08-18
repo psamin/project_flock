@@ -314,6 +314,85 @@ SELECT chosen->>'source' AS source, count(*) FROM plans GROUP BY 1;
 calls plus one embedding per new belief — cents per mission. The cap is
 enforced in ticks, not wall-clock, so it holds in replay too.
 
+## 3.5 The commander agent (Managed MCP Server + Agent Skills)
+
+The console's seven canned questions need only a cluster. Its **free-form** tier
+needs Bedrock (§3 above), the Managed MCP Server, and the Agent Skills repo.
+All three are optional — without them the canned tier still answers, and the
+console says why the other one is off rather than hiding it.
+
+```bash
+cd colony
+make skills        # 34 skills at a pinned commit -> colony/skills/ (gitignored)
+make mcp-login     # one browser login; stores a refresh token in ~/.colony/
+make console-check # prints exactly what is missing, if anything
+```
+
+`console-check` on a working setup:
+
+```
+authenticated ok | connects as: managed-mcp
+tables visible: 8
+{'available': True, 'bedrock': True, 'mcp': True, 'cluster': True, 'skills': 34, ...}
+```
+
+### Why the login is interactive, once
+
+The endpoint advertises `authorization_code` and `refresh_token` and **no**
+`client_credentials` grant, so a server-side process cannot mint a token from a
+secret. `make mcp-login` does dynamic client registration plus PKCE, and stores
+the refresh token 0600 in `~/.colony/mcp-token.json` — outside the repo, so no
+.gitignore rule stands between it and a commit. Every later run refreshes
+headlessly; you should not need to log in again.
+
+### Three things that will surprise you
+
+Found by calling the endpoint rather than by reading about it, and all three
+contradict something we had written down:
+
+1. **It connects as `managed-mcp`, not as your SQL user.** `SELECT current_user`
+   through the server proves it. The `CRDB_SQL_USER` key in the Cloud console's
+   config snippet is not read. Our `commander` role still exists and still holds
+   SELECT and nothing else — it governs `console/reader.py`, the psycopg path,
+   and not this one.
+2. **`?cluster=<id>` in the URL is not read.** Calls fail with "cluster_id not
+   provided" unless the id is *also* a tool argument. `console/mcp_client.py`
+   injects it; if you write your own client, remember to.
+3. **Write tools are still offered with `readOnly: true` set.** `insert_rows`,
+   `create_table` and `create_database` appear in `tools/list`. Compare what the
+   server offers against what our agent is given:
+
+```bash
+uv run python -m console.mcp_client tools
+# server offers 12: create_database, create_table, explain_query, ...
+# agent is given 6: select_query, explain_query, get_table_schema, ...
+# withheld from the agent: create_database, create_table, get_cluster, insert_rows, ...
+```
+
+### What the endpoint will not do
+
+Worth knowing before you write a question it cannot answer: `SHOW USERS`,
+`SHOW GRANTS` and `SHOW SYSTEM GRANTS` are refused, `information_schema` and
+`crdb_internal` are blocked, and `SHOW` is accepted only for `SCHEMAS`,
+`INDEXES`, `REGIONS`, `CONSTRAINTS` and `CREATE TABLE`. So a privilege audit is
+not reachable from the console; the agent will tell you that and name the
+statements to run yourself.
+
+### Verify it end to end
+
+```bash
+make sim   # then, in the console's ask box:
+```
+
+- *"Is the vector index on mission_memories actually used, or a full scan?"* —
+  should come back with `vector search` on `mm_situation_idx`, and should
+  describe the `observations` full scan as deliberate rather than as a bug.
+- *"Audit whether our SQL user privileges are hardened."* — should load the
+  `hardening-user-privileges` skill and then say it cannot complete the audit
+  through this endpoint. Both halves are the correct answer.
+
+---
+
 ## 4. The renderer (no setup at all)
 
 ```bash

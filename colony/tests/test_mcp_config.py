@@ -1,10 +1,14 @@
 """The Managed MCP Server config (§6.2 required tool #1, §3.5, §6.3).
 
-The endpoint itself needs a Cloud cluster nobody has yet, so what is testable is
-the part that would still be wrong once it exists: the snippet must name the
-read-only role and must not turn writes on. §6.3's words are "leave writes off —
-it *is* our access-control story", and a story nobody asserted is one that gets
-edited by accident.
+This file used to assert that the snippet names `commander` in `CRDB_SQL_USER`,
+on the belief that the console would therefore connect as a SELECT-only role.
+Calling the endpoint for real disproved it: MCP connects as `managed-mcp`, its
+own service identity, and that key was never read. The assertion is inverted
+below rather than deleted — a test that once pinned a false claim is the right
+place to stop it coming back.
+
+The runtime client is tested in `test_mcp_client.py`; this file covers only the
+editor-facing snippet `infra/mcp.py` prints.
 """
 
 from __future__ import annotations
@@ -29,12 +33,34 @@ def test_the_snippet_points_at_the_managed_endpoint():
     assert "cluster=abc-123" in entry["url"]
 
 
-def test_the_console_connects_as_the_read_only_role():
-    """Not as root. `commander` holds SELECT and nothing else, which is what
-    makes §3.5's posture a property rather than a setting."""
+def test_the_snippet_does_not_claim_to_set_the_sql_user():
+    """The inverted assertion.
+
+    `CRDB_SQL_USER` is not read by the managed endpoint — it connects as
+    `managed-mcp` regardless — so emitting it advertised an access-control
+    property this path does not have. `commander` still exists and still holds
+    SELECT and nothing else; it governs `console/reader.py`, which is a
+    different path, and `test_credentials.py` is where that is asserted.
+    """
     entry = config("abc-123")["mcpServers"][SERVER_NAME]
-    assert entry["env"]["CRDB_SQL_USER"] == CONSOLE_ROLE
+    assert "env" not in entry, "the snippet must not imply it sets the SQL user"
     assert CONSOLE_ROLE == "commander"
+
+
+def test_the_cluster_id_is_in_the_url_for_humans_not_for_the_server():
+    """Documents the trap rather than the fix.
+
+    The server ignores `?cluster=` and fails with "cluster_id not provided"
+    unless the id also arrives as a tool argument. The parameter stays because
+    it tells a person which cluster an entry points at; the runtime client
+    injects the argument (`mcp_client.MCPClient.call`).
+    """
+    from console.mcp_client import MCPClient
+
+    entry = config("abc-123")["mcpServers"][SERVER_NAME]
+    assert "cluster=abc-123" in entry["url"]
+    client = MCPClient(cluster_id="abc-123")
+    assert client.cluster_id == "abc-123"
 
 
 def test_writes_are_off_explicitly():
@@ -51,11 +77,26 @@ def test_the_snippet_carries_no_secret():
         assert secret not in blob, f"the snippet leaks {secret!r}"
 
 
-def test_a_missing_cluster_id_is_a_visible_placeholder():
-    """Rather than a plausible-looking wrong value: the hookup is blocked on the
-    Cloud cluster, and the config should say so instead of looking finished."""
+def test_a_missing_cluster_id_is_a_visible_placeholder(monkeypatch):
+    """Rather than a plausible-looking wrong value: a config that looks finished
+    and is not is worse than one that says what it is waiting for.
+
+    `CRDB_CLUSTER_ID` is cleared explicitly. `config(None)` falls back to the
+    environment before it falls back to the placeholder, so a developer with the
+    variable exported — which `colony/.env` now does — was testing the opposite
+    branch and passing for the wrong reason.
+    """
+    monkeypatch.delenv("CRDB_CLUSTER_ID", raising=False)
     entry = config(None)["mcpServers"][SERVER_NAME]
     assert "<cluster-id>" in entry["url"]
+
+
+def test_the_environment_supplies_the_cluster_id_when_it_is_set(monkeypatch):
+    """The branch the test above deliberately avoids. Asserted rather than left
+    implicit, because it is the one that runs in practice."""
+    monkeypatch.setenv("CRDB_CLUSTER_ID", "from-the-environment")
+    entry = config(None)["mcpServers"][SERVER_NAME]
+    assert "cluster=from-the-environment" in entry["url"]
 
 
 def test_the_snippet_is_valid_json_for_a_client_to_paste():

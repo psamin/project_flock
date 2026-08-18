@@ -473,3 +473,61 @@ def test_a_worker_records_why_it_chose_a_task(mem, mission):
     assert plans[0].chosen["kind"] == "deliver_kit"
     assert plans[0].rationale
     assert plans[0].based_on, "no memories recorded as the basis for the choice"
+
+
+def _victim_state(mem, mission, pos):
+    """Read a victim's state from whichever implementation is under test."""
+    if hasattr(mem, "conn"):
+        row = mem.conn.execute(
+            "SELECT state FROM victims WHERE mission_id = %s AND pos_x = %s AND pos_y = %s",
+            (mission, pos[0], pos[1]),
+        ).fetchone()
+        return row["state"]
+    return next(
+        v["state"]
+        for v in mem._victims.values()
+        if v["mission_id"] == mission and (v["pos_x"], v["pos_y"]) == pos
+    )
+
+
+def test_completing_the_delivery_stabilizes_the_victim(mem, mission):
+    """T-05c. WORKING memory is what is true *right now*, and this half of it
+    was frozen at first sighting.
+
+    `register_victim` created the row and its deliver_kit together, at the same
+    tile, and nothing ever advanced the state. Measured on a real cluster: 361
+    victim rows, every one 'located', against 21 victim_stabilized events.
+
+    It was judge-visible. The console's `unreached_victims` filters
+    `state != 'stabilized'`, so a rescued victim stayed on the list forever and
+    "every victim the fleet has found is stabilized" could never be reached —
+    asked after a 9/9 mission, the console reported nine people still waiting.
+    """
+    pos = (7, 11)
+    _, chain = mem.register_victim(mission, pos, reported_by="s1")
+    deliver = chain[-1]
+
+    assert _victim_state(mem, mission, pos) == "located"
+
+    assert mem.claim_task(deliver, "m1") is not None
+    assert mem.complete_task(deliver, "m1") is not None
+
+    assert _victim_state(mem, mission, pos) == "stabilized", (
+        "a completed deliver_kit must advance the victim it was created for"
+    )
+
+
+def test_clearing_debris_does_not_stabilize_anyone(mem, mission):
+    """Only the delivery counts. A lifter finishing its clear means the medic
+    can now get there, not that anybody has been treated — and marking the
+    victim then would report a rescue that has not happened."""
+    pos = (4, 4)
+    _, chain = mem.register_victim(mission, pos, reported_by="s1", blocked_by=[(4, 5)])
+    clear = chain[0]
+
+    assert mem.claim_task(clear, "l1") is not None
+    assert mem.complete_task(clear, "l1") is not None
+
+    assert _victim_state(mem, mission, pos) == "located", (
+        "clearing debris is not treatment"
+    )

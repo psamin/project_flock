@@ -176,6 +176,6 @@ Reporting negative results, because "we looked" is worth as much as "we found":
 - **Restart hygiene** — restarting clears killed robots and disruptions, and
   re-snapshots every viewer.
 - **Concurrent viewers** — two clients see the same tick and the same fleet.
-- **Both renderers serve** — `/` and `/sim3d` both 200.
+- **Both renderers serve** — `/` (twin), `/2d` (Canvas 2D) and the `/sim3d` alias all 200.
 - **Determinism, node kill, ablation** — X1, X2, X5, X7, X9, X10 all pass, X5
   re-proven today at 5/5 against current code.
