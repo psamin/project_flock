@@ -65,6 +65,31 @@ def main() -> int:
         print(f"\ntactics: {before} before, {len(after)} after")
         for m in after[: len(after) - before or None]:
             print(f"  when {m.situation}\n    -> {m.lesson}")
+
+        # Seeding that learns nothing is the failure this script exists to
+        # prevent, and it is silent by default: `derive_lessons` returns []
+        # on a cassette miss (adapter.py:244), so a full mission runs, prints
+        # its rescue count, and stores no tactic. `make demo` then starts with
+        # SEMANTIC memory empty while announcing "a mission that draws on it".
+        #
+        # It misses because the cassette is keyed on a sha256 of the run
+        # digest and the digest embeds the tick count, which is not stable:
+        # three identical resets of the same map and seed measured 327, 327,
+        # 337 ticks. So a miss is expected some of the time, and the only
+        # wrong thing to do about it is nothing.
+        #
+        # Non-zero rather than a retry: re-running until the dice land on a
+        # recorded digest would hide the non-determinism that causes this,
+        # and that is a finding, not a hiccup to paper over.
+        if len(after) == before:
+            print(
+                "\nERROR: no tactics were learned.\n"
+                "  The cassette had no entry for this run's digest, so the\n"
+                "  fleet finished the mission and generalised nothing.\n"
+                "  Re-run to try again, or record with COLONY_BEDROCK_MODE=record.",
+                file=sys.stderr,
+            )
+            return 1
     finally:
         mem.close()
     return 0
