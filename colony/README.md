@@ -17,7 +17,7 @@ questions, the aftershock retuned so it actually fires, and the changefeed spike
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 617 tests
+make test     # 792 tests
 ```
 
 To exercise CockroachDB Cloud, the 3-node chaos rig or live Bedrock, see
@@ -56,7 +56,7 @@ so a broken cluster can't masquerade as a green run.
 | [`client/app.js`](client/app.js) | Renderer: layers per §4.8, fog, bubbles, ticker, scoreboard |
 | [`client/atlas.js`](client/atlas.js) | The sprite sheet, drawn in code — no downloads, no licences |
 | [`orchestrator/lost.py`](orchestrator/lost.py) | The heartbeat scan, and why it stays off the recovery path |
-| [`console/questions.py`](console/questions.py) | The commander console's six canned questions (FR-10) |
+| [`console/questions.py`](console/questions.py) | The commander console's seven canned questions (FR-10), one of them a time-travel read |
 | [`console/reader.py`](console/reader.py) | The read-only execution path the console cannot write through |
 | [`fleetmem/changefeed.py`](fleetmem/changefeed.py) | Task unblocks (P1 spike, §4.4) and operator interventions (load-bearing, issue #22) |
 | [`sim/interventions.py`](sim/interventions.py) | What an operator may break, what the world refuses, and how the row reaches the fleet |
@@ -101,14 +101,14 @@ Canvas 2D with no CDN and no WebGL requirement, and the sprites are drawn in cod
 | click a robot | its latest decisions — rationale, trigger, whether Bedrock or rules chose, and the memories behind it (FR-17) |
 | `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
 | `S` | the exploration sector grid (FR-16) |
-| the console panel | six canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
+| the console panel | seven canned questions answered read-only from live fleet memory, each shown with the SQL that produced it (FR-10) |
 | the scoreboard | `tactics` — lessons the fleet carries in, retrieved per decision through the vector index — and `bedrock` mode plus live call count |
 
 The endpoints behind it — everything except the restart is a read:
 
 ```
 GET  /api/plans/{robot_id}?limit=5   rationale + trigger + source + resolved based_on
-GET  /api/console/questions          the six canned questions and which memory each reads
+GET  /api/console/questions          the seven canned questions and which memory each reads
 POST /api/console/ask                {"question": "why_did_robot", "robot_id": "s1"}
 POST /api/mission/restart            {"coordinated": false}
 GET  /api/runs                       final numbers per mode

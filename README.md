@@ -29,7 +29,7 @@ as an argument, not as DDL.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 701 tests
+make test     # 792 tests
 ```
 
 Two views of the same mission, on the same frames:
