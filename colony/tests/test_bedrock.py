@@ -14,6 +14,7 @@ from bedrock.adapter import (
     RECORD,
     REPLAY,
     BedrockAdapter,
+    NoCassette,
     Plan,
     adapter_from_env,
 )
@@ -240,6 +241,69 @@ def test_missing_credentials_downgrade_to_replay(monkeypatch):
     monkeypatch.setenv("COLONY_BEDROCK_MODE", LIVE)
     monkeypatch.setattr("bedrock.adapter.has_credentials", lambda: False)
     assert adapter_from_env().mode == REPLAY
+
+
+def test_replay_with_no_cassette_raises(monkeypatch, tmp_path):
+    """T-10b / D-4. The dangerous failure is not a crash, it is a quiet one.
+
+    With nothing to replay, every `embed()` returns `_offline_embedding` — a
+    hash of the text, shaped like a Titan vector, stored in VECTOR(512) and
+    indistinguishable from the real thing once written. `seed_memory.py` puts
+    those straight into `mission_memories` and the recall index ranks them.
+    Nothing errors; the tactics just quietly stop meaning anything.
+    """
+    monkeypatch.setenv("COLONY_BEDROCK_MODE", REPLAY)
+    monkeypatch.setattr("bedrock.adapter.DEFAULT_CASSETTE", tmp_path / "absent.json")
+    monkeypatch.delenv("COLONY_BEDROCK_CASSETTE", raising=False)
+    with pytest.raises(NoCassette, match="no cassette"):
+        adapter_from_env()
+
+
+def test_a_mistyped_cassette_path_raises_rather_than_synthesizing(
+    monkeypatch, tmp_path
+):
+    """Same fault, louder cause. The path used to be accepted unchecked:
+    `__post_init__` only reads the file when it exists, so a typo loaded an
+    empty cassette and synthesized every vector instead of saying the name was
+    wrong."""
+    monkeypatch.setenv("COLONY_BEDROCK_MODE", REPLAY)
+    monkeypatch.setenv("COLONY_BEDROCK_CASSETTE", str(tmp_path / "typo.json"))
+    with pytest.raises(NoCassette, match="typo.json"):
+        adapter_from_env()
+
+
+def test_the_committed_cassette_is_enough_to_boot(monkeypatch):
+    """The guard above must not fire on the path the demo actually takes: no
+    env var set, `DEFAULT_CASSETTE` present in the repo. If this fails, the
+    cassette is missing from the checkout and the demo is offline-synthetic."""
+    monkeypatch.setenv("COLONY_BEDROCK_MODE", REPLAY)
+    monkeypatch.delenv("COLONY_BEDROCK_CASSETTE", raising=False)
+    adapter = adapter_from_env()
+    assert adapter.mode == REPLAY
+    assert adapter.cassette_path is not None and adapter.cassette_path.exists()
+
+
+def test_the_throttle_path_still_degrades(monkeypatch, tmp_path):
+    """The other half of T-10b's acceptance. A throttled *live* embedding must
+    still fall back rather than drop the sighting — the scout keeps its
+    observation and the reconcile gate degrades. Only the no-cassette case is
+    fatal; this one is correct as a fallback and stays one."""
+    pytest.importorskip("boto3", reason="AWS extra not installed")
+    import botocore.exceptions
+
+    throttled = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+        "InvokeModel",
+    )
+
+    class Throttling:
+        def invoke_model(self, **kwargs):
+            raise throttled
+
+    adapter = BedrockAdapter(mode=LIVE, cassette_path=None)
+    adapter._client = Throttling()
+    vector = adapter.embed("victim at 14,9")
+    assert len(vector) == 512, "a throttled embedding must still return a vector"
 
 
 def test_credentials_from_a_task_role_still_count(monkeypatch):

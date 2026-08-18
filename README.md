@@ -29,11 +29,11 @@ as an argument, not as DDL.
 cd colony
 make dev      # CockroachDB v26.2.5 + schema, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # the suite
+make test     # 896 tests
 ```
 
 The commander console's free-form tier needs two more things, both optional and
-both one-time. Without them the console still answers its six canned questions,
+both one-time. Without them the console still answers its canned questions,
 which is the tier the demo leans on:
 
 ```bash
@@ -96,7 +96,7 @@ CockroachDB Cloud — is in [`docs/setup-testing.md`](docs/setup-testing.md).
  Orchestrator ────────────────────────┘                    │
     · lost-marking only — allocation and unblocking live in the data model
  Commander console ── two tiers, both read-only
-    · six canned questions ── psycopg as `commander` (SELECT-only grant)
+    · seven canned questions ─ psycopg as `commander` (SELECT-only grant)
     · ask anything ────────── Claude on Bedrock, reading the cluster through the
       CockroachDB Managed MCP Server, equipping itself from the CockroachDB
       Agent Skills repo
@@ -163,7 +163,7 @@ global across every mission and every map, so the index ranks many rows against
 | [`colony/client/`](colony/client/) | Both renderers. `scene3d.js`+`rigs.js`+`director.js` are the twin at `/`, `app.js`+`atlas.js` the 2D view at `/2d`, `ui-shared.js` every panel they share |
 | [`colony/orchestrator/`](colony/orchestrator/) | Lost-marking, and why it does nothing else |
 | [`colony/sim/interventions.py`](colony/sim/interventions.py) | Operator interventions: what may be broken, and what the world refuses |
-| [`colony/console/`](colony/console/) | Both console tiers: `questions.py` the six canned reads, `agent.py` the Bedrock+MCP agent, `mcp_client.py` the managed-endpoint client, `skills.py` the Agent Skills loader |
+| [`colony/console/`](colony/console/) | Both console tiers, read-only: `questions.py` the seven canned reads — including one that reads the past with `AS OF SYSTEM TIME` — plus `agent.py` the Bedrock+MCP agent, `mcp_client.py` the managed-endpoint client, `skills.py` the Agent Skills loader |
 | [`infra/`](infra/) | 3-node cluster, node-kill chaos rig, per-robot credentials, MCP config |
 | [`docs/`](docs/) | Setup, lane handoffs, the changefeed spike |
 | [`PRD.md`](PRD.md) | The specification everything above cites by section |
@@ -179,7 +179,7 @@ is worth separating because it is easy to state as one story and be wrong:
 
 | | who it connects as | what stops a write |
 |---|---|---|
-| six canned questions | `commander` | the grant — SELECT and nothing else, asserted on the Cloud cluster by `credentials.py verify` |
+| seven canned questions | `commander` | the grant — SELECT and nothing else, asserted on the Cloud cluster by `credentials.py verify` |
 | ask anything | `managed-mcp` | a read-only tool allowlist, `assert_read_only` on every statement, and the managed server's own refusals |
 
 The second row is the correction. We assumed MCP would connect as `commander`

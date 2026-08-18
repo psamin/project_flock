@@ -1,4 +1,4 @@
-"""The six canned demo questions (§5.1 lane 4, FR-10, §6.2).
+"""The seven canned demo questions (§5.1 lane 4, FR-10, §6.2).
 
 Canned rather than free-form on purpose. §5.4 puts demo reliability above
 cleverness — a live model improvising SQL in front of judges is the one part of
@@ -12,9 +12,16 @@ They are chosen so that between them they interrogate all four memory systems
     why_did_robot        PROVENANCE   plans x observations through based_on
     unreached_victims    WORKING      victims x the task graph blocking them
     what_do_we_know      EPISODIC     observations, with the merge count visible
+    beliefs_30s_ago      EPISODIC     the same table, read 30s in the past
     who_holds_what       WORKING      tasks x robots, and the lease on each
     aftershock_response  PROVENANCE   what the fleet re-decided, and when
     what_did_we_learn    SEMANTIC     mission_memories, the tactics learned
+
+`beliefs_30s_ago` is the only one that reads the past. CockroachDB retains
+historical versions, so `AS OF SYSTEM TIME` asks the same rows what they held
+earlier — the fleet's memory is time-travellable without a snapshot table, an
+audit copy, or an event-sourcing replay. Asked next to `what_do_we_know`, the
+pair shows what the fleet learned in the last half minute.
 
 The last one carries no scope at all — not a mission, not a map. A tactic
 learned clearing rubble on one map is meant to apply on the next, so scoping it
@@ -151,6 +158,58 @@ def _render_unreached(rows: list[dict[str, Any]]) -> str:
         for r in rows[:5]
     )
     return f"{len(rows)} victim(s) not yet stabilized: {waiting}"
+
+
+# --- EPISODIC, through time: what the fleet believed a moment ago -----------
+
+# The one question that reads the past rather than the present. CockroachDB
+# keeps historical versions, so `AS OF SYSTEM TIME` asks the same table what it
+# held at an earlier timestamp — no snapshot table, no audit copy, no
+# event-sourcing replay. Memory is time-travellable because the database is.
+#
+# The interval is a literal on purpose, and it has to be: v26.2 accepts only a
+# constant expression there ("only constant expressions, with_min_timestamp,
+# with_max_staleness, or follower_read_timestamp"), so a placeholder is a
+# syntax error rather than a choice. That suits a console which is canned for
+# demo reliability anyway — it also means there is no string interpolation here
+# and so no injection surface.
+#
+# AS OF SYSTEM TIME binds the whole statement, so a subquery cannot read `now`
+# alongside it. The contrast is drawn by asking this and `what_do_we_know` back
+# to back, not by one cleverer query.
+BELIEFS_30S_AGO = """
+SELECT o.kind,
+       o.pos_x, o.pos_y,
+       o.sightings,
+       round(o.confidence::numeric, 2) AS confidence,
+       o.robot_id AS first_reported_by
+  FROM observations o
+  AS OF SYSTEM TIME '-30s'
+ WHERE o.mission_id = %s
+ ORDER BY o.sightings DESC, o.kind, o.pos_x, o.pos_y
+ LIMIT 20
+"""
+
+
+def _render_recent_past(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return (
+            "thirty seconds ago the fleet had recorded nothing for this mission "
+            "— either it had just started, or nobody had reported yet"
+        )
+    kinds: dict[str, int] = {}
+    for r in rows:
+        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    tally = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
+    lead = ", ".join(
+        f"{r['kind']} at {r['pos_x']},{r['pos_y']} ({r['sightings']}x)"
+        for r in rows[:4]
+    )
+    return (
+        f"thirty seconds ago the fleet held {tally} (top {len(rows)} shown): {lead}. "
+        "Ask 'what does the fleet know' now to see what has changed since — this "
+        "row set is read from the same table at an earlier timestamp."
+    )
 
 
 # --- EPISODIC: what the fleet believes, and how it was merged ---------------
@@ -298,6 +357,14 @@ QUESTIONS: tuple[Question, ...] = (
         sql=UNREACHED_VICTIMS,
         params=("mission_id", "mission_id"),
         render=_render_unreached,
+    ),
+    Question(
+        id="beliefs_30s_ago",
+        prompt="What did the fleet believe thirty seconds ago?",
+        memory="episodic",
+        sql=BELIEFS_30S_AGO,
+        params=("mission_id",),
+        render=_render_recent_past,
     ),
     Question(
         id="what_do_we_know",

@@ -58,6 +58,24 @@ You can break it live, three ways, and watch it recover:
 A commander console answers questions about the running mission in read-only
 SQL — including *"why did robot m1 do that?"*, which is a join, not a story.
 
+## Why this generalises
+
+Robots are the setting, not the claim. Strip the rubble away and Colony is a
+pattern for **any fleet of agents that must not lose work when one of them
+dies**: ownership is a lease rather than an assignment, so a worker that
+disappears frees its own work with nobody watching; coordination is a property
+of the data model rather than of a message bus, so agents that never address
+each other still hand off; and every decision stores the rows that caused it,
+so "why did that happen" survives the process that decided it.
+
+That shape is the same whether the agents are lifters and medics, a bank of
+document-processing workers, or an LLM agent pool where one call finds
+something the next needs. The parts most systems build for this — a scheduler,
+a heartbeat watchdog, a reassignment sweeper, a message broker — are the parts
+we deleted, and the database does their job under `SERIALIZABLE` without a
+coordinator. The disaster scenario is what makes the failure modes visible and
+the stakes legible; it is not what makes the idea useful.
+
 ## How we built it
 
 **The schema is the thesis.** Four memory systems as named tables, because the

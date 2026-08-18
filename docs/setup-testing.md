@@ -316,7 +316,7 @@ enforced in ticks, not wall-clock, so it holds in replay too.
 
 ## 3.5 The commander agent (Managed MCP Server + Agent Skills)
 
-The console's six canned questions need only a cluster. Its **free-form** tier
+The console's seven canned questions need only a cluster. Its **free-form** tier
 needs Bedrock (§3 above), the Managed MCP Server, and the Agent Skills repo.
 All three are optional — without them the canned tier still answers, and the
 console says why the other one is off rather than hiding it.

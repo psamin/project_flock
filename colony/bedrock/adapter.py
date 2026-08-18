@@ -36,6 +36,15 @@ EMBED_DIMS = 512  # matches observations.embedding VECTOR(512) in schema/v1_1.sq
 LIVE, RECORD, REPLAY = "live", "record", "replay"
 
 
+class NoCassette(RuntimeError):
+    """Replay mode was asked for with nothing recorded to replay.
+
+    Deliberately fatal. The alternative is `_offline_embedding` filling a
+    VECTOR(512) column with hash-derived vectors that no one can distinguish
+    from Titan's afterwards — see `adapter_from_env`.
+    """
+
+
 def _boto_errors() -> tuple[type[BaseException], ...]:
     """Exception types the live path can raise; empty without boto3, in which
     case the live path is unreachable anyway."""
@@ -520,6 +529,30 @@ def adapter_from_env() -> BedrockAdapter:
         if cassette
         else (DEFAULT_CASSETTE if DEFAULT_CASSETTE.exists() else None)
     )
+
+    # T-10b / D-4. Replay with no cassette is not a degraded demo, it is a
+    # silently wrong one: every `embed()` falls through to `_offline_embedding`,
+    # and those are hash-derived vectors that land in a VECTOR(512) column
+    # looking exactly like Titan output. `seed_memory.py` writes them straight
+    # into `mission_memories`, where the recall index then ranks them — so the
+    # failure surfaces as tactics that retrieve badly, never as an error.
+    #
+    # A missing *credential* still degrades to replay above; that is the case
+    # the "degraded, not crashed" rule was written for, and it is unchanged.
+    # This is the other one: no recorded output to replay *at all*.
+    #
+    # A typo'd COLONY_BEDROCK_CASSETTE is caught here too. It used to be
+    # accepted, load nothing (`__post_init__` only reads the file if it
+    # exists), and synthesize everything — the same fault with a louder cause.
+    if mode == REPLAY and (path is None or not path.exists()):
+        raise NoCassette(
+            f"Bedrock is in replay mode with no cassette to replay "
+            f"({'COLONY_BEDROCK_CASSETTE=' + cassette if cassette else 'no default at ' + str(DEFAULT_CASSETTE)}). "
+            "Every embedding would be locally synthesized and stored as if it "
+            "were Titan's. Record one with COLONY_BEDROCK_MODE=record, or point "
+            "COLONY_BEDROCK_CASSETTE at an existing file."
+        )
+
     return BedrockAdapter(
         mode=mode,
         region=os.environ.get("AWS_REGION", "us-east-1"),

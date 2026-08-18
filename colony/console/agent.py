@@ -1,6 +1,6 @@
 """The commander agent: a Bedrock brain with MCP hands (§6.2 tools #1 and #3).
 
-The six canned questions in `questions.py` stay exactly as they are, and remain
+The canned questions in `questions.py` stay exactly as they are, and remain
 the demo's spine — §5.4 puts reliability first and a fixed statement a judge can
 read and re-run is still the stronger artefact. This module is the tier above
 them: free-form questions, answered by a model that reads live fleet memory
@@ -142,6 +142,11 @@ How to work:
   the catalogue below and call load_skill before you rely on it.
 - Prefer one good query over several speculative ones.
 - All expiry comparisons must use the database's now(), never a literal time.
+- You can read the PAST. `SELECT ... AS OF SYSTEM TIME '-30s'` returns what the
+  fleet believed then, which is how to answer "what changed" or "did it already
+  know" without any history table. The canned `beliefs_30s_ago` question does
+  this; you may use it anywhere. Stay inside the garbage-collection window —
+  minutes, not hours.
 - Answer the commander in at most four sentences, in plain language, leading
   with the answer. Name specific robots, tasks and victims by id.
 - Write plain prose. No markdown: no **bold**, no bullet lists, no headings.
