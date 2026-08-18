@@ -128,6 +128,7 @@ def test_every_client_module_is_reachable(client, path):
 # runs on both pages. Absent on one => that feature silently does not exist
 # there, which is exactly the failure mode being guarded.
 SHARED_FEATURE_IDS = [
+    "start-simulation",   # initStartSimulation
     "memory-rail",       # refreshMemoryRail
     "fleet",             # refreshFleet
     "coordination",      # refreshCoordination
@@ -166,10 +167,18 @@ def test_the_twin_wires_up_the_shared_features_it_now_has_markup_for(client):
     setInterval by reference and never appear with parentheses.
     """
     body = client.get("/static/scene3d.js").text
-    for name in ("initInterventions", "initKillRobot", "initCompare",
+    for name in ("initStartSimulation", "initInterventions", "initKillRobot", "initCompare",
                  "refreshMemoryRail", "refreshCoordination", "refreshFleet"):
         wired = f"{name}(" in body or f"setInterval({name}" in body
         assert wired, f"scene3d.js imports {name} but never wires it up"
+
+
+def test_the_mission_lifecycle_button_resets_running_and_finished_runs(client):
+    """The shared control must stay actionable after start in both renderers."""
+    body = client.get("/static/ui-shared.js").text
+    assert 'button.textContent = "reset"' in body
+    assert 'resetting ? "/api/mission/restart" : "/api/mission/start"' in body
+    assert 'body: JSON.stringify({ coordinated: simulationCoordinated })' in body
 
 
 def test_the_twin_can_place_an_intervention(client):
@@ -181,3 +190,24 @@ def test_the_twin_can_place_an_intervention(client):
     assert "intersectPlane" in body, "no ground-plane raycast: tiles unclickable"
     assert "placeIntervention(" in body
     assert "armedIntervention()" in body
+
+
+def test_the_twin_removes_css_labels_when_a_world_is_rebuilt(client):
+    """A reconnect/restart must not freeze old coordinates over the new ones."""
+    body = client.get("/static/scene3d.js").text
+    assert "node.isCSS2DObject" in body
+    assert "node.element.remove()" in body
+
+
+def test_the_twin_has_a_persistent_operator_delineation(client):
+    body = client.get("/").text
+    assert 'id="operator-divider"' in body
+    assert "flex: 0 0 1px" in body
+    assert "min-height: 1px" in body
+    assert "background: #4a5562" in body
+    assert "transition: none; animation: none" in body
+
+
+def test_bottom_dock_content_sits_close_to_the_divider(client):
+    body = client.get("/").text
+    assert body.count("padding: 2px 12px 8px") == 2
