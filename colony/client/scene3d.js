@@ -30,13 +30,25 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/OrbitControls.js";
-import { CSS2DRenderer } from "three/addons/CSS2DRenderer.js";
+import { CSS2DObject, CSS2DRenderer } from "three/addons/CSS2DRenderer.js";
 import {
   setText,
   updateHud,
   refreshComparison,
   formatEvent,
   initConsole,
+  // Everything below already worked here the moment sim3d.html grew the markup
+  // with the same ids app.js uses — each of these looks its nodes up by id and
+  // no-ops when they are absent, which is why they were "2D-only" for two days
+  // without anyone writing a line of 2D-specific code.
+  initInterventions,
+  initKillRobot,
+  initCompare,
+  refreshMemoryRail,
+  refreshCoordination,
+  refreshFleet,
+  armedIntervention,
+  placeIntervention,
 } from "./ui-shared.js";
 import {
   makeRig,
@@ -501,6 +513,7 @@ function boot(snapshot) {
     fog.fill(0);
   }
   buildZoneIndex();
+  buildSectorGrid();   // cheap, and the map can change between missions
 
   // Rigs, traces and victim markers are rebuilt per mission, so unlike the
   // tile pool they genuinely are discarded — and removing them from the graph
@@ -672,18 +685,175 @@ function fleetCentre() {
   return homeScratch;
 }
 
+/* --- the sector grid (press S) ----------------------------------------------
+ *
+ * `world.sectors` has been on the wire since the first snapshot and only the 2D
+ * renderer ever read it. Without it the ticker says "s2 swept sector B2" and
+ * there is nowhere on screen that B2 is — the label names a place the view does
+ * not have. Drawn flat on the slab rather than as a box: it is an annotation
+ * over the city, not another thing in it.
+ */
+let sectorGroup = null;
+let sectorsVisible = false;
+
+function buildSectorGrid() {
+  if (sectorGroup) {
+    scene.remove(sectorGroup);
+    sectorGroup.traverse((o) => o.geometry?.dispose());
+    sectorGroup = null;
+  }
+  if (!world?.sectors?.length) return;
+
+  sectorGroup = new THREE.Group();
+  sectorGroup.visible = sectorsVisible;
+  const material = new THREE.LineBasicMaterial({
+    color: 0x63c5da, transparent: true, opacity: 0.42,
+  });
+
+  for (const s of world.sectors) {
+    // Corners in world space. The +0.5 that centres a tile is deliberately
+    // absent: a sector boundary runs *between* tiles, not through their middles.
+    const x0 = s.x - world.width / 2;
+    const z0 = s.y - world.height / 2;
+    const x1 = x0 + s.width;
+    const z1 = z0 + s.height;
+    const y = 0.12;
+    const outline = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x0, y, z0), new THREE.Vector3(x1, y, z0),
+      new THREE.Vector3(x1, y, z1), new THREE.Vector3(x0, y, z1),
+      new THREE.Vector3(x0, y, z0),
+    ]);
+    sectorGroup.add(new THREE.Line(outline, material));
+
+    const tag = document.createElement("div");
+    tag.className = "sector-tag";
+    tag.textContent = s.id;
+    const label = new CSS2DObject(tag);
+    label.position.set((x0 + x1) / 2, y, (z0 + z1) / 2);
+    sectorGroup.add(label);
+  }
+  scene.add(sectorGroup);
+}
+
+function setSectorGrid(on) {
+  sectorsVisible = on;
+  if (sectorGroup) sectorGroup.visible = on;
+}
+
 // --- picking (FR-17) ---------------------------------------------------------
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let dragged = false;
 
-renderer.domElement.addEventListener("pointerdown", () => { dragged = false; });
-renderer.domElement.addEventListener("pointermove", (e) => {
-  if (e.buttons) dragged = true;
+/* A drag is movement past a threshold, not any movement at all.
+ *
+ * This was `if (e.buttons) dragged = true`, which meant a single pixel of
+ * travel between pressing and releasing counted as an orbit and silently
+ * swallowed the click. Mice move during clicks — trackpads especially — so
+ * "click a robot for its reasoning" failed intermittently in a way that looked
+ * like the robot was not clickable rather than like the click was discarded.
+ * Measured from the press point rather than accumulated, so a slow drift out
+ * and back is still a drag. */
+const DRAG_SLOP_PX = 5;
+let pressX = 0;
+let pressY = 0;
+
+renderer.domElement.addEventListener("pointerdown", (e) => {
+  dragged = false;
+  pressX = e.clientX;
+  pressY = e.clientY;
 });
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (!e.buttons) return;
+  if (Math.hypot(e.clientX - pressX, e.clientY - pressY) > DRAG_SLOP_PX) dragged = true;
+});
+/* Tile picking, for the operator gesture.
+ *
+ * A mathematical plane at y=0 rather than a raycast against the `ground`
+ * InstancedMesh, and the difference matters: unseen tiles and walls are written
+ * at scale 0 (see `placeTile`), so an instanced raycast silently cannot hit
+ * unexplored ground — which is exactly where an operator wants to drop a
+ * collapse. The plane has no such holes. `controls.maxPolarAngle` keeps the
+ * camera above the slab, so it is always facing us and the intersection always
+ * exists.
+ */
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const groundHit = new THREE.Vector3();
+
+/** Screen point -> integer tile, or null if the ray misses the slab entirely.
+ *
+ * The inverse of `placeTile`'s `wx = x - width/2 + 0.5`.
+ */
+function tileAt(event) {
+  if (!world) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  if (!raycaster.ray.intersectPlane(groundPlane, groundHit)) return null;
+  const x = Math.floor(groundHit.x + world.width / 2);
+  const y = Math.floor(groundHit.z + world.height / 2);
+  if (x < 0 || y < 0 || x >= world.width || y >= world.height) return null;
+  return { x, y };
+}
+
+/* The aiming reticle: what the disruption will actually cover.
+ *
+ * Radius is in tiles and the affected area is a square box (see the server's
+ * intervention handling), so this is a box outline rather than a ring — a ring
+ * would promise a circle and then break more than it drew.
+ */
+const reticle = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 0.35, 1)),
+  new THREE.LineBasicMaterial({ color: 0xd9884a, transparent: true, opacity: 0.9 }),
+);
+reticle.visible = false;
+reticle.renderOrder = 999;
+scene.add(reticle);
+
+function updateReticle(event) {
+  const armed = armedIntervention();
+  document.body.classList.toggle("arming", !!armed);
+  if (!armed) {
+    reticle.visible = false;
+    return;
+  }
+  const tile = tileAt(event);
+  if (!tile) {
+    reticle.visible = false;
+    return;
+  }
+  const span = armed.radius * 2 + 1;
+  reticle.scale.set(span, 1, span);
+  reticle.position.set(
+    tile.x - world.width / 2 + 0.5,
+    0.18,
+    tile.y - world.height / 2 + 0.5,
+  );
+  reticle.visible = true;
+}
+
+renderer.domElement.addEventListener("pointermove", updateReticle);
+renderer.domElement.addEventListener("pointerleave", () => { reticle.visible = false; });
+
 renderer.domElement.addEventListener("pointerup", (event) => {
   if (dragged) return;   // an orbit drag is not a click
+
+  // An armed disruption takes the click, checked BEFORE robot picking for the
+  // reason app.js gives: the tile an operator wants to collapse is very often
+  // the one a robot is standing beside, and "select the robot instead" would
+  // make the corridor next to it unclickable.
+  if (armedIntervention()) {
+    const tile = tileAt(event);
+    if (tile) {
+      placeIntervention(tile.x, tile.y);
+      reticle.visible = false;
+      document.body.classList.remove("arming");
+    }
+    return;
+  }
+
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -804,6 +974,11 @@ function connect() {
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
+        // Kicked on snapshot as well as on their intervals (app.js:536-537), so
+        // a restarted mission does not show the previous run's row counts and
+        // decisions for up to two seconds.
+        refreshMemoryRail();
+        refreshCoordination();
       }
       if (!world) return;
       applyTileChanges(frame.tiles_changed);
@@ -904,7 +1079,22 @@ initConsole({
   getSelected: () => selected,
 });
 
+initInterventions();
+initKillRobot();
+initCompare();
+
 setInterval(refreshComparison, 4000);
+// Same cadences as app.js:571-575. The coordination feed is the slower of the
+// two because a new cross-agent line is a decision boundary, not a tick; the
+// fleet panel is the faster one because its lease countdown has to visibly run
+// down or the takeover looks like a jump cut.
+setInterval(refreshCoordination, 2000);
+setInterval(refreshFleet, 1000);
+// On an interval, not only on snapshot as app.js:536 does. Those row counts are
+// the "CockroachDB is doing the work" signal, and a snapshot only arrives on
+// connect or restart — so on the 2D page the rail freezes at whatever the
+// counts were when you opened the tab, which is the opposite of the claim.
+setInterval(refreshMemoryRail, 3000);
 
 document.getElementById("toggle").addEventListener("click", toggleMode);
 document.getElementById("panel-close").addEventListener("click", closePanel);
@@ -913,11 +1103,21 @@ const directorButton = document.getElementById("director-toggle");
 directorButton.addEventListener("click", () => {
   director.setEnabled(!director.enabled);
   directorButton.textContent = `director: ${director.enabled ? "ON" : "OFF"}`;
-  directorButton.classList.toggle("armed", director.enabled);
+  // `.on`, not `.armed`: an engaged mode and a loaded gesture are different
+  // states and sim3d.html now styles them differently.
+  directorButton.classList.toggle("on", director.enabled);
 });
 
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") closePanel();
+  // Guarded on the focused element. The 2D page has this bound bare, so typing
+  // "s" into the commander console's ask box toggles its sector grid; that bug
+  // is not worth porting.
+  if (e.key === "s" || e.key === "S") {
+    const focused = document.activeElement;
+    if (focused && (focused.tagName === "INPUT" || focused.tagName === "TEXTAREA")) return;
+    setSectorGrid(!sectorsVisible);
+  }
 });
 
 /* Read-only QA surface.
@@ -966,6 +1166,59 @@ window.__colony = {
       triangles: renderer.info.render.triangles,
       geometries: renderer.info.memory.geometries,
       textures: renderer.info.memory.textures,
+    };
+  },
+  /** The operator gesture's state, for asserting it rather than eyeballing it.
+   *
+   * The reticle is the only part of this view whose correctness is invisible in
+   * a screenshot when it is wrong — an absent box and a box drawn under the
+   * slab look identical from above. `tile` is what the next click would hit. */
+  aiming() {
+    const armed = armedIntervention();
+    return {
+      armed: armed ? armed.kind : null,
+      radius: armed ? armed.radius : null,
+      reticleVisible: reticle.visible,
+      tile: reticle.visible
+        ? {
+            x: Math.round(reticle.position.x + width / 2 - 0.5),
+            y: Math.round(reticle.position.z + height / 2 - 0.5),
+          }
+        : null,
+      sectorsVisible,
+    };
+  },
+  /** Viewport pixel coordinates of a tile centre — the inverse of tileAt(),
+   *  so a scripted click can target a specific tile rather than a pixel. */
+  screenPositionOfTile(x, y) {
+    const v = new THREE.Vector3(x - width / 2 + 0.5, 0, y - height / 2 + 0.5);
+    v.project(camera);
+    const rect = renderer.domElement.getBoundingClientRect();
+    return {
+      x: Math.round(rect.left + ((v.x + 1) / 2) * rect.width),
+      y: Math.round(rect.top + ((-v.y + 1) / 2) * rect.height),
+      onScreen: v.x > -1 && v.x < 1 && v.y > -1 && v.y < 1 && v.z < 1,
+    };
+  },
+  /** What the pick ray finds at a viewport pixel.
+   *
+   * "Clicking a robot does nothing" has two very different causes — the ray
+   * missing, or the hit having no `robotId` — and they look identical from
+   * outside. This distinguishes them. */
+  pickAt(x, y) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((x - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((y - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects([...rigs.values()], true);
+    return {
+      rigCount: rigs.size,
+      hits: hits.length,
+      first: hits[0]
+        ? { name: hits[0].object.name || hits[0].object.type,
+            robotId: hits[0].object.userData?.robotId ?? null }
+        : null,
+      ownersSeen: hits.map((h) => h.object.userData?.robotId ?? null),
     };
   },
   /** Viewport pixel coordinates of a robot, for scripted clicks. */

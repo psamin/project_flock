@@ -22,7 +22,7 @@ laptop the day before the deadline.
 
 ## Vendored library: Three.js
 
-The 3D view at `/sim3d` uses [Three.js](https://threejs.org) **r180**, vendored
+The 3D view at `/` uses [Three.js](https://threejs.org) **r180**, vendored
 into the repository rather than loaded from a CDN.
 
 | File | Purpose |
@@ -42,12 +42,38 @@ into the repository rather than loaded from a CDN.
   this and needs no build step.
 - **Modifications:** none. The files are byte-for-byte as published.
 
+## CockroachDB Agent Skills
+
+| Path | What it is |
+|---|---|
+| `colony/skills/` | 34 skills, fetched not vendored |
+
+- **Licence:** Apache 2.0, the same licence as this repo. `LICENSE` is copied in
+  beside the skills by the fetch script.
+- **Source:** [`cockroachlabs/cockroachdb-skills`](https://github.com/cockroachlabs/cockroachdb-skills),
+  pinned at `e14e86d` in [`colony/scripts/fetch_skills.sh`](colony/scripts/fetch_skills.sh).
+- **Why fetched rather than vendored:** the commander agent routes on these
+  descriptions, so the pin is what stops an upstream edit changing which skill it
+  picks mid-demo — and 34 files of third-party markdown in the diff would hide
+  our own changes rather than document a dependency. `colony/skills/` is
+  gitignored; the script plus the pin is the record.
+- **Modifications:** none. Only the `skills/` subtree and `LICENSE` are taken;
+  upstream's `docs/` and `scripts/` are for people contributing to that repo.
+- **How it is used:** `console/skills.py` reads each skill's YAML frontmatter
+  into a routing catalogue in the agent's system prompt, and loads a full body
+  only when the model calls `load_skill`. That two-tier shape is the
+  agentskills.io contract, not something we invented for it.
+
 ## Runtime dependencies
 
 Declared in [`colony/pyproject.toml`](colony/pyproject.toml) and installed by
 `uv`: FastAPI, Uvicorn, psycopg (CockroachDB driver), boto3 (AWS Bedrock), and
 pytest + httpx for the test suite. All standard frameworks under permissive
 licences.
+
+The Managed MCP Server client (`console/mcp_client.py`) adds nothing to that
+list: it speaks JSON-RPC and OAuth 2.1 over `urllib` from the standard library,
+so the console's dependency on CockroachDB Cloud costs no third-party package.
 
 ## AI-assisted development
 

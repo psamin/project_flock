@@ -18,12 +18,15 @@
  * a handful of entities) Canvas 2D is not a compromise — the sprite work lives
  * in atlas.js and blits the same either way.
  *
- * There IS now a WebGL renderer, at /sim3d (docs/designs/3d-simulation-view.md),
- * and the objection above is exactly why it is a second route instead of a
- * replacement. It does not weaken: a machine without WebGL still gets a working
- * mission here, and /sim3d checks for WebGL before it loads Three.js and links
- * back to this page when it is missing. This file stays Canvas 2D on purpose —
- * it is the floor the other view is allowed to be ambitious above.
+ * The WebGL renderer (docs/designs/3d-simulation-view.md) now serves `/`, and
+ * this page serves `/2d`. That inverts which one a judge sees first; it does
+ * NOT weaken the objection above, because the objection was never about which
+ * URL is the front door. It was about there being a floor at all. The twin
+ * checks for WebGL before it fetches Three.js and sends a machine that cannot
+ * render it here — so this file staying Canvas 2D is now load-bearing in a way
+ * it was not when it was the default: it is the only page left that renders on
+ * a laptop with hardware acceleration off, and the twin's escape hatch is a
+ * dead end without it.
  */
 
 import { buildAtlas, drawSprite, tileSprite, COLOURS } from "./atlas.js";
@@ -587,7 +590,14 @@ setInterval(refreshComparison, 4000);
 document.getElementById("toggle").addEventListener("click", toggleMode);
 document.getElementById("panel-close").addEventListener("click", closePanel);
 window.addEventListener("keydown", (e) => {
-  if (e.key === "s") showSectors = !showSectors;   // FR-16's grid, on demand
+  // Guarded on the focused element: this listener is on `window`, so before the
+  // guard, typing any word containing "s" into the commander console's ask box
+  // flickered the sector grid underneath it.
+  const focused = document.activeElement;
+  const typing = focused && (focused.tagName === "INPUT" || focused.tagName === "TEXTAREA");
+  if (!typing && (e.key === "s" || e.key === "S")) {
+    showSectors = !showSectors;                    // FR-16's grid, on demand
+  }
   if (e.key === "Escape") closePanel();
 });
 

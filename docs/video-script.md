@@ -159,8 +159,10 @@ Record these separately and cut; do not attempt one take.
 ## Do not
 
 - **Do not** say "because of the fire" over the intervention beat. Say "after".
-- **Do not** show `/sim3d` unless shot 1 has spare time — the 2D view is the
-  tested recording fallback and switching mid-video costs continuity.
+- **Do not** switch views mid-video. The twin is now `/` and is what the shot
+  list assumes; `/2d` is the fallback to record on if WebGL misbehaves on the
+  recording machine, and it carries every panel the twin does. Pick one before
+  you start rolling — switching costs continuity.
 - **Do not** play music with a licence you cannot name. Silence with clear
   narration scores better than a takedown.
 - **Do not** show the AWS console, a DSN, or `~/.aws` on camera.

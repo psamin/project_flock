@@ -1,29 +1,41 @@
-"""CockroachDB Managed MCP Server wiring for the commander console (§6.2, FR-10).
+"""CockroachDB Managed MCP Server wiring (§6.2 required tool #1, FR-10).
 
-§6.2 lists the Managed MCP Server as required tool #1 and describes the hookup
-as "config snippet copied from Cloud Console into Claude Code/Cursor/VS Code".
-Two things have to be true for that snippet to be the access-control story §3.5
-claims, and this module is about both:
-
-    identity   the console connects as `commander`, which holds SELECT and
-               nothing else (`infra/credentials.py`). Pointing MCP at an admin
-               role would make "read-only" a setting rather than a property.
-    writes off §6.3: "MCP server is read-only by default; write tools are
-               opt-in. Leave writes off — it *is* our access-control story."
-
-    uv run python ../infra/mcp.py config    print the client config snippet
-    uv run python ../infra/mcp.py check     assert the posture before wiring it
-
-The cluster exists (CockroachDB Cloud, v26.2.5) and the schema and grants are
-applied to it, so the only input left is the cluster id from the Cloud console's
-connect dialog:
+§6.2 describes the hookup as a "config snippet copied from Cloud Console into
+Claude Code/Cursor/VS Code", and this module prints it:
 
     uv run python ../infra/mcp.py config --cluster-id <id>   # or $CRDB_CLUSTER_ID
+    uv run python ../infra/mcp.py check     assert the grant posture
 
-`commander` really does hold SELECT and nothing else on that cluster —
-`credentials.py verify` asserts it there, not only on the local rig — so the
-read-only claim is a property of the grant and survives anyone flipping a
-setting.
+That snippet is the *editor* path — how a teammate points Claude Code at the
+cluster while building. The **runtime** path is `colony/console/mcp_client.py`,
+which the commander agent uses to read fleet memory during a mission. Both reach
+the same managed endpoint; only the second one is load-bearing in the demo.
+
+## What calling it for real corrected
+
+This module used to assert a read-only story that does not survive contact with
+the server. Recorded here rather than quietly fixed, because the same claim
+appears in §3.5 and in the README:
+
+    identity   MCP connects as `managed-mcp`, its own service identity.
+               `SELECT current_user` through the endpoint says so. The
+               `CRDB_SQL_USER: commander` key this file used to emit was inert,
+               and has been removed rather than left to imply otherwise. The
+               `commander` grant governs `console/reader.py` — the psycopg path
+               — and nothing else.
+    read-only  On the MCP path it is the server's control, not our grant:
+               `select_query` refuses non-SELECT, `information_schema` and
+               `crdb_internal` are blocked, and only some SHOW forms are
+               allowed. Note that the server still *offers* `insert_rows`,
+               `create_table` and `create_database` even with `readOnly: true`
+               in the config — which is why the agent is handed an explicit
+               allowlist (`mcp_client.TOOLS`) rather than whatever it advertises.
+    cluster id must be passed as a tool argument; the `?cluster=` query parameter
+               is not read.
+
+So §6.3's "leave writes off" is still the right posture, and it is still worth
+stating in the config — but it is one of three layers rather than the whole
+story, and the one it is easiest to over-claim.
 """
 
 from __future__ import annotations
@@ -43,7 +55,6 @@ SERVER_NAME = "colony-fleet-memory"
 
 def config(
     cluster_id: str | None = None,
-    role: str = CONSOLE_ROLE,
     endpoint: str = MANAGED_ENDPOINT,
 ) -> dict:
     """The client config snippet (Claude Code / Cursor / VS Code shape).
@@ -57,18 +68,18 @@ def config(
         "mcpServers": {
             SERVER_NAME: {
                 "type": "http",
+                # The cluster is named here so a human reading the config can
+                # tell which one this entry is, but the server does **not** read
+                # it: calls arrive as "cluster_id not provided" unless the id is
+                # also passed as a tool argument. `console/mcp_client.py` injects
+                # it into every call for exactly that reason.
                 "url": f"{endpoint}?cluster={cluster_id}",
                 "readOnly": True,
                 "description": (
                     "Colony fleet memory — working, episodic, provenance and "
-                    "semantic tables. Read-only; the console asks the six "
-                    "canned questions in colony/console/questions.py."
+                    "semantic tables. Read-only. Used at runtime by the "
+                    "commander agent (colony/console/agent.py)."
                 ),
-                "env": {
-                    # The role, not a password: credentials belong in the client's
-                    # own secret store, and this file is committed.
-                    "CRDB_SQL_USER": role,
-                },
             }
         }
     }

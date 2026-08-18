@@ -7,6 +7,18 @@ Everything below was run end-to-end on this machine before being written down.
 
 ## What you are deploying
 
+Three routes off one process:
+
+| route | what it serves | needs |
+|---|---|---|
+| `/` | the digital twin | WebGL 2 |
+| `/2d` | the Canvas 2D renderer — the floor the twin's capability notice links to | nothing |
+| `/sim3d` | alias for the twin, kept because our own docs name it | WebGL 2 |
+
+`/2d` is not optional dead weight: it is the only page that renders on a
+machine with hardware acceleration disabled, and without it the twin's WebGL
+notice is a dead end.
+
 One Python process: the 4 Hz tick loop, the websocket broadcast, the commander
 console, and the static client (served from the same origin — it is ~200 KB, and
 a second origin would buy a CORS problem and nothing else).
@@ -27,6 +39,20 @@ That table decides your hosting tier. The app alone fits anywhere. CockroachDB
 is what needs real RAM.
 
 ---
+
+**What that costs.** The commander console's free-form tier is off in this
+configuration. It runs a live Bedrock loop, which a cassette cannot stand in
+for, and it reads through the Managed MCP Server, which needs an OAuth refresh
+token. The seven canned questions still answer, and `/api/console/agent` reports
+which piece is missing rather than the tier silently not being there.
+
+That is a real trade, and it is worth deciding rather than inheriting: a judge
+visiting the public URL sees the canned tier only. To turn the agent on, the
+container needs AWS credentials, `CRDB_CLUSTER_ID`, and
+`~/.colony/mcp-token.json` mounted in — which puts a long-lived credential on a
+box that sits on the public internet for a month. Our judgement is that the
+free-form tier belongs in the demo video and in a judge's local run, and the
+public URL stays credential-free.
 
 ## Decide one thing first
 

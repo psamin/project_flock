@@ -1,4 +1,5 @@
-.PHONY: up down schema schema-cloud test smoke map dev sim seed-memory reset demo demo-cold preflight \
+.PHONY: up down schema schema-cloud test smoke map dev sim seed-memory reset demo demo-cold \
+	preflight skills mcp-login console-check \
 	cluster-3 cluster-3-health cluster-3-kill cluster-3-down
 
 # One command to a working dev cluster with the schema applied.
@@ -36,6 +37,27 @@ test:
 # of them and fail on camera. Needs `make sim` running in another shell.
 smoke:
 	./scripts/smoke.sh
+
+# --- the commander agent (§6.2 tools #1 and #3) ------------------------------
+#
+# Both are optional: without them the console still answers its six canned
+# questions, which is the tier the demo leans on. These add the free-form tier.
+
+# The CockroachDB Agent Skills repo, pinned. The agent routes on the skill
+# descriptions, so this is a real input rather than a reference.
+skills:
+	./scripts/fetch_skills.sh
+
+# One-time browser login to the Managed MCP Server. The endpoint offers no
+# client_credentials grant, so a human has to authorise once; the refresh token
+# stored in ~/.colony/ is what makes every later run headless.
+mcp-login:
+	uv run python -m console.mcp_client login
+
+# Is the free-form tier actually wired up here? Prints why not, if not.
+console-check:
+	uv run python -m console.mcp_client check
+	uv run python -c "from console.agent import availability; print(availability())"
 
 map:
 	uv run python -m world.build_aftershock
