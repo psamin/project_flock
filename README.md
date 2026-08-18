@@ -1,6 +1,4 @@
-# project flock — a fleet that remembers together
-
-*by bird labs* · <https://github.com/psamin/project_flock> · Apache 2.0
+# project flock (Colony) — a robot fleet that learns and coordinates tasks in any environment
 
 A heterogeneous robot fleet runs a disaster-relief mission as one team: shared
 beliefs, transactional task claiming, automatic handoffs when one robot's work
