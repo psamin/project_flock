@@ -12,8 +12,9 @@ ok: True | memory: cockroach | tick: 30
 bedrock: {'requested': 'replay', 'mode': 'replay', 'calls': 0, 'cassette_entries': 76}
 console available: True | questions: 6
 memory rail rows: 149
-GET /        -> 200
-GET /sim3d   -> 200
+GET /        -> 200   (the twin)
+GET /2d      -> 200   (Canvas 2D, the no-WebGL floor)
+GET /sim3d   -> 200   (alias, kept for the URLs in our own docs)
 healthcheck  -> healthy
 ```
 
@@ -28,6 +29,20 @@ It runs **with no AWS credentials**: `adapter_from_env` defaults to replay and
 the committed cassette carries Claude's recorded decisions, so the deployed demo
 shows real Bedrock output without a key on the box. That matters for a public
 URL sitting up for a month — there is no credential on it to leak.
+
+**What that costs.** The commander console's free-form tier is off in this
+configuration. It runs a live Bedrock loop, which a cassette cannot stand in
+for, and it reads through the Managed MCP Server, which needs an OAuth refresh
+token. The six canned questions still answer, and `/api/console/agent` reports
+which piece is missing rather than the tier silently not being there.
+
+That is a real trade, and it is worth deciding rather than inheriting: a judge
+visiting the public URL sees the canned tier only. To turn the agent on, the
+container needs AWS credentials, `CRDB_CLUSTER_ID`, and
+`~/.colony/mcp-token.json` mounted in — which puts a long-lived credential on a
+box that sits on the public internet for a month. Our judgement is that the
+free-form tier belongs in the demo video and in a judge's local run, and the
+public URL stays credential-free.
 
 ## Decide one thing first
 
