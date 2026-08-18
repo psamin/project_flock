@@ -502,13 +502,39 @@ Everything below is from the official Devpost rules/resources pages (fetched Aug
 | **ccloud CLI** | Agent-ready CLI for the Cloud control plane: create clusters, manage IP allowlists, SQL users, connection info; JSON output; service-account RBAC. | Cluster provisioning + per-robot SQL user creation scripted via ccloud in `infra/` (reproducible setup, shown in README). Optional — nice fourth tool, zero extra architecture. | Optional #4 |
 | Docs MCP server, Claude Code plugin, LangChain integrations | Docs-only MCP endpoint; editor plugins; LangChain provider/vector store/chat history. | Dev accelerators only. LangChain's CRDB vector store is a fallback if lane 1's raw-SQL vector path hits friction; core stays raw SQL for transactional control. | Dev aids |
 
+#### 6.2a As built — corrections to the table above
+
+The table is the plan. This is what shipped, kept separate rather than edited in
+because three of these are places the plan was wrong about the product, not just
+about scope.
+
+| Tool | Planned | Shipped |
+|---|---|---|
+| Managed MCP Server | dev-time editor wiring; console issues the queries "the MCP server would end up issuing" | **runtime.** `console/mcp_client.py` is an OAuth 2.1 + JSON-RPC client, and the console's free-form tier answers through `tools/call` against the live cluster. The editor wiring also happened. |
+| Agent Skills Repo | dev reference, plus running audit skills and committing the output to `/ops-audit` | **runtime, and not that.** The audit-output plan was dropped; instead the agent routes on all 34 skills' descriptions and loads a body when one matches. `audit/` is our own experiment record and is unrelated. |
+| Distributed Vector Indexing | as planned | as planned, with one correction: the reconcile gate is a deliberate `FULL SCAN`, not an index scan. §4.6 and the README carry the argument; `test_schema.py` holds it as a strict xfail. |
+| ccloud CLI | optional #4 | **not shipped.** Nothing shells out to it. |
+
+Three findings from calling the managed endpoint for real, each of which
+contradicts a line elsewhere in this document:
+
+1. **It connects as `managed-mcp`**, its own service identity — not as whatever
+   `CRDB_SQL_USER` says. That key is inert. §3.5's "commander MCP access
+   read-only" describes `console/reader.py`, the psycopg path, and does not
+   describe the MCP path.
+2. **`?cluster=<id>` in the URL is not read.** The cluster id must be a tool
+   argument or every call fails.
+3. **Write tools are exposed even with `readOnly: true`.** `insert_rows`,
+   `create_table` and `create_database` appear in `tools/list`. See the amended
+   §6.3 bullet below.
+
 ### 6.3 Validated technical facts (so lane 1 doesn't rediscover them)
 
 - Schema DDL in §4.5 is consistent with v26.2 docs: `VECTOR` type + `CREATE VECTOR INDEX` are the documented syntax. Use **cosine (`<=>`)** for the reconcile gate.
 - The docs' own showcase pattern is exactly ours: vector search combined with relational filters in one query, one transaction — e.g. `ORDER BY embedding <=> $query LIMIT 5` with `WHERE` filters. Reuse that shape in the gate.
 - Serializable isolation is the default — the claiming `UPDATE … WHERE` (incl. the expired-lease clause) needs no extra locking ceremony.
 - CockroachDB Cloud free tier: no credit card, hackathon-eligible per the FAQ. Free-tier limits are ours to watch; embeddings at 512-dim × a few thousand observations is nothing.
-- MCP server is read-only by default; write tools are opt-in. Leave writes off — it *is* our access-control story.
+- ~~MCP server is read-only by default; write tools are opt-in. Leave writes off — it *is* our access-control story.~~ **Amended after testing.** `readOnly: true` in the config does not remove the write tools from `tools/list`; the server still offers `insert_rows`, `create_table` and `create_database`. Leaving writes off is still right, but it is not by itself an access-control story. What actually holds on the MCP path is three layers in `console/agent.py`: a read-only tool allowlist the model is never shown past, `assert_read_only` on every statement before it leaves the process, and the server's own refusals. The `commander` grant is a fourth layer that applies to the *other* console path only.
 
 ### 6.4 AWS services — decisions and rationale
 

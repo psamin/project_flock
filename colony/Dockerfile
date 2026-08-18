@@ -10,6 +10,13 @@
 # shows real Bedrock output without a key on the box. Give it credentials and
 # COLONY_BEDROCK_MODE=live if you want it calling AWS for real.
 #
+# The commander console's **free-form tier is off** in that credential-less
+# configuration, and deliberately: it runs a live Bedrock loop, which a cassette
+# cannot stand in for, and it reads through the Managed MCP Server, which needs
+# an OAuth refresh token. The six canned questions still answer, and the console
+# says which tier it is missing and why. To turn it on, the container needs
+# AWS credentials, CRDB_CLUSTER_ID, and ~/.colony/mcp-token.json mounted in.
+#
 # Fleet memory comes from COLONY_DSN. Set it — with no DSN the server falls back
 # to in-memory memory, and a deployed demo on the fake would be the exact
 # failure `_make_memory` refuses for named clusters.
@@ -32,6 +39,10 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir \
       "fastapi>=0.115" "uvicorn[standard]>=0.32" "psycopg[binary]>=3.2"
 
+# `colony/skills/` is gitignored, so this copies it only when the builder ran
+# `make skills` first. Absent, the agent still starts and answers with an empty
+# catalogue — `console/skills.py` degrades rather than raising — so a forgotten
+# fetch costs the skills tool, not the build.
 COPY . .
 
 # Not root. The container runs a websocket server exposed to the internet for a
