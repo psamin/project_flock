@@ -956,7 +956,10 @@ function connect() {
     socket.onmessage = null;
     socket.close();
   }
-  socket = new WebSocket(`ws://${location.host}/ws`);
+  // Match the page's scheme. A hardcoded ws:// is blocked as mixed content
+  // the moment the demo sits behind TLS, and the world just never ticks.
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${scheme}://${location.host}/ws`);
   const mine = socket;
 
   socket.onopen = () => { status.textContent = "live"; };
