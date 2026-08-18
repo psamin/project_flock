@@ -1,4 +1,4 @@
-# Colony — fleet coordination layer
+# project flock — fleet coordination layer
 
 Phase 1 (Aug 1): cluster, schema, the `fleetmem` SDK, the `map.json` contract,
 CockroachDB vector indexing, the Bedrock adapter.
@@ -111,8 +111,8 @@ sends a machine that cannot render it.
 | `coordination: ON/OFF` | restarts the mission with the whole fleet rebuilt, not just the fog (FR-9) |
 | `S` | the exploration sector grid (FR-16), so "swept sector B2" in the ticker names somewhere you can see |
 | the operator strip | arm a disruption, then click a tile. On the twin the aiming box tracks the radius on the ground plane; the command is a `hazards` row and a changefeed carries it to the fleet |
-| the console panel | two read-only tiers: seven canned questions answered from live fleet memory, each shown with the SQL that produced it (FR-10) — one of them reading the past with `AS OF SYSTEM TIME` — and an ask box answered by Claude reading the cluster over the Managed MCP Server |
-| the scoreboard | `tactics` — lessons the fleet carries in, retrieved per decision through the vector index — and `bedrock` mode plus live call count |
+| the console panel | two read-only tiers: an ask box answered by Claude reading the cluster over the Managed MCP Server, and seven canned questions answered from live fleet memory, each shown with the SQL that produced it (FR-10) — one of them reading the past with `AS OF SYSTEM TIME`. The answer renders directly under the ask box and the canned list folds away on submit, so an answer never opens below the fold. Surrogate uuids are elided everywhere a human reads output — robot ids (`s1`, `m1`) are not uuids and stay |
+| the scoreboard | six numbers, not eleven: `tick`, `lost`, `rescue rate`, `double work`, `tactics` — lessons the fleet carries in, retrieved per decision through the vector index — and `bedrock` mode plus live call count. `seen`, `stabilized`, `median`, `duplicate effort` and `tiles seen` are still measured and still on `/api/runs`; they were cut from the strip because a viewer cannot hold eleven definitions, and `duplicate effort` beside `double work` read as one metric named twice |
 
 The endpoints behind it — everything except the restart is a read:
 
