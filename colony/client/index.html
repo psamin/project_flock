@@ -194,15 +194,24 @@
       display: flex; gap: 6px; align-items: center; margin-bottom: 8px;
       flex-wrap: wrap;
     }
+    #console-composer { position: relative; flex: 1 1 420px; min-width: 0; }
     #console-ask {
-      flex: 1 1 320px; min-width: 0; background: #14121a; color: #e8e3d9;
-      border: 1px solid #2e2939; border-radius: 3px; padding: 6px 8px;
-      font: inherit; font-size: 12px;
+      box-sizing: border-box; width: 100%; min-width: 0; background: #14121a;
+      color: #e8e3d9; border: 1px solid #2e2939; border-radius: 5px;
+      padding: 8px 42px 8px 10px; font: inherit; font-size: 12px;
     }
     #console-ask:focus { outline: none; border-color: #63c5da; }
     #console-ask:disabled { color: #6d6779; }
+    #console-ask-go {
+      position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+      display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+      color: #63c5da; background: #23202d; border-color: #3a3448;
+      border-radius: 4px;
+    }
+    #console-ask-go:hover { color: #a9e5f1; background: #302a40; }
+    #console-ask-go svg { width: 15px; height: 15px; }
     #console-agent-note {
-      color: #8a8397; font-size: 11px; letter-spacing: 0.04em;
+      flex: 1 1 100%; color: #8a8397; font-size: 11px; letter-spacing: 0.04em;
     }
     /* The agent's tool trace. Monospace and dim: it is evidence sitting under
        the answer, not something to read first. */
@@ -212,13 +221,24 @@
     }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    #console-questions-label {
+      color: #6d6779; font-size: 10px; letter-spacing: 0.1em; margin-bottom: 5px;
+    }
     #console-questions { display: flex; gap: 6px; flex-wrap: wrap; }
     #console-questions button { text-align: left; }
     #console-questions button .mem {
       color: #63c5da; font-size: 10px; letter-spacing: 0.06em; margin-left: 6px;
     }
-    #console-answer { margin-top: 10px; font-size: 12px; }
-    #console-summary { color: #e8e3d9; margin-bottom: 6px; }
+    #console-answer {
+      display: none; margin: 0 0 10px; padding: 10px 12px; font-size: 12px;
+      background: #151d24; border: 1px solid #2b4652; border-left: 3px solid #63c5da;
+      border-radius: 4px; box-shadow: 0 6px 20px #0003;
+    }
+    #console-answer.active { display: block; }
+    #console-answer-label {
+      color: #63c5da; font-size: 10px; letter-spacing: 0.12em; margin-bottom: 5px;
+    }
+    #console-summary { color: #f2eee6; font-size: 13px; line-height: 1.55; margin-bottom: 6px; }
     #console-summary.err { color: #d96a9a; }
     #console-sql {
       color: #6d6779; font-size: 11px; white-space: pre-wrap; max-height: 150px;
@@ -346,18 +366,27 @@
          is a Bedrock agent reading the same cluster through the Managed MCP
          Server, with the CockroachDB Agent Skills repo available to it. -->
     <div id="console-agent">
-      <input id="console-ask" type="text" maxlength="500"
-             placeholder="ask the fleet anything — e.g. which robots are stuck, and why?" />
-      <button id="console-ask-go">ask</button>
+      <div id="console-composer">
+        <input id="console-ask" type="text" maxlength="500"
+               placeholder="ask the fleet anything — e.g. which robots are stuck, and why?" />
+        <button id="console-ask-go" type="button" aria-label="Send question" title="Send question">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7Z"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
       <span id="console-agent-note"></span>
     </div>
-    <div id="console-questions"></div>
-    <div id="console-answer">
+    <div id="console-answer" aria-live="polite" aria-busy="false">
+      <div id="console-answer-label">COMMANDER RESPONSE</div>
       <div id="console-summary"></div>
       <div id="console-steps"></div>
       <div id="console-sql"></div>
       <div id="console-rows"></div>
     </div>
+    <div id="console-questions-label">QUICK QUESTIONS</div>
+    <div id="console-questions"></div>
   </section>
 
   <!-- §3.6: the coordination feed. The ticker below says what happened; this

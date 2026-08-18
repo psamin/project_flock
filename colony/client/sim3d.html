@@ -190,26 +190,42 @@
                     flex-wrap: wrap; margin-bottom: 7px; }
     #console-head b { font-size: 11px; letter-spacing: 0.1em; }
     #console-head span { color: var(--dim); font-size: 10px; }
-    /* The free-form tier. Stacked rather than inline: this sidebar is narrow
-       and an input beside a button wraps into two ragged rows. */
+    /* The free-form tier. The send action lives inside the input so the narrow
+       rail still reads as one composer rather than two wrapped controls. */
     #console-agent { display: flex; gap: 5px; align-items: center;
                      flex-wrap: wrap; margin-bottom: 7px; }
-    #console-ask { flex: 1 1 100%; min-width: 0; background: var(--panel-2, #10151b);
-                   color: inherit; border: 1px solid var(--line); border-radius: 3px;
-                   padding: 5px 7px; font: inherit; font-size: 11px; }
+    #console-composer { position: relative; flex: 1 1 100%; min-width: 0; }
+    #console-ask { box-sizing: border-box; width: 100%; min-width: 0;
+                   background: var(--panel-2, #10151b); color: inherit;
+                   border: 1px solid var(--line); border-radius: 4px;
+                   padding: 7px 36px 7px 8px; font: inherit; font-size: 11px; }
     #console-ask:focus { outline: none; border-color: var(--accent); }
     #console-ask:disabled { color: var(--dim); }
-    #console-agent-note { color: var(--dim); font-size: 10px; }
+    #console-ask-go { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+                      display: grid; place-items: center; width: 25px; height: 25px;
+                      padding: 0; color: var(--accent); background: #18212a;
+                      border-color: #2b3946; border-radius: 3px; }
+    #console-ask-go:hover { color: #b7edf5; background: #202b36; }
+    #console-ask-go svg { width: 14px; height: 14px; }
+    #console-agent-note { flex: 1 1 100%; color: var(--dim); font-size: 10px; }
     #console-steps { font-size: 10px; color: var(--dim); margin-bottom: 5px;
                      max-height: 90px; overflow-y: auto; }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    #console-questions-label { color: #4f5b69; font-size: 9px;
+                               letter-spacing: 0.11em; margin-bottom: 4px; }
     #console-questions { display: flex; flex-direction: column; gap: 4px; }
     #console-questions button { text-align: left; line-height: 1.35; }
     #console-questions button .mem { color: var(--accent); font-size: 9px;
                                      letter-spacing: 0.08em; margin-left: 5px; }
-    #console-answer { margin-top: 8px; font-size: 11px; }
-    #console-summary { margin-bottom: 5px; }
+    #console-answer { display: none; margin: 0 0 8px; padding: 8px 9px;
+                      font-size: 11px; background: #101c24; border: 1px solid #24404c;
+                      border-left: 3px solid var(--accent); border-radius: 3px;
+                      box-shadow: 0 5px 16px #0004; }
+    #console-answer.active { display: block; }
+    #console-answer-label { color: var(--accent); font-size: 9px;
+                            letter-spacing: 0.12em; margin-bottom: 4px; }
+    #console-summary { color: #edf3f8; font-size: 11px; line-height: 1.55; margin-bottom: 5px; }
     #console-summary.err { color: #d96a9a; }
     #console-sql { color: #5d6875; font-size: 10px; white-space: pre-wrap;
                    max-height: 120px; overflow-y: auto; border-left: 2px solid var(--line);
@@ -378,18 +394,27 @@
           <span id="console-status">read-only · live fleet memory</span>
         </div>
         <div id="console-agent">
-          <input id="console-ask" type="text" maxlength="500"
-                 placeholder="ask the fleet anything…" />
-          <button id="console-ask-go">ask</button>
+          <div id="console-composer">
+            <input id="console-ask" type="text" maxlength="500"
+                   placeholder="ask the fleet anything…" />
+            <button id="console-ask-go" type="button" aria-label="Send question" title="Send question">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7Z"
+                      stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
           <span id="console-agent-note"></span>
         </div>
-        <div id="console-questions"></div>
-        <div id="console-answer">
+        <div id="console-answer" aria-live="polite" aria-busy="false">
+          <div id="console-answer-label">COMMANDER RESPONSE</div>
           <div id="console-summary"></div>
           <div id="console-steps"></div>
           <div id="console-sql"></div>
           <div id="console-rows"></div>
         </div>
+        <div id="console-questions-label">QUICK QUESTIONS</div>
+        <div id="console-questions"></div>
       </section>
 
       <!-- Filled by refreshFleet() from /api/fleet, once a second. The lease

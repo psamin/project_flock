@@ -295,12 +295,28 @@ function subjectRobot(ctx) {
   return scout ? scout.id : robots.length ? robots[0].id : "s1";
 }
 
+/** Put the shared answer card in view before either request begins. */
+function beginConsoleAnswer(message) {
+  const panel = document.getElementById("console-answer");
+  const summary = document.getElementById("console-summary");
+  panel.classList.add("active");
+  panel.setAttribute("aria-busy", "true");
+  summary.className = "";
+  summary.textContent = message;
+  requestAnimationFrame(() => {
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+
+function finishConsoleAnswer() {
+  document.getElementById("console-answer").setAttribute("aria-busy", "false");
+}
+
 async function askConsole(question, ctx) {
   const summary = document.getElementById("console-summary");
   const sqlBox = document.getElementById("console-sql");
   const rowsBox = document.getElementById("console-rows");
-  summary.className = "";
-  summary.textContent = "asking fleet memory…";
+  beginConsoleAnswer("asking fleet memory…");
   sqlBox.textContent = "";
   rowsBox.textContent = "";
   // Cleared here too: the two tiers share this panel, and leaving the agent's
@@ -345,6 +361,8 @@ async function askConsole(question, ctx) {
   } catch (err) {
     summary.className = "err";
     summary.textContent = `console error: ${err.message}`;
+  } finally {
+    finishConsoleAnswer();
   }
 }
 
@@ -367,6 +385,7 @@ function renderAgentAnswer(answer) {
     summary.className = "err";
     summary.textContent = answer.error;
     if (steps) steps.textContent = "";
+    finishConsoleAnswer();
     return;
   }
   summary.className = "";
@@ -395,19 +414,28 @@ function renderAgentAnswer(answer) {
       steps.appendChild(line);
     }
   }
+  finishConsoleAnswer();
 }
+
+let agentQuestionInFlight = false;
 
 async function askAgent(ctx) {
   const input = document.getElementById("console-ask");
+  const button = document.getElementById("console-ask-go");
   const summary = document.getElementById("console-summary");
   const steps = document.getElementById("console-steps");
+  if (agentQuestionInFlight) return;
   const question = input.value.trim();
   if (!question) return;
 
-  summary.className = "";
+  // Capture first, then clear synchronously: the submitted prompt should leave
+  // the composer immediately, not after the network/model round trip.
+  input.value = "";
+  agentQuestionInFlight = true;
+  button.disabled = true;
   // Named rather than a generic spinner: the wait is several seconds and the
   // two services doing the work are the two tools being claimed.
-  summary.textContent = "asking Claude, reading the cluster over MCP…";
+  beginConsoleAnswer("asking Claude, reading the cluster over MCP…");
   document.getElementById("console-sql").textContent = "";
   document.getElementById("console-rows").textContent = "";
   if (steps) steps.textContent = "";
@@ -424,6 +452,10 @@ async function askAgent(ctx) {
   } catch (err) {
     summary.className = "err";
     summary.textContent = `agent error: ${err.message}`;
+    finishConsoleAnswer();
+  } finally {
+    agentQuestionInFlight = false;
+    button.disabled = false;
   }
 }
 
