@@ -451,7 +451,14 @@ class FakeFleetMem:
                 for t in self._tasks.values()
                 if t["mission_id"] == mission_id and self._claimable(t)
             ]
-            rows.sort(key=lambda t: t["priority"], reverse=True)
+            # T-45: same total order as the real client. Sorting on priority
+            # alone left the rest to dict insertion order here, and to the
+            # distributed scan there — deterministic in the fake, not in
+            # CockroachDB, and different from each other either way. The fake
+            # exists to behave like the real thing (see conftest's `mem`), so
+            # the tiebreak is the same content tuple, not merely stable.
+            rows.sort(key=lambda t: (-t["priority"], t["kind"],
+                                     t["target_x"], t["target_y"]))
             return [
                 Task(
                     id=t["id"],

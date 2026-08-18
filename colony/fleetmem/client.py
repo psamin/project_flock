@@ -539,7 +539,21 @@ class CockroachFleetMem:
             "   AND (status = %s"
             "        OR (status IN ('claimed', 'in_progress')"
             "            AND (lease_expires_at IS NULL OR lease_expires_at < now())))"
-            " ORDER BY priority DESC",
+            # T-45. priority alone is not a total order, and the remainder used
+            # to be whatever the distributed scan returned. `tasks.id` is
+            # gen_random_uuid(), so equal-priority work came back in an order
+            # that changed between runs of the same seeded mission — two
+            # identical resets measured 327 and 337 ticks, and the lessons
+            # cassette (keyed on a digest carrying the tick count) then missed.
+            #
+            # Tiebreak on what the task *is*, never on its id: the ids differ
+            # across runs by construction, so ORDER BY id would be stable
+            # within a run and useless between them. This is T-08's fix
+            # (tiebreak on the sector name, not str(t.id)) in a second place.
+            #
+            # Rows still tied here are the same kind of work at the same tile
+            # at the same priority, i.e. interchangeable by definition.
+            " ORDER BY priority DESC, kind, target_x, target_y",
             (mission_id, OPEN),
         ).fetchall()
         return [_task(r) for r in rows]

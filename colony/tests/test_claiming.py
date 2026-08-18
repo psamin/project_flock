@@ -338,3 +338,46 @@ def test_both_backends_report_the_lease_on_a_task():
             f"{type(mem).__name__} dropped the lease"
         )
         mem.close()
+
+
+def test_open_tasks_order_does_not_depend_on_row_ids(mem, mission):
+    """T-45 regression. `ORDER BY priority DESC` alone is not a total order.
+
+    `tasks.id` is gen_random_uuid(), so equal-priority work used to come back
+    in whatever order the distributed scan happened to yield — which changed
+    between runs of the *same seeded mission*. Three identical resets measured
+    327, 327 and 337 ticks, and because the lessons cassette is keyed on a
+    digest carrying the tick count, the 337 runs silently learned nothing.
+
+    Asserted on content rather than on ids: the ids differ by construction on
+    every run, so a test that pinned them would pass while proving nothing.
+    Creation order is deliberately the reverse of the expected order, so a
+    regression to insertion-order or id-order fails here.
+    """
+    created = [
+        ("deliver_kit", (9, 9)),
+        ("clear_debris", (5, 2)),
+        ("clear_debris", (1, 7)),
+        ("deliver_kit", (2, 4)),
+    ]
+    for kind, target in created:
+        mem.create_task(mission, kind, target=target, priority=1)
+
+    got = [(t.kind, t.target) for t in mem.open_tasks(mission)]
+    assert got == sorted(created), (
+        "equal-priority tasks must come back in a content-defined order, "
+        f"got {got}"
+    )
+
+
+def test_priority_still_outranks_the_tiebreak(mem, mission):
+    """The tiebreak must only break ties. A higher priority sorts first even
+    when its content would sort last, or T-45's fix would quietly reorder the
+    allocator's actual preference."""
+    mem.create_task(mission, "aaa_low_priority", target=(0, 0), priority=1)
+    mem.create_task(mission, "zzz_high_priority", target=(9, 9), priority=9)
+
+    first = mem.open_tasks(mission)[0]
+    assert first.kind == "zzz_high_priority", (
+        f"priority must dominate the content tiebreak, got {first.kind}"
+    )
