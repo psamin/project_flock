@@ -11,6 +11,8 @@ from __future__ import annotations
 import functools
 import json
 import os
+import random
+import time
 from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
@@ -61,11 +63,29 @@ RENEW_SECONDS = 5
 # client is expected to replay the transaction. Two scouts reporting the same
 # victim at the same instant is exactly the contention that triggers it, so the
 # reconcile gate and the chain it creates must both be replayable.
-MAX_RETRIES = 5
+MAX_RETRIES = 8
+
+# Base for the jittered exponential backoff between retries; see the decorator.
+RETRY_BASE_DELAY = 0.005
 
 
 def retry_on_serialization_failure(method):
-    """Replay a transactional method when CockroachDB asks us to."""
+    """Replay a transactional method when CockroachDB asks us to.
+
+    Backs off between attempts, which it did not always do. Retrying instantly
+    means every transaction that just lost a conflict retries in lockstep and
+    conflicts again, so the retry budget burns in microseconds and the caller
+    sees 40001 escape — a fleet twice the size does not get twice the
+    contention, it gets a thundering herd.
+
+    Found by doubling the lifters and medics: six robots claiming against
+    shared rows exhausted five immediate retries and killed the mission, and
+    it was intermittent, so it would have surfaced on camera rather than in a
+    test. Cockroach Labs' own guidance on 40001 is exponential backoff.
+
+    Jittered because unjittered backoff re-synchronises the herd one round
+    later: same wait, same wake-up, same collision.
+    """
 
     @functools.wraps(method)
     def wrapper(*args, **kwargs):
@@ -75,6 +95,11 @@ def retry_on_serialization_failure(method):
             except psycopg.errors.SerializationFailure:
                 if attempt == MAX_RETRIES - 1:
                     raise
+                # 5ms, 10ms, 20ms, 40ms ... each ±50%. Small on purpose: the
+                # tick loop runs at 4 Hz and a robot that sleeps 200ms to win a
+                # claim has missed the tick it was claiming for.
+                delay = RETRY_BASE_DELAY * (2**attempt)
+                time.sleep(delay * (0.5 + random.random()))
         raise AssertionError("unreachable")
 
     return wrapper
