@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Colony — Aftershock · digital twin</title>
+  <title>Project-Flock — Aftershock · digital twin</title>
   <!--
     The 3D view (docs/designs/3d-simulation-view.md). Same authoritative sim,
     same /ws frames, same numbers as `/` — a second *view*, not a second world.
@@ -182,6 +182,12 @@
                      max-height: 90px; overflow-y: auto; }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    /* The suggestion list's own disclosure. Styled as a label rather than a
+       button: it is a way back to the canned tier, not a control competing
+       with the answer above it. */
+    #console-suggest { background: none; border: none; padding: 0; margin: 10px 0 5px;
+                       color: var(--dim); font-size: 10px; letter-spacing: 0.08em; }
+    #console-suggest:hover { background: none; color: var(--ink); }
     #console-questions { display: flex; flex-direction: column; gap: 4px; }
     #console-questions button { text-align: left; line-height: 1.35; }
     #console-questions button .mem { color: var(--accent); font-size: 9px;
@@ -293,7 +299,7 @@
 </head>
 <body>
   <header>
-    <h1>COLONY <small>DIGITAL TWIN</small></h1>
+    <h1>PROJECT-FLOCK <small>DIGITAL TWIN</small></h1>
     <span id="status">connecting…</span>
     <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. Same seed, same mission."></span>
     <span id="mode-badge" class="on">SHARED MEMORY</span>
@@ -305,16 +311,20 @@
        title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D view →</a>
   </header>
 
+  <!--
+    Six numbers, deliberately. `duplicate effort` and `double work` sat side by
+    side meaning different things, and a viewer who cannot tell them apart
+    trusts neither; `seen` and `stabilized` are both inside `rescue`; `tiles
+    seen` counts tiles beside numbers that count people. All five are still
+    measured and still on /api/runs — they are just not on the strip you read
+    at a glance. What is left is lives, rate, coordination, and the two
+    integration claims the demo makes out loud.
+  -->
   <div id="hud">
     <span title="Simulation tick. The mission horizon is 1200.">tick <b id="m-tick">0</b></span>
-    <span title="Victims the fleet has seen at least once.">seen <b id="m-located">0</b></span>
-    <span title="Victims stabilized by a medic.">stabilized <b id="m-stabilized">0</b></span>
-    <span title="Victims who passed their vitals deadline.">lost <b id="m-lost">0</b></span>
+    <span title="Victims who passed their vitals deadline. The mission stated in lives.">lost <b id="m-lost">0</b></span>
     <span title="Stabilized divided by total victims on the map.">rescue <b id="m-rescue">0%</b></span>
-    <span title="Median ticks from mission start to stabilization; victims never rescued count at the 1200-tick horizon.">median <b id="m-median">—</b></span>
-    <span title="Tile visits to ground another robot had already covered. Without shared memory two scouts sweep the same street; with it they do not.">dup effort <b id="m-duplicate">0%</b></span>
-    <span title="Tasks claimed by more than one robot over the mission.">double work <b id="m-doublework">0</b></span>
-    <span title="Share of reachable, non-wall tiles any robot has seen.">tiles seen <b id="m-coverage">0%</b></span>
+    <span title="Tasks claimed by more than one robot over the mission — the most direct measure that coordination is working. Zero with shared memory on; it climbs on the baseline.">double work <b id="m-doublework">0</b></span>
     <span title="Tactics learned in earlier missions, stored in mission_memories as 512-dim vectors and retrieved by cosine similarity against what a robot is facing right now. Deliberately not coordinates — a remembered tile transfers to nothing.">tactics <b id="m-recall">0</b></span>
     <span title="Amazon Bedrock adapter mode, and calls that actually reached AWS. Rules are the floor, not the fallback: a mission runs identically with no credentials, and plans.chosen.source records which one decided.">bedrock <b id="m-bedrock">—</b></span>
   </div>
@@ -357,13 +367,17 @@
           <button id="console-ask-go">ask</button>
           <span id="console-agent-note"></span>
         </div>
-        <div id="console-questions"></div>
+        <!-- The answer sits directly under the box that asked for it. It used
+             to sit under the six suggestion buttons, which in a 380px rail
+             meant every answer opened below the fold. -->
         <div id="console-answer">
           <div id="console-summary"></div>
           <div id="console-steps"></div>
           <div id="console-sql"></div>
           <div id="console-rows"></div>
         </div>
+        <button id="console-suggest">▾ suggested questions</button>
+        <div id="console-questions"></div>
       </section>
 
       <!-- Filled by refreshFleet() from /api/fleet, once a second. The lease

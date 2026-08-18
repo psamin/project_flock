@@ -26,25 +26,33 @@ export function setText(id, value) {
   if (node) node.textContent = value;
 }
 
+/* Six numbers, not eleven.
+ *
+ * The scoreboard had grown to carry every metric the server computes, and two
+ * of them read as the same thing under different names — `duplicate effort`
+ * (tile visits to ground already covered) beside `double work` (tasks claimed
+ * twice). A viewer cannot hold eleven definitions, and a pair that sounds
+ * redundant costs more trust than either number earns.
+ *
+ * What stayed, and why each one is not derivable from its neighbours:
+ *   lost         the mission stated in lives. The number the scenario is about.
+ *   rescue       stabilized over total — subsumes both `seen` and `stabilized`,
+ *                and the comparison bar already prints the raw N/M.
+ *   double work  the most direct "coordination is working" number: zero with
+ *                claiming on, climbing on the baseline.
+ *   tactics      semantic memory, carried in from earlier missions.
+ *   bedrock      mode and live call count — the AWS claim, checkable on screen.
+ *
+ * The dropped five (`seen`, `stabilized`, `median`, `duplicate effort`,
+ * `tiles seen`) are still computed and still on `/api/runs`; nothing was
+ * deleted from the measurement, only from the strip a viewer reads at a glance.
+ */
 export function updateHud(metrics) {
   if (!metrics) return;
   setText("m-tick", metrics.tick ?? 0);
-  setText("m-located", metrics.victims_located ?? 0);
-  setText("m-stabilized", metrics.victims_stabilized ?? 0);
   setText("m-lost", metrics.victims_lost ?? 0);
-  setText("m-coverage", `${Math.round((metrics.coverage ?? 0) * 100)}%`);
   setText("m-rescue", `${Math.round((metrics.rescue_rate ?? 0) * 100)}%`);
-  setText("m-duplicate", `${Math.round((metrics.duplicate_effort_index ?? 0) * 100)}%`);
-  // Computed since the first playtest and never shown. It is the most direct
-  // "coordination is working" number the project has: with claiming on it
-  // should sit at zero, and the baseline is where it climbs.
   setText("m-doublework", metrics.double_work_incidents ?? 0);
-  setText(
-    "m-median",
-    metrics.median_time_to_stabilize == null
-      ? "—"
-      : Math.round(metrics.median_time_to_stabilize),
-  );
   setText("m-recall", metrics.lessons_known ?? 0);
   // Mode and count together, because either alone misleads: "live" with zero
   // calls has not decided anything yet, and a count without the mode does not
@@ -197,6 +205,57 @@ function subjectRobot(ctx) {
   return scout ? scout.id : robots.length ? robots[0].id : "s1";
 }
 
+/* --- uuids, out of the reading path ---------------------------------------
+ *
+ * `mission_id = '249456ae-143d-405a-b59c-2be85247fd56'` is 36 characters that
+ * tell an operator nothing they can act on, and in a 380px rail one of them
+ * wraps the clause that matters off the screen. So the surrogate keys are
+ * elided wherever a human reads the output.
+ *
+ * Robot ids are NOT touched: `s1`, `m1`, `l1` are not uuids, they are the
+ * names an operator actually says out loud, and the console would be useless
+ * without them. This elides the machine's keys, not the fleet's names.
+ */
+const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const UUID_WHOLE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Every uuid in a string replaced by an ellipsis. */
+export function redactIds(text) {
+  return String(text ?? "").replace(UUID_ANY, "…");
+}
+
+/** One result row as a line, minus the columns that are only a surrogate key.
+ *
+ * Dropped rather than elided: a column whose whole value is a uuid carries no
+ * information once the uuid is gone, and `{"id": "…"}` is worse than no column
+ * at all — it looks like a value that failed to load.
+ */
+function redactRow(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return redactIds(JSON.stringify(row));
+  }
+  const kept = Object.fromEntries(
+    Object.entries(row).filter(
+      ([, v]) => !(typeof v === "string" && UUID_WHOLE.test(v)),
+    ),
+  );
+  return redactIds(JSON.stringify(kept));
+}
+
+/** Show or hide the canned-question list, and label the toggle to match.
+ *
+ * Collapsed the moment a question is asked. Six buttons sitting between the
+ * ask box and the answer push the answer below the fold in a narrow rail,
+ * which is how you end up reading a console by scrolling. One click brings
+ * them back, so nothing is lost — only moved out of the way of the answer.
+ */
+function showQuestions(open) {
+  const holder = document.getElementById("console-questions");
+  const toggle = document.getElementById("console-suggest");
+  if (holder) holder.style.display = open ? "" : "none";
+  if (toggle) toggle.textContent = `${open ? "▾" : "▸"} suggested questions`;
+}
+
 async function askConsole(question, ctx) {
   const summary = document.getElementById("console-summary");
   const sqlBox = document.getElementById("console-sql");
@@ -209,6 +268,7 @@ async function askConsole(question, ctx) {
   // tool trace under a canned answer would credit MCP for a plain psycopg read.
   const steps = document.getElementById("console-steps");
   if (steps) steps.textContent = "";
+  showQuestions(false);
 
   const body = { question };
   const subject = subjectRobot(ctx);
@@ -233,16 +293,18 @@ async function askConsole(question, ctx) {
 
     if (answer.error) {
       summary.className = "err";
-      summary.textContent = answer.error;
+      summary.textContent = redactIds(answer.error);
       return;
     }
-    summary.textContent = `${answer.prompt} — ${answer.summary}`;
+    summary.textContent = redactIds(`${answer.prompt} — ${answer.summary}`);
     // The SQL is shown on purpose: FR-10 claims these answers come out of
     // fleet memory, and the query beside the rows is what makes that
-    // checkable rather than asserted.
-    sqlBox.textContent = answer.sql;
+    // checkable rather than asserted. Eliding the uuids does not weaken that:
+    // the clauses, joins and predicates — everything a reader checks the claim
+    // against — are all still there verbatim.
+    sqlBox.textContent = redactIds(answer.sql);
     rowsBox.textContent = answer.rows.length
-      ? answer.rows.map((r) => JSON.stringify(r)).join("\n")
+      ? answer.rows.map(redactRow).join("\n")
       : "(no rows)";
   } catch (err) {
     summary.className = "err";
@@ -267,13 +329,13 @@ function renderAgentAnswer(answer) {
 
   if (answer.error) {
     summary.className = "err";
-    summary.textContent = answer.error;
+    summary.textContent = redactIds(answer.error);
     if (steps) steps.textContent = "";
     return;
   }
   summary.className = "";
-  summary.textContent = answer.text;
-  sqlBox.textContent = (answer.sql || []).join("\n\n");
+  summary.textContent = redactIds(answer.text);
+  sqlBox.textContent = redactIds((answer.sql || []).join("\n\n"));
 
   // The provenance line. A judge reading this can see the model chose a skill
   // and which tools it actually called — neither is inferable from the prose.
@@ -292,7 +354,7 @@ function renderAgentAnswer(answer) {
     for (const step of answer.steps || []) {
       const line = document.createElement("div");
       line.className = step.ok ? "ok" : "bad";
-      const arg = step.argument.replace(/\s+/g, " ").slice(0, 90);
+      const arg = redactIds(step.argument).replace(/\s+/g, " ").slice(0, 90);
       line.textContent = `${step.ok ? "→" : "✕"} ${step.tool}${arg ? ` ${arg}` : ""}`;
       steps.appendChild(line);
     }
@@ -313,6 +375,10 @@ async function askAgent(ctx) {
   document.getElementById("console-sql").textContent = "";
   document.getElementById("console-rows").textContent = "";
   if (steps) steps.textContent = "";
+  // The suggestion list folds away on submit so the answer lands directly
+  // under the box that asked for it. The typed question deliberately stays in
+  // the input: it is the only label the answer below it has.
+  showQuestions(false);
 
   try {
     const answer = await (
@@ -370,6 +436,12 @@ export async function initConsole(ctx) {
   const status = document.getElementById("console-status");
   if (!holder) return;
   initAgent(ctx);
+  const toggle = document.getElementById("console-suggest");
+  if (toggle) {
+    toggle.addEventListener("click", () =>
+      showQuestions(holder.style.display === "none"),
+    );
+  }
   try {
     const data = await (await fetch("/api/console/questions")).json();
     if (!data.available) {
@@ -685,9 +757,13 @@ export async function refreshFleet() {
               : ` <span class="lease">lease renewing</span>`)
           : `<span class="idle">idle</span>`;
         const d = r.last_decision;
+        // Model-written prose, so it can name a task by its uuid. Same
+        // treatment as the console: the machine's keys go, the fleet's names
+        // stay.
+        const rationale = d ? redactIds(d.rationale) : "";
         const why = d
-          ? `<span class="fl-why" title="${d.rationale.replace(/"/g, "&quot;")}">` +
-            `${d.rationale}</span>` +
+          ? `<span class="fl-why" title="${rationale.replace(/"/g, "&quot;")}">` +
+            `${rationale}</span>` +
             `<span class="co-brain ${d.source === "bedrock" ? "claude" : "rules"}">` +
             `${d.source === "bedrock" ? "claude" : "rules"}</span>`
           : "";

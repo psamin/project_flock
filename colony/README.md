@@ -17,7 +17,7 @@ questions, the aftershock retuned so it actually fires, and the changefeed spike
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
 make sim      # tick server + renderer -> http://localhost:8000
-make test     # 896 tests
+make test     # 926 tests
 ```
 
 To exercise CockroachDB Cloud, the 3-node chaos rig or live Bedrock, see
