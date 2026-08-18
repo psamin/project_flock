@@ -1,7 +1,6 @@
-# Colony — a fleet that remembers together
+# project flock — a fleet that remembers together
 
-*project flock, by bird labs* · <https://github.com/psamin/project_flock> ·
-Apache 2.0
+*by bird labs* · <https://github.com/psamin/project_flock> · Apache 2.0
 
 A heterogeneous robot fleet runs a disaster-relief mission as one team: shared
 beliefs, transactional task claiming, automatic handoffs when one robot's work
