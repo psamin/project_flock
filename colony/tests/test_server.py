@@ -110,6 +110,39 @@ def test_a_mission_starts_coordinated(mission):
     assert mission.world.shared_vision is True
 
 
+def test_a_new_mission_waits_at_tick_zero_for_an_explicit_start(mission):
+    """Loading the server or opening a renderer must not start the clock."""
+
+    async def scenario():
+        await asyncio.sleep(TICK_SECONDS * 1.5)
+        return mission.world.tick
+
+    assert mission.started is False
+    assert mission.running is False
+    assert mission._loop is None
+    assert asyncio.run(scenario()) == 0
+
+
+def test_start_releases_exactly_one_tick_loop(mission):
+    """The endpoint is idempotent, including a rapid double-click."""
+
+    async def scenario():
+        first = await mission.start()
+        second = await mission.start()
+        loop = mission._loop
+        await asyncio.sleep(TICK_SECONDS * 2.5)
+        ticked = mission.world.tick
+        mission.running = False
+        if loop is not None:
+            await loop
+        return first, second, ticked
+
+    first, second, ticked = asyncio.run(scenario())
+    assert first is True
+    assert second is False
+    assert ticked > 0
+
+
 def test_restarting_into_baseline_rebuilds_the_whole_fleet(mission):
     """Not just the fog. Baseline means private world models, no claiming and no
     sector tasks (§3.3) — a toggle that only dimmed the map would be showing a
@@ -129,6 +162,20 @@ def test_restarting_into_baseline_rebuilds_the_whole_fleet(mission):
     assert workers and all(not w.coordinated for w in workers)
     scouts = [a for a in mission.agents.values() if hasattr(a, "sectors")]
     assert all(s.sectors == () for s in scouts), "baseline was handed sector shares"
+
+
+def test_changing_mode_before_start_keeps_the_mission_paused(mission):
+    """The coordination toggle may prepare another world, but cannot start it."""
+
+    async def scenario():
+        await mission.reset(coordinated=False)
+        await asyncio.sleep(TICK_SECONDS * 1.5)
+
+    asyncio.run(scenario())
+    assert mission.world.tick == 0
+    assert mission.started is False
+    assert mission.running is False
+    assert mission.last_runs == {}
 
 
 def test_restarting_re_snapshots_every_viewer(mission):
@@ -151,6 +198,7 @@ def test_restarting_re_snapshots_every_viewer(mission):
 def test_a_finished_run_is_kept_for_the_side_by_side(mission):
     """§4.7's coordination gain needs both runs. Losing the first one on restart
     would leave the scoreboard able to show only whichever ran last."""
+    mission.started = True
     mission.tick_once()
     asyncio.run(mission.reset(coordinated=False))
     assert "coordinated" in mission.last_runs
@@ -262,8 +310,11 @@ def test_the_snapshot_carries_the_scoreboard_numbers(mission):
         return await mission.attach(StubSocket())
 
     viewer = asyncio.run(attach())
-    metrics = json.loads(viewer.queue.get_nowait())["metrics"]
+    snapshot = json.loads(viewer.queue.get_nowait())
+    metrics = snapshot["metrics"]
 
+    assert snapshot["started"] is False
+    assert snapshot["running"] is False
     assert "rescue_rate" in metrics, "the snapshot carries no §4.7 numbers"
     expected = metrics["victims_stabilized"] / metrics["victims_total"]
     assert abs(metrics["rescue_rate"] - expected) < 0.01, (
@@ -278,6 +329,7 @@ def test_restarting_a_finished_mission_starts_ticking_again(mission):
     forever, which is indistinguishable from a hung server."""
 
     async def scenario():
+        mission.started = True
         mission.running = False  # as `run()` leaves it when the mission ends
         await mission.reset(coordinated=False)
         await asyncio.sleep(TICK_SECONDS * 2.5)

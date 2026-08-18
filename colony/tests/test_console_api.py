@@ -19,13 +19,9 @@ from tests.conftest import needs_db
 def _fresh_server():
     """A reloaded server module, so each test gets its own mission.
 
-    Deliberately **not** wrapped in `with TestClient(...)`. Entering the client
-    as a context manager runs the app's lifespan, which starts the 4 Hz tick
-    loop on the client's own thread — and a test that then calls `tick_once()`
-    itself is two threads driving one mission. That produced an intermittent
-    `AttributeError: 'NoneType' has no attribute 'id'` inside `Worker._complete`
-    as `self.task` was cleared underneath the other caller. Without the lifespan
-    the routes still work and the mission only advances when a test says so.
+    Deliberately **not** wrapped in `with TestClient(...)`: these are route-only
+    checks and do not need the app lifespan. The mission stays at tick 0 unless
+    `/api/mission/start` is explicitly called, or a test advances it itself.
     """
     import importlib
 

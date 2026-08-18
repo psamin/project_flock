@@ -39,29 +39,51 @@
       font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
       display: flex; flex-direction: column; height: 100vh; overflow: hidden;
     }
-
     header {
-      display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+      display: flex; gap: 8px; align-items: center; min-width: 0;
+      white-space: nowrap;
       padding: 8px 14px; border-bottom: 1px solid var(--line); flex: none;
     }
-    h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.18em; }
+    .header-summary, .header-actions {
+      display: contents;
+    }
+    h1 { flex: none; font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.18em; }
     h1 small { color: var(--dim); font-weight: 400; letter-spacing: 0.1em; margin-left: 6px; }
-    #status { color: var(--dim); }
-    #scenario { color: var(--dim); font-size: 11px; }
-    #mode-badge { font-size: 10px; letter-spacing: 0.1em; padding: 2px 8px; border-radius: 2px; }
-    #mode-badge.on { background: #10241c; color: #5fc98a; border: 1px solid #1d3a2c; }
-    #mode-badge.off { background: #2a1416; color: #e2603f; border: 1px solid #452023; }
+    #status { flex: none; color: #e2603f; font-size: 10px; }
+    #status:empty { display: none; }
+    #scenario {
+      flex: 1 1 180px; min-width: 60px; overflow: hidden; text-overflow: ellipsis;
+      color: var(--dim); font-size: 11px;
+    }
     button {
       font: inherit; font-size: 11px; color: var(--ink); background: #161c25;
       border: 1px solid var(--line); border-radius: 3px; padding: 3px 9px; cursor: pointer;
     }
     button:hover { background: #1d2530; border-color: #2c3745; }
+    button:disabled { opacity: 0.48; cursor: default; }
+    #start-simulation {
+      background: #10291c; border-color: #397f55; color: #8de0aa;
+      font-weight: 700; letter-spacing: 0.05em; padding-inline: 12px;
+    }
+    #start-simulation.ready:hover { background: #163a27; border-color: #54aa73; }
+    #start-simulation.running { opacity: 1; background: #10241c; color: #5fc98a; }
+    #start-simulation.running:hover { background: #193528; border-color: #54aa73; }
+    #start-simulation.reset { background: #161c25; border-color: var(--line); color: var(--dim); }
+    #toggle.on { background: #10241c; color: #5fc98a; border-color: #1d3a2c; }
+    #toggle.off { background: #2a1416; color: #e2603f; border-color: #452023; }
     /* `.on` is a mode that is currently engaged (the director). `.armed` is a
        loaded gesture waiting for a target (a disruption). They looked the same
        when both used `.armed`, which made a page with the director on read as
        though a disruption were already primed. */
     button.on { border-color: var(--accent); color: var(--accent); }
     button.armed { border-color: #d9884a; color: #d9884a; background: #1d1710; }
+
+    @media (max-width: 1100px) {
+      h1 small { display: none; }
+    }
+    @media (max-width: 700px) {
+      #scenario { display: none; }
+    }
 
     #hud {
       display: flex; gap: 14px; padding: 6px 14px; color: var(--dim);
@@ -84,6 +106,11 @@
     #memory-rail .zero b { color: #3d4753; }
 
     #main { display: flex; flex: 1; min-height: 0; }
+    #operator-divider {
+      flex: 0 0 1px; height: 1px; min-height: 1px; width: 100%;
+      position: relative; z-index: 2; background: #4a5562; opacity: 1;
+      transition: none; animation: none;
+    }
     #stage { flex: 1; position: relative; min-width: 0; }
     #stage canvas { display: block; width: 100%; height: 100%; }
 
@@ -168,26 +195,42 @@
                     flex-wrap: wrap; margin-bottom: 7px; }
     #console-head b { font-size: 11px; letter-spacing: 0.1em; }
     #console-head span { color: var(--dim); font-size: 10px; }
-    /* The free-form tier. Stacked rather than inline: this sidebar is narrow
-       and an input beside a button wraps into two ragged rows. */
+    /* The free-form tier. The send action lives inside the input so the narrow
+       rail still reads as one composer rather than two wrapped controls. */
     #console-agent { display: flex; gap: 5px; align-items: center;
                      flex-wrap: wrap; margin-bottom: 7px; }
-    #console-ask { flex: 1 1 100%; min-width: 0; background: var(--panel-2, #10151b);
-                   color: inherit; border: 1px solid var(--line); border-radius: 3px;
-                   padding: 5px 7px; font: inherit; font-size: 11px; }
+    #console-composer { position: relative; flex: 1 1 100%; min-width: 0; }
+    #console-ask { box-sizing: border-box; width: 100%; min-width: 0;
+                   background: var(--panel-2, #10151b); color: inherit;
+                   border: 1px solid var(--line); border-radius: 4px;
+                   padding: 7px 36px 7px 8px; font: inherit; font-size: 11px; }
     #console-ask:focus { outline: none; border-color: var(--accent); }
     #console-ask:disabled { color: var(--dim); }
-    #console-agent-note { color: var(--dim); font-size: 10px; }
+    #console-ask-go { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+                      display: grid; place-items: center; width: 25px; height: 25px;
+                      padding: 0; color: var(--accent); background: #18212a;
+                      border-color: #2b3946; border-radius: 3px; }
+    #console-ask-go:hover { color: #b7edf5; background: #202b36; }
+    #console-ask-go svg { width: 14px; height: 14px; }
+    #console-agent-note { flex: 1 1 100%; color: var(--dim); font-size: 10px; }
     #console-steps { font-size: 10px; color: var(--dim); margin-bottom: 5px;
                      max-height: 90px; overflow-y: auto; }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    #console-questions-label { color: #4f5b69; font-size: 9px;
+                               letter-spacing: 0.11em; margin-bottom: 4px; }
     #console-questions { display: flex; flex-direction: column; gap: 4px; }
     #console-questions button { text-align: left; line-height: 1.35; }
     #console-questions button .mem { color: var(--accent); font-size: 9px;
                                      letter-spacing: 0.08em; margin-left: 5px; }
-    #console-answer { margin-top: 8px; font-size: 11px; }
-    #console-summary { margin-bottom: 5px; }
+    #console-answer { display: none; margin: 0 0 8px; padding: 8px 9px;
+                      font-size: 11px; background: #101c24; border: 1px solid #24404c;
+                      border-left: 3px solid var(--accent); border-radius: 3px;
+                      box-shadow: 0 5px 16px #0004; }
+    #console-answer.active { display: block; }
+    #console-answer-label { color: var(--accent); font-size: 9px;
+                            letter-spacing: 0.12em; margin-bottom: 4px; }
+    #console-summary { color: #edf3f8; font-size: 11px; line-height: 1.55; margin-bottom: 5px; }
     #console-summary.err { color: #d96a9a; }
     #console-sql { color: #5d6875; font-size: 10px; white-space: pre-wrap;
                    max-height: 120px; overflow-y: auto; border-left: 2px solid var(--line);
@@ -239,7 +282,7 @@
        map a sidebar is covering, which is the whole reason this is not in the
        rail with everything else. */
     #dock {
-      display: flex; gap: 0; flex: none; border-top: 1px solid var(--line);
+      display: flex; gap: 0; flex: none;
       height: 116px;
     }
     /* Wide enough for three kind buttons and the radius on one row. At 380px
@@ -248,7 +291,7 @@
        the one line that says the gesture is two steps. */
     #intervene {
       width: 470px; flex: none; border-right: 1px solid var(--line);
-      padding: 8px 12px; overflow-y: auto;
+      padding: 2px 12px 8px; overflow-y: auto;
     }
     /* Pinned, so the status line stays readable even if the kinds do wrap on a
        narrow window. It is where a refusal is reported. */
@@ -267,7 +310,7 @@
                              color: var(--dim); font-size: 10px; }
     #intervene-radius { width: 70px; }
 
-    #ticker { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 8px 12px;
+    #ticker { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 2px 12px 8px;
               color: #8b96a4; font-size: 11px; white-space: pre; }
     #ticker div { padding: 1px 0; }
     #ticker .found { color: #f2c14e; }
@@ -293,16 +336,20 @@
 </head>
 <body>
   <header>
-    <h1>COLONY <small>DIGITAL TWIN</small></h1>
-    <span id="status">connecting…</span>
-    <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. Same seed, same mission."></span>
-    <span id="mode-badge" class="on">SHARED MEMORY</span>
-    <button id="toggle">coordination: ON</button>
-    <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
-    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
-    <button id="director-toggle" class="on" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
-    <a href="/2d" style="color:var(--dim);font-size:11px;"
-       title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D view →</a>
+    <div class="header-summary">
+      <h1>PROJECT FLOCK <small>DIGITAL TWIN</small></h1>
+      <span id="status">connecting…</span>
+      <span id="scenario" title="Scenario, victim count and RNG seed. Same seed, same mission."></span>
+    </div>
+    <div class="header-actions">
+      <button id="start-simulation" disabled>start</button>
+      <button id="toggle" class="on">memory ON</button>
+      <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare</button>
+      <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill robot</button>
+      <button id="director-toggle" class="on" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
+      <a href="/2d" style="color:var(--dim);font-size:11px;"
+         title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D →</a>
+    </div>
   </header>
 
   <div id="hud">
@@ -352,18 +399,27 @@
           <span id="console-status">read-only · live fleet memory</span>
         </div>
         <div id="console-agent">
-          <input id="console-ask" type="text" maxlength="500"
-                 placeholder="ask the fleet anything…" />
-          <button id="console-ask-go">ask</button>
+          <div id="console-composer">
+            <input id="console-ask" type="text" maxlength="500"
+                   placeholder="ask the fleet anything…" />
+            <button id="console-ask-go" type="button" aria-label="Send question" title="Send question">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7Z"
+                      stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
           <span id="console-agent-note"></span>
         </div>
-        <div id="console-questions"></div>
-        <div id="console-answer">
+        <div id="console-answer" aria-live="polite" aria-busy="false">
+          <div id="console-answer-label">COMMANDER RESPONSE</div>
           <div id="console-summary"></div>
           <div id="console-steps"></div>
           <div id="console-sql"></div>
           <div id="console-rows"></div>
         </div>
+        <div id="console-questions-label">QUICK QUESTIONS</div>
+        <div id="console-questions"></div>
       </section>
 
       <!-- Filled by refreshFleet() from /api/fleet, once a second. The lease
@@ -386,6 +442,8 @@
       </section>
     </aside>
   </div>
+
+  <div id="operator-divider" aria-hidden="true"></div>
 
   <!-- The dock. Full width under the viewport so the island stays visible while
        a disruption is armed. -->
@@ -446,7 +504,7 @@
       document.getElementById("nogl").classList.add("show");
       document.getElementById("status").textContent = "WebGL unavailable";
     } else {
-      import("/static/scene3d.js").catch((err) => {
+      import("/static/scene3d.js?v=header-one-row").catch((err) => {
         document.getElementById("status").textContent = `load error: ${err.message}`;
         console.error(err);
       });

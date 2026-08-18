@@ -16,20 +16,40 @@
       gap: 10px;
       padding: 16px;
     }
-    header { display: flex; gap: 20px; align-items: baseline; flex-wrap: wrap; }
-    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.08em; }
-    #status { color: #8a8397; }
-    #mode-badge {
-      font-size: 11px; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 3px;
+    header {
+      box-sizing: border-box; width: min(1280px, 96vw); display: flex;
+      gap: 8px; align-items: center; min-width: 0; white-space: nowrap;
     }
-    #mode-badge.on { background: #1e3a2c; color: #6fbf73; }
-    #mode-badge.off { background: #3a2020; color: #e2603f; }
+    .header-summary, .header-actions {
+      display: contents;
+    }
+    h1 { flex: none; font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.08em; }
+    #status { flex: none; color: #e2603f; font-size: 11px; }
+    #status:empty { display: none; }
+    #scenario {
+      flex: 1 1 180px; min-width: 60px; overflow: hidden; text-overflow: ellipsis;
+      color: #8a8397; font-size: 11px;
+    }
     button {
       font: inherit; font-size: 12px; color: #e8e3d9; background: #262232;
       border: 1px solid #3a3448; border-radius: 4px; padding: 3px 10px; cursor: pointer;
     }
     button:hover { background: #302a40; }
     button:disabled { opacity: 0.5; cursor: default; }
+    #start-simulation {
+      background: #1b3a29; border-color: #4b8a61; color: #a3e7b9;
+      font-weight: 700; letter-spacing: 0.04em; padding-inline: 14px;
+    }
+    #start-simulation.ready:hover { background: #245037; border-color: #69b783; }
+    #start-simulation.running { opacity: 1; background: #183022; color: #72c890; }
+    #start-simulation.running:hover { background: #244534; border-color: #69b783; }
+    #start-simulation.reset { background: #262232; border-color: #3a3448; color: #b8b1c4; }
+    #toggle.on { background: #1e3a2c; color: #6fbf73; border-color: #315c45; }
+    #toggle.off { background: #3a2020; color: #e2603f; border-color: #633232; }
+
+    @media (max-width: 700px) {
+      #scenario { display: none; }
+    }
 
     #hud { display: flex; gap: 16px; color: #b8b1c4; font-size: 12px; flex-wrap: wrap; }
     #hud b { color: #e8e3d9; font-weight: 600; }
@@ -174,15 +194,24 @@
       display: flex; gap: 6px; align-items: center; margin-bottom: 8px;
       flex-wrap: wrap;
     }
+    #console-composer { position: relative; flex: 1 1 420px; min-width: 0; }
     #console-ask {
-      flex: 1 1 320px; min-width: 0; background: #14121a; color: #e8e3d9;
-      border: 1px solid #2e2939; border-radius: 3px; padding: 6px 8px;
-      font: inherit; font-size: 12px;
+      box-sizing: border-box; width: 100%; min-width: 0; background: #14121a;
+      color: #e8e3d9; border: 1px solid #2e2939; border-radius: 5px;
+      padding: 8px 42px 8px 10px; font: inherit; font-size: 12px;
     }
     #console-ask:focus { outline: none; border-color: #63c5da; }
     #console-ask:disabled { color: #6d6779; }
+    #console-ask-go {
+      position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+      display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+      color: #63c5da; background: #23202d; border-color: #3a3448;
+      border-radius: 4px;
+    }
+    #console-ask-go:hover { color: #a9e5f1; background: #302a40; }
+    #console-ask-go svg { width: 15px; height: 15px; }
     #console-agent-note {
-      color: #8a8397; font-size: 11px; letter-spacing: 0.04em;
+      flex: 1 1 100%; color: #8a8397; font-size: 11px; letter-spacing: 0.04em;
     }
     /* The agent's tool trace. Monospace and dim: it is evidence sitting under
        the answer, not something to read first. */
@@ -192,13 +221,24 @@
     }
     #console-steps .ok { color: #7f96a8; }
     #console-steps .bad { color: #a8737f; }
+    #console-questions-label {
+      color: #6d6779; font-size: 10px; letter-spacing: 0.1em; margin-bottom: 5px;
+    }
     #console-questions { display: flex; gap: 6px; flex-wrap: wrap; }
     #console-questions button { text-align: left; }
     #console-questions button .mem {
       color: #63c5da; font-size: 10px; letter-spacing: 0.06em; margin-left: 6px;
     }
-    #console-answer { margin-top: 10px; font-size: 12px; }
-    #console-summary { color: #e8e3d9; margin-bottom: 6px; }
+    #console-answer {
+      display: none; margin: 0 0 10px; padding: 10px 12px; font-size: 12px;
+      background: #151d24; border: 1px solid #2b4652; border-left: 3px solid #63c5da;
+      border-radius: 4px; box-shadow: 0 6px 20px #0003;
+    }
+    #console-answer.active { display: block; }
+    #console-answer-label {
+      color: #63c5da; font-size: 10px; letter-spacing: 0.12em; margin-bottom: 5px;
+    }
+    #console-summary { color: #f2eee6; font-size: 13px; line-height: 1.55; margin-bottom: 6px; }
     #console-summary.err { color: #d96a9a; }
     #console-sql {
       color: #6d6779; font-size: 11px; white-space: pre-wrap; max-height: 150px;
@@ -226,15 +266,19 @@
 </head>
 <body>
   <header>
-    <h1>COLONY</h1>
-    <span id="status">connecting…</span>
-    <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. The seed is what makes a run reproducible — same seed, same mission."></span>
-    <span id="mode-badge" class="on">SHARED MEMORY</span>
-    <button id="toggle">coordination: ON</button>
-    <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
-    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
-    <a href="/" style="color:#8a8397;font-size:11px;"
-       title="The digital twin: the same mission in 3D. Needs WebGL 2.">digital twin →</a>
+    <div class="header-summary">
+      <h1>PROJECT FLOCK</h1>
+      <span id="status">connecting…</span>
+      <span id="scenario" title="Scenario, victim count and RNG seed. Same seed, same mission."></span>
+    </div>
+    <div class="header-actions">
+      <button id="start-simulation" disabled>start</button>
+      <button id="toggle" class="on">memory ON</button>
+      <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare</button>
+      <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill robot</button>
+      <a href="/" style="color:#8a8397;font-size:11px;"
+         title="The digital twin: the same mission in 3D. Needs WebGL 2.">3D →</a>
+    </div>
   </header>
 
   <!--
@@ -322,18 +366,27 @@
          is a Bedrock agent reading the same cluster through the Managed MCP
          Server, with the CockroachDB Agent Skills repo available to it. -->
     <div id="console-agent">
-      <input id="console-ask" type="text" maxlength="500"
-             placeholder="ask the fleet anything — e.g. which robots are stuck, and why?" />
-      <button id="console-ask-go">ask</button>
+      <div id="console-composer">
+        <input id="console-ask" type="text" maxlength="500"
+               placeholder="ask the fleet anything — e.g. which robots are stuck, and why?" />
+        <button id="console-ask-go" type="button" aria-label="Send question" title="Send question">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7Z"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
       <span id="console-agent-note"></span>
     </div>
-    <div id="console-questions"></div>
-    <div id="console-answer">
+    <div id="console-answer" aria-live="polite" aria-busy="false">
+      <div id="console-answer-label">COMMANDER RESPONSE</div>
       <div id="console-summary"></div>
       <div id="console-steps"></div>
       <div id="console-sql"></div>
       <div id="console-rows"></div>
     </div>
+    <div id="console-questions-label">QUICK QUESTIONS</div>
+    <div id="console-questions"></div>
   </section>
 
   <!-- §3.6: the coordination feed. The ticker below says what happened; this
@@ -357,6 +410,6 @@
        Canvas 2D, and atlas.js for why the sprites are drawn in code rather
        than downloaded. The 3D view at /sim3d does require WebGL, which is the
        whole reason it is a separate route and this one is not being changed. -->
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="/static/app.js?v=header-one-row"></script>
 </body>
 </html>

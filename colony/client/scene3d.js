@@ -43,13 +43,15 @@ import {
   // without anyone writing a line of 2D-specific code.
   initInterventions,
   initKillRobot,
+  initStartSimulation,
+  syncSimulationLifecycle,
   initCompare,
   refreshMemoryRail,
   refreshCoordination,
   refreshFleet,
   armedIntervention,
   placeIntervention,
-} from "./ui-shared.js";
+} from "./ui-shared.js?v=header-one-row";
 import {
   makeRig,
   makeTrace,
@@ -223,6 +225,12 @@ function hash2(x, y) {
 /** Detach a subtree and hand its GPU resources back. */
 function disposeTree(root) {
   root.traverse((node) => {
+    // CSS2DRenderer appends labels directly under #labels. Removing an ancestor
+    // Group from the Three.js scene does not emit `removed` on its CSS2DObject
+    // descendants, so their DOM nodes otherwise survive the reset at the last
+    // screen coordinate they occupied. Every reconnect or mode change then
+    // adds another live set beside those frozen coordinates.
+    if (node.isCSS2DObject && node.element) node.element.remove();
     if (node.geometry) node.geometry.dispose();
     const material = node.material;
     if (!material) return;
@@ -538,16 +546,16 @@ function boot(snapshot) {
   syncVictims();
   recomputeFog();
 
-  const badge = document.getElementById("mode-badge");
-  badge.textContent = sharedVision ? "SHARED MEMORY" : "PRIVATE MAPS";
-  badge.className = sharedVision ? "on" : "off";
-  document.getElementById("toggle").textContent =
-    sharedVision ? "coordination: ON" : "coordination: OFF";
-  setText(
-    "scenario",
-    `${world.name} · ${victims.length} trapped · ${robots.length} units · ` +
-      `${world.mission_length_ticks} ticks · seed ${world.seed ?? "?"}`,
-  );
+  // The toggle is also the mode badge; spelling the same state twice cost an
+  // entire header control. Keep the reproducibility details in the tooltip and
+  // the scan-friendly mission identity in the row itself.
+  const toggle = document.getElementById("toggle");
+  toggle.textContent = sharedVision ? "memory ON" : "memory OFF";
+  toggle.className = sharedVision ? "on" : "off";
+  const scenario = document.getElementById("scenario");
+  scenario.textContent = `${world.name} · ${victims.length} trapped · seed ${world.seed ?? "?"}`;
+  scenario.title = `${world.name}; ${victims.length} trapped; ${robots.length} units; ` +
+    `${world.mission_length_ticks} ticks; seed ${world.seed ?? "?"}`;
 
   const centre = new THREE.Vector3(0, 0, 0);
   controls.target.copy(centre);
@@ -698,8 +706,9 @@ let sectorsVisible = false;
 
 function buildSectorGrid() {
   if (sectorGroup) {
-    scene.remove(sectorGroup);
-    sectorGroup.traverse((o) => o.geometry?.dispose());
+    // Uses the same cleanup path as robot labels so toggling/reconnecting after
+    // showing the sector grid cannot leave its CSS labels behind either.
+    disposeTree(sectorGroup);
     sectorGroup = null;
   }
   if (!world?.sectors?.length) return;
@@ -962,7 +971,7 @@ function connect() {
   socket = new WebSocket(`${scheme}://${location.host}/ws`);
   const mine = socket;
 
-  socket.onopen = () => { status.textContent = "live"; };
+  socket.onopen = () => { status.textContent = ""; };
   socket.onerror = () => { status.textContent = "connection error"; };
   socket.onclose = () => {
     if (mine !== socket) return;
@@ -974,6 +983,7 @@ function connect() {
     if (mine !== socket) return;
     const frame = JSON.parse(message.data);
     try {
+      syncSimulationLifecycle(frame);
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
@@ -1084,6 +1094,7 @@ initConsole({
 
 initInterventions();
 initKillRobot();
+initStartSimulation();
 initCompare();
 
 setInterval(refreshComparison, 4000);

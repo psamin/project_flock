@@ -21,6 +21,104 @@
 
 // --- HUD ---------------------------------------------------------------------
 
+// The server owns this state. Both renderers receive it in snapshots and diffs,
+// so opening a second view cannot produce a second start or leave destructive
+// mission controls active after the run is over.
+let simulationStarted = false;
+let simulationRunning = false;
+let simulationCoordinated = true;
+let missionActionInFlight = false;
+
+function syncMissionControls() {
+  const disabled = !simulationRunning;
+  const kill = document.getElementById("kill-robot");
+  if (kill) kill.disabled = disabled;
+  const radius = document.getElementById("intervene-radius");
+  if (radius) radius.disabled = disabled;
+  for (const button of document.querySelectorAll("#intervene-kinds button")) {
+    button.disabled = disabled;
+  }
+  if (disabled && armed) disarm(true);
+}
+
+/** Reflect the authoritative mission lifecycle in every connected renderer. */
+export function syncSimulationLifecycle(state) {
+  if (!("started" in state) && !("running" in state)) return;
+  simulationStarted = Boolean(state.started);
+  simulationRunning = Boolean(state.running);
+  const mode = state.mode ?? state.metrics?.mode;
+  if (mode) simulationCoordinated = mode === "coordinated";
+
+  const button = document.getElementById("start-simulation");
+  if (button && !missionActionInFlight) {
+    if (!simulationStarted) {
+      button.textContent = "start";
+      button.disabled = false;
+      button.className = "ready";
+      button.title = "Start mission";
+    } else if (simulationRunning) {
+      button.textContent = "running";
+      button.disabled = false;
+      button.className = "running";
+      button.title = "Reset mission";
+    } else {
+      button.textContent = "reset";
+      button.disabled = false;
+      button.className = "reset";
+      button.title = "Reset mission";
+    }
+  }
+
+  const status = document.getElementById("status");
+  // The button already communicates ready/running/reset. Reserve this
+  // scarce header slot for connection, startup, and rendering failures.
+  if (status) status.textContent = "";
+  syncMissionControls();
+}
+
+/** Start the prepared mission, or rebuild an active/finished one in-place. */
+export function initStartSimulation() {
+  const button = document.getElementById("start-simulation");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    if (missionActionInFlight) return;
+    missionActionInFlight = true;
+    const resetting = simulationStarted;
+    const action = resetting ? "reset" : "start";
+    const pending = resetting ? "resetting" : "starting";
+    button.disabled = true;
+    button.textContent = `${pending}…`;
+    const status = document.getElementById("status");
+    if (status) status.textContent = `${pending}…`;
+    try {
+      const response = await fetch(
+        resetting ? "/api/mission/restart" : "/api/mission/start",
+        resetting
+          ? {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ coordinated: simulationCoordinated }),
+            }
+          : { method: "POST" },
+      );
+      const state = await response.json();
+      if (!response.ok) throw new Error(state.detail || `${action} failed (${response.status})`);
+      if (resetting) {
+        const ticker = document.getElementById("ticker");
+        if (ticker) ticker.innerHTML = "";
+      }
+      missionActionInFlight = false;
+      syncSimulationLifecycle(state);
+    } catch (error) {
+      missionActionInFlight = false;
+      button.disabled = false;
+      button.textContent = resetting ? (simulationRunning ? "running" : "reset") : "start";
+      button.className = resetting ? (simulationRunning ? "running" : "reset") : "ready";
+      if (status) status.textContent = `${action} failed: ${error.message}`;
+    }
+  });
+}
+
 export function setText(id, value) {
   const node = document.getElementById(id);
   if (node) node.textContent = value;
@@ -197,12 +295,28 @@ function subjectRobot(ctx) {
   return scout ? scout.id : robots.length ? robots[0].id : "s1";
 }
 
+/** Put the shared answer card in view before either request begins. */
+function beginConsoleAnswer(message) {
+  const panel = document.getElementById("console-answer");
+  const summary = document.getElementById("console-summary");
+  panel.classList.add("active");
+  panel.setAttribute("aria-busy", "true");
+  summary.className = "";
+  summary.textContent = message;
+  requestAnimationFrame(() => {
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+
+function finishConsoleAnswer() {
+  document.getElementById("console-answer").setAttribute("aria-busy", "false");
+}
+
 async function askConsole(question, ctx) {
   const summary = document.getElementById("console-summary");
   const sqlBox = document.getElementById("console-sql");
   const rowsBox = document.getElementById("console-rows");
-  summary.className = "";
-  summary.textContent = "asking fleet memory…";
+  beginConsoleAnswer("asking fleet memory…");
   sqlBox.textContent = "";
   rowsBox.textContent = "";
   // Cleared here too: the two tiers share this panel, and leaving the agent's
@@ -247,6 +361,8 @@ async function askConsole(question, ctx) {
   } catch (err) {
     summary.className = "err";
     summary.textContent = `console error: ${err.message}`;
+  } finally {
+    finishConsoleAnswer();
   }
 }
 
@@ -269,6 +385,7 @@ function renderAgentAnswer(answer) {
     summary.className = "err";
     summary.textContent = answer.error;
     if (steps) steps.textContent = "";
+    finishConsoleAnswer();
     return;
   }
   summary.className = "";
@@ -297,19 +414,28 @@ function renderAgentAnswer(answer) {
       steps.appendChild(line);
     }
   }
+  finishConsoleAnswer();
 }
+
+let agentQuestionInFlight = false;
 
 async function askAgent(ctx) {
   const input = document.getElementById("console-ask");
+  const button = document.getElementById("console-ask-go");
   const summary = document.getElementById("console-summary");
   const steps = document.getElementById("console-steps");
+  if (agentQuestionInFlight) return;
   const question = input.value.trim();
   if (!question) return;
 
-  summary.className = "";
+  // Capture first, then clear synchronously: the submitted prompt should leave
+  // the composer immediately, not after the network/model round trip.
+  input.value = "";
+  agentQuestionInFlight = true;
+  button.disabled = true;
   // Named rather than a generic spinner: the wait is several seconds and the
   // two services doing the work are the two tools being claimed.
-  summary.textContent = "asking Claude, reading the cluster over MCP…";
+  beginConsoleAnswer("asking Claude, reading the cluster over MCP…");
   document.getElementById("console-sql").textContent = "";
   document.getElementById("console-rows").textContent = "";
   if (steps) steps.textContent = "";
@@ -326,6 +452,10 @@ async function askAgent(ctx) {
   } catch (err) {
     summary.className = "err";
     summary.textContent = `agent error: ${err.message}`;
+    finishConsoleAnswer();
+  } finally {
+    agentQuestionInFlight = false;
+    button.disabled = false;
   }
 }
 
@@ -430,7 +560,7 @@ function disarm(keepStatus = false) {
  * off a victim for good. Surfacing that reason verbatim is the difference
  * between "nothing happened" and "you were about to kill v3". */
 export async function placeIntervention(x, y) {
-  if (!armed) return false;
+  if (!armed || !simulationRunning) return false;
   const { kind, radius } = armed;
   setStatus(`sending ${kind} at ${x},${y}…`);
   try {
@@ -473,6 +603,7 @@ export async function initInterventions() {
   const radius = document.getElementById("intervene-radius");
   if (radius) {
     radius.max = String(data.max_radius);
+    radius.disabled = !simulationRunning;
     radius.addEventListener("input", () => {
       if (armed) armed.radius = Number(radius.value);
       const label = document.getElementById("intervene-radius-label");
@@ -484,6 +615,7 @@ export async function initInterventions() {
   for (const kind of data.kinds) {
     const button = document.createElement("button");
     button.textContent = kind.label;
+    button.disabled = !simulationRunning;
     const tag = document.createElement("span");
     tag.className = "mem";
     // Which disruptions a lifter can undo, and which are permanent. It is the
@@ -560,6 +692,7 @@ export async function refreshMemoryRail() {
 export function initKillRobot() {
   const button = document.getElementById("kill-robot");
   if (!button) return;
+  button.disabled = !simulationRunning;
   button.addEventListener("click", async () => {
     button.disabled = true;
     try {
@@ -586,7 +719,7 @@ export function initKillRobot() {
     } catch {
       /* a demo aid; never let it break the render loop */
     } finally {
-      button.disabled = false;
+      button.disabled = !simulationRunning;
     }
   });
 }

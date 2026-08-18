@@ -16,7 +16,7 @@ questions, the aftershock retuned so it actually fires, and the changefeed spike
 ```bash
 cd colony
 make dev      # CockroachDB v26.2.5 + schema applied, one command
-make sim      # tick server + renderer -> http://localhost:8000
+make sim      # prepare server + renderer -> http://localhost:8000, then click Start simulation
 make test     # 896 tests
 ```
 
