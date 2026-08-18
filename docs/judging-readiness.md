@@ -148,10 +148,10 @@ mode, which is the right minimum, but there is no scrape target.
 | Open source licence, visible in About | ✅ GitHub detects `apache-2.0` |
 | **Functional demo app URL** | ❌ **not deployed** — `homepageUrl` is empty |
 | **Video < 3 min, public on YouTube/Vimeo** | ❌ **not recorded** — script ready at `docs/video-script.md` |
-| CockroachDB tools + what the agent did | ✅ `docs/devpost.md` |
-| AWS services + how | ✅ `docs/devpost.md` |
-| *Optional:* architectural diagram | ⚠️ ASCII in README; no image |
-| *Optional:* CockroachDB feedback | ✅ `docs/devpost.md` |
+| CockroachDB tools + what the agent did | ✅ [`docs/tools-and-services.md`](tools-and-services.md) |
+| AWS services + how | ✅ [`docs/tools-and-services.md`](tools-and-services.md) |
+| *Optional:* architectural diagram | ⚠️ ASCII in README and `docs/tools-and-services.md`; no image |
+| *Optional:* CockroachDB feedback | ✅ [`docs/tools-and-services.md`](tools-and-services.md) |
 
 Two hard blockers, both needing Praneeth: **deploy** (Dockerfile built and
 smoke-tested; ~20 min on free-tier EC2) and **record the video**.
