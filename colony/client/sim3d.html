@@ -39,29 +39,51 @@
       font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
       display: flex; flex-direction: column; height: 100vh; overflow: hidden;
     }
-
     header {
-      display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+      display: flex; gap: 8px; align-items: center; min-width: 0;
+      white-space: nowrap;
       padding: 8px 14px; border-bottom: 1px solid var(--line); flex: none;
     }
-    h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.18em; }
+    .header-summary, .header-actions {
+      display: contents;
+    }
+    h1 { flex: none; font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.18em; }
     h1 small { color: var(--dim); font-weight: 400; letter-spacing: 0.1em; margin-left: 6px; }
-    #status { color: var(--dim); }
-    #scenario { color: var(--dim); font-size: 11px; }
-    #mode-badge { font-size: 10px; letter-spacing: 0.1em; padding: 2px 8px; border-radius: 2px; }
-    #mode-badge.on { background: #10241c; color: #5fc98a; border: 1px solid #1d3a2c; }
-    #mode-badge.off { background: #2a1416; color: #e2603f; border: 1px solid #452023; }
+    #status { flex: none; color: #e2603f; font-size: 10px; }
+    #status:empty { display: none; }
+    #scenario {
+      flex: 1 1 180px; min-width: 60px; overflow: hidden; text-overflow: ellipsis;
+      color: var(--dim); font-size: 11px;
+    }
     button {
       font: inherit; font-size: 11px; color: var(--ink); background: #161c25;
       border: 1px solid var(--line); border-radius: 3px; padding: 3px 9px; cursor: pointer;
     }
     button:hover { background: #1d2530; border-color: #2c3745; }
+    button:disabled { opacity: 0.48; cursor: default; }
+    #start-simulation {
+      background: #10291c; border-color: #397f55; color: #8de0aa;
+      font-weight: 700; letter-spacing: 0.05em; padding-inline: 12px;
+    }
+    #start-simulation.ready:hover { background: #163a27; border-color: #54aa73; }
+    #start-simulation.running { opacity: 1; background: #10241c; color: #5fc98a; }
+    #start-simulation.running:hover { background: #193528; border-color: #54aa73; }
+    #start-simulation.reset { background: #161c25; border-color: var(--line); color: var(--dim); }
+    #toggle.on { background: #10241c; color: #5fc98a; border-color: #1d3a2c; }
+    #toggle.off { background: #2a1416; color: #e2603f; border-color: #452023; }
     /* `.on` is a mode that is currently engaged (the director). `.armed` is a
        loaded gesture waiting for a target (a disruption). They looked the same
        when both used `.armed`, which made a page with the director on read as
        though a disruption were already primed. */
     button.on { border-color: var(--accent); color: var(--accent); }
     button.armed { border-color: #d9884a; color: #d9884a; background: #1d1710; }
+
+    @media (max-width: 1100px) {
+      h1 small { display: none; }
+    }
+    @media (max-width: 700px) {
+      #scenario { display: none; }
+    }
 
     #hud {
       display: flex; gap: 14px; padding: 6px 14px; color: var(--dim);
@@ -293,16 +315,20 @@
 </head>
 <body>
   <header>
-    <h1>COLONY <small>DIGITAL TWIN</small></h1>
-    <span id="status">connecting…</span>
-    <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. Same seed, same mission."></span>
-    <span id="mode-badge" class="on">SHARED MEMORY</span>
-    <button id="toggle">coordination: ON</button>
-    <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
-    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
-    <button id="director-toggle" class="on" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
-    <a href="/2d" style="color:var(--dim);font-size:11px;"
-       title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D view →</a>
+    <div class="header-summary">
+      <h1>PROJECT FLOCK <small>DIGITAL TWIN</small></h1>
+      <span id="status">connecting…</span>
+      <span id="scenario" title="Scenario, victim count and RNG seed. Same seed, same mission."></span>
+    </div>
+    <div class="header-actions">
+      <button id="start-simulation" disabled>start</button>
+      <button id="toggle" class="on">memory ON</button>
+      <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare</button>
+      <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill robot</button>
+      <button id="director-toggle" class="on" title="Frames the action from the event stream. Turn off to fly the camera yourself; dragging always overrides for a few seconds either way.">director: ON</button>
+      <a href="/2d" style="color:var(--dim);font-size:11px;"
+         title="The Canvas 2D renderer. Same mission, same numbers, no WebGL required.">2D →</a>
+    </div>
   </header>
 
   <div id="hud">
@@ -446,7 +472,7 @@
       document.getElementById("nogl").classList.add("show");
       document.getElementById("status").textContent = "WebGL unavailable";
     } else {
-      import("/static/scene3d.js").catch((err) => {
+      import("/static/scene3d.js?v=header-one-row").catch((err) => {
         document.getElementById("status").textContent = `load error: ${err.message}`;
         console.error(err);
       });

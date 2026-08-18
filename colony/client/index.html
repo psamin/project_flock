@@ -16,20 +16,40 @@
       gap: 10px;
       padding: 16px;
     }
-    header { display: flex; gap: 20px; align-items: baseline; flex-wrap: wrap; }
-    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.08em; }
-    #status { color: #8a8397; }
-    #mode-badge {
-      font-size: 11px; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 3px;
+    header {
+      box-sizing: border-box; width: min(1280px, 96vw); display: flex;
+      gap: 8px; align-items: center; min-width: 0; white-space: nowrap;
     }
-    #mode-badge.on { background: #1e3a2c; color: #6fbf73; }
-    #mode-badge.off { background: #3a2020; color: #e2603f; }
+    .header-summary, .header-actions {
+      display: contents;
+    }
+    h1 { flex: none; font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.08em; }
+    #status { flex: none; color: #e2603f; font-size: 11px; }
+    #status:empty { display: none; }
+    #scenario {
+      flex: 1 1 180px; min-width: 60px; overflow: hidden; text-overflow: ellipsis;
+      color: #8a8397; font-size: 11px;
+    }
     button {
       font: inherit; font-size: 12px; color: #e8e3d9; background: #262232;
       border: 1px solid #3a3448; border-radius: 4px; padding: 3px 10px; cursor: pointer;
     }
     button:hover { background: #302a40; }
     button:disabled { opacity: 0.5; cursor: default; }
+    #start-simulation {
+      background: #1b3a29; border-color: #4b8a61; color: #a3e7b9;
+      font-weight: 700; letter-spacing: 0.04em; padding-inline: 14px;
+    }
+    #start-simulation.ready:hover { background: #245037; border-color: #69b783; }
+    #start-simulation.running { opacity: 1; background: #183022; color: #72c890; }
+    #start-simulation.running:hover { background: #244534; border-color: #69b783; }
+    #start-simulation.reset { background: #262232; border-color: #3a3448; color: #b8b1c4; }
+    #toggle.on { background: #1e3a2c; color: #6fbf73; border-color: #315c45; }
+    #toggle.off { background: #3a2020; color: #e2603f; border-color: #633232; }
+
+    @media (max-width: 700px) {
+      #scenario { display: none; }
+    }
 
     #hud { display: flex; gap: 16px; color: #b8b1c4; font-size: 12px; flex-wrap: wrap; }
     #hud b { color: #e8e3d9; font-weight: 600; }
@@ -226,15 +246,19 @@
 </head>
 <body>
   <header>
-    <h1>COLONY</h1>
-    <span id="status">connecting…</span>
-    <span id="scenario" title="Map, victim count, fleet size, mission horizon and the RNG seed. The seed is what makes a run reproducible — same seed, same mission."></span>
-    <span id="mode-badge" class="on">SHARED MEMORY</span>
-    <button id="toggle">coordination: ON</button>
-    <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare ON vs OFF</button>
-    <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill a robot</button>
-    <a href="/" style="color:#8a8397;font-size:11px;"
-       title="The digital twin: the same mission in 3D. Needs WebGL 2.">digital twin →</a>
+    <div class="header-summary">
+      <h1>PROJECT FLOCK</h1>
+      <span id="status">connecting…</span>
+      <span id="scenario" title="Scenario, victim count and RNG seed. Same seed, same mission."></span>
+    </div>
+    <div class="header-actions">
+      <button id="start-simulation" disabled>start</button>
+      <button id="toggle" class="on">memory ON</button>
+      <button id="compare" title="Run both modes headless on this seed and show the §4.7 comparison. Seconds, rather than the ~3.5 minutes it takes to watch both missions play out at 4 Hz.">compare</button>
+      <button id="kill-robot" title="Stop whichever robot is mid-job. Nothing is released and nothing is reassigned — its heartbeat stops, its lease stops being renewed, and 15 seconds later another robot can claim the work. Recovery here is the absence of a mechanism.">kill robot</button>
+      <a href="/" style="color:#8a8397;font-size:11px;"
+         title="The digital twin: the same mission in 3D. Needs WebGL 2.">3D →</a>
+    </div>
   </header>
 
   <!--
@@ -357,6 +381,6 @@
        Canvas 2D, and atlas.js for why the sprites are drawn in code rather
        than downloaded. The 3D view at /sim3d does require WebGL, which is the
        whole reason it is a separate route and this one is not being changed. -->
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="/static/app.js?v=header-one-row"></script>
 </body>
 </html>

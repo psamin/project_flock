@@ -43,13 +43,15 @@ import {
   // without anyone writing a line of 2D-specific code.
   initInterventions,
   initKillRobot,
+  initStartSimulation,
+  syncSimulationLifecycle,
   initCompare,
   refreshMemoryRail,
   refreshCoordination,
   refreshFleet,
   armedIntervention,
   placeIntervention,
-} from "./ui-shared.js";
+} from "./ui-shared.js?v=header-one-row";
 import {
   makeRig,
   makeTrace,
@@ -538,16 +540,16 @@ function boot(snapshot) {
   syncVictims();
   recomputeFog();
 
-  const badge = document.getElementById("mode-badge");
-  badge.textContent = sharedVision ? "SHARED MEMORY" : "PRIVATE MAPS";
-  badge.className = sharedVision ? "on" : "off";
-  document.getElementById("toggle").textContent =
-    sharedVision ? "coordination: ON" : "coordination: OFF";
-  setText(
-    "scenario",
-    `${world.name} · ${victims.length} trapped · ${robots.length} units · ` +
-      `${world.mission_length_ticks} ticks · seed ${world.seed ?? "?"}`,
-  );
+  // The toggle is also the mode badge; spelling the same state twice cost an
+  // entire header control. Keep the reproducibility details in the tooltip and
+  // the scan-friendly mission identity in the row itself.
+  const toggle = document.getElementById("toggle");
+  toggle.textContent = sharedVision ? "memory ON" : "memory OFF";
+  toggle.className = sharedVision ? "on" : "off";
+  const scenario = document.getElementById("scenario");
+  scenario.textContent = `${world.name} · ${victims.length} trapped · seed ${world.seed ?? "?"}`;
+  scenario.title = `${world.name}; ${victims.length} trapped; ${robots.length} units; ` +
+    `${world.mission_length_ticks} ticks; seed ${world.seed ?? "?"}`;
 
   const centre = new THREE.Vector3(0, 0, 0);
   controls.target.copy(centre);
@@ -962,7 +964,7 @@ function connect() {
   socket = new WebSocket(`${scheme}://${location.host}/ws`);
   const mine = socket;
 
-  socket.onopen = () => { status.textContent = "live"; };
+  socket.onopen = () => { status.textContent = ""; };
   socket.onerror = () => { status.textContent = "connection error"; };
   socket.onclose = () => {
     if (mine !== socket) return;
@@ -974,6 +976,7 @@ function connect() {
     if (mine !== socket) return;
     const frame = JSON.parse(message.data);
     try {
+      syncSimulationLifecycle(frame);
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
@@ -1084,6 +1087,7 @@ initConsole({
 
 initInterventions();
 initKillRobot();
+initStartSimulation();
 initCompare();
 
 setInterval(refreshComparison, 4000);

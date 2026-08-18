@@ -42,13 +42,15 @@ import {
   initConsole,
   initInterventions,
   initKillRobot,
+  initStartSimulation,
+  syncSimulationLifecycle,
   initCompare,
   refreshMemoryRail,
   refreshCoordination,
   refreshFleet,
   armedIntervention,
   placeIntervention,
-} from "./ui-shared.js";
+} from "./ui-shared.js?v=header-one-row";
 
 const TICK_MS = 250; // 4 Hz
 const FIRE_FRAME_MS = 140;
@@ -118,20 +120,16 @@ function boot(snapshot) {
   canvas.width = world.width * tile;
   canvas.height = world.height * tile;
   buildAtlas(tile);
-  document.getElementById("mode-badge").textContent = sharedVision
-    ? "SHARED MEMORY"
-    : "PRIVATE MAPS";
-  document.getElementById("mode-badge").className = sharedVision ? "on" : "off";
-  // The scenario line. A run nobody can name cannot be reproduced by anyone
-  // watching it, and "run it again" is the first thing a sceptical judge asks.
-  setText(
-    "scenario",
-    `${world.name} · ${victims.length} trapped · ${robots.length} units · ` +
-      `${world.mission_length_ticks} ticks · seed ${world.seed ?? "?"}`,
-  );
-  document.getElementById("toggle").textContent = sharedVision
-    ? "coordination: ON"
-    : "coordination: OFF";
+  // The toggle is also the mode badge; spelling the same state twice cost an
+  // entire header control. Keep the reproducibility details in the tooltip and
+  // the scan-friendly mission identity in the row itself.
+  const toggle = document.getElementById("toggle");
+  toggle.textContent = sharedVision ? "memory ON" : "memory OFF";
+  toggle.className = sharedVision ? "on" : "off";
+  const scenario = document.getElementById("scenario");
+  scenario.textContent = `${world.name} · ${victims.length} trapped · seed ${world.seed ?? "?"}`;
+  scenario.title = `${world.name}; ${victims.length} trapped; ${robots.length} units; ` +
+    `${world.mission_length_ticks} ticks; seed ${world.seed ?? "?"}`;
 }
 
 function applyTileChanges(changes) {
@@ -524,7 +522,7 @@ function connect() {
   socket = new WebSocket(`${scheme}://${location.host}/ws`);
   const mine = socket;
 
-  socket.onopen = () => { status.textContent = "live"; };
+  socket.onopen = () => { status.textContent = ""; };
   socket.onerror = () => { status.textContent = "connection error"; };
   socket.onclose = () => {
     if (mine !== socket) return;   // a socket we already replaced
@@ -536,6 +534,7 @@ function connect() {
     if (mine !== socket) return;
     const frame = JSON.parse(message.data);
     try {
+      syncSimulationLifecycle(frame);
       if (frame.kind === "snapshot") {
         boot(frame);
         refreshComparison();
@@ -571,6 +570,7 @@ function connect() {
 
 initInterventions();
 initKillRobot();
+initStartSimulation();
 initCompare();
 // The feed moves with every decision, and snapshots only arrive on boot or a
 // mode switch, so it gets its own cadence rather than riding the frame loop.
