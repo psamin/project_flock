@@ -207,3 +207,13 @@ Ranked by value per hour, honestly.
 4. **An image architecture diagram.** Optional, cheap, and the ASCII one does
    not survive being screenshotted into a judging deck.
 5. **A metrics endpoint.** Smallest real gap in criterion 4.
+6. **Make the fog render memory rather than truth.** The 2D view's three tile
+   states are *visibility* states: `StateFrame` is "one tick of truth" and
+   `tiles_changed` is ungated, so a long-unvisited tile shows fire no robot has
+   seen. Nothing overclaims it, so this is an enhancement rather than a
+   correction — but it is a strong one for criterion 1, because a fire that
+   stays invisible until a scout returns *demonstrates* that the map is memory.
+   About 15 lines in `app.js` (a per-tile last-seen map, updated only for tiles
+   currently in vision). Deliberately deferred past the video: it changes the
+   renderer being recorded, and a deliberately stale map reads as a broken one
+   to anyone not told otherwise.
