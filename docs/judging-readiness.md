@@ -163,7 +163,24 @@ on the repo currently has nothing to click.
 
 ## Part 3 — scale evidence
 
-See [`docs/scale.md`](scale.md).
+Measured at 50,000 observations and 5,000 lessons — full method and caveats in
+[`docs/scale.md`](scale.md).
+
+| query | rows | plan | p50 |
+|---|---|---|---|
+| Tactical recall | 5,000 | **`vector search`** | 36.0 ms |
+| Mission-scoped observations | **50,000** | **`vector search`** | **21.3 ms** |
+| Reconcile gate | 50,000 | `FULL SCAN` | 426.0 ms |
+
+This closes the gap in criterion 1: the vector index is index-served at 50k rows
+at a 21 ms p50, so "more than toy queries at real scale" is now a number rather
+than an argument. It also prices the reconcile-gate trade at **20×** on the same
+table.
+
+Stated in the same breath, because it is the honest limit: 426 ms inside the
+insert transaction would not be acceptable in production. At mission scale
+(~1000 beliefs) it is a few milliseconds and exactness is worth more than speed;
+at 50× that volume the gate would need a prefix redesign.
 
 ---
 
