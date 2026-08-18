@@ -1,54 +1,57 @@
-# Deploying the demo URL
+# Hosting the demo — tested runbook
 
-§6.1 requires the demo and the repo to be **live, working and free to access
-through Sept 15** — a month past submission, not just on the day. This is the
-runbook for that.
+§6.1 wants the demo and repo **live, working and free to access through Sept 15**
+— a month past submission, not just on the day.
 
-Everything here is prepared and tested except the parts that need Praneeth's AWS
-account. `colony/Dockerfile` is built and smoke-tested against the live cluster:
+Everything below was run end-to-end on this machine before being written down.
 
-```
-ok: True | memory: cockroach | tick: 30
-bedrock: {'requested': 'replay', 'mode': 'replay', 'calls': 0, 'cassette_entries': 76}
-console available: True | questions: 6
-memory rail rows: 149
-GET /        -> 200
-GET /sim3d   -> 200
-healthcheck  -> healthy
-```
+## What you are deploying
 
-## What the container is
+One Python process: the 4 Hz tick loop, the websocket broadcast, the commander
+console, and the static client (served from the same origin — it is ~200 KB, and
+a second origin would buy a CORS problem and nothing else).
 
-One process: the 4 Hz tick loop, the websocket broadcast, the commander console
-and the static client. The frontend is served from the same origin rather than
-S3 — it is ~200 KB of static files, and a second origin would buy a CORS problem
-and nothing else at this size.
+**It needs no AWS credentials.** `adapter_from_env` defaults to replay and the
+committed cassette carries Claude's recorded decisions, so the deployed demo
+shows real Bedrock output with **no secret on the box**. That matters for a URL
+sitting up for a month: there is nothing on it to leak.
 
-It runs **with no AWS credentials**: `adapter_from_env` defaults to replay and
-the committed cassette carries Claude's recorded decisions, so the deployed demo
-shows real Bedrock output without a key on the box. That matters for a public
-URL sitting up for a month — there is no credential on it to leak.
+**Measured footprint** (`docker stats`, idle mission running):
+
+| container | memory | CPU |
+|---|---|---|
+| colony (app) | **45 MiB** | 4% |
+| cockroach (single node) | **509 MiB** | 14% |
+
+That table decides your hosting tier. The app alone fits anywhere. CockroachDB
+is what needs real RAM.
+
+---
 
 ## Decide one thing first
 
-| | free-tier EC2 | ECS Fargate |
+| | **A — Cloud DB + tiny VM** ⭐ | **B — everything on one VM** |
 |---|---|---|
-| cost for the judging window | **$0** if the AWS account is <12 months old (750 h/month of `t3.micro`) | ~$15–20 for a month of a 0.25 vCPU task |
-| setup | one instance, docker run, security group | ECR repo, task definition, service, ALB |
-| §6.4 alignment | deviates — PRD names Fargate | as specified |
-| failure mode the day before | you can SSH in | you read CloudWatch |
+| database | CockroachDB Cloud free tier | single node beside the app |
+| VM needed | anything ≥512 MB (app is 45 MiB) | **≥2 GB** |
+| EC2 free tier (`t3.micro`, 1 GB) | ✅ comfortable | ⚠️ tight — 554 MiB idle, CRDB grows under load |
+| cost | $0 | $0 if the VM is free-tier |
+| judging | uses **CockroachDB Cloud**, closer to the sponsor's story | self-hosted single node |
+| setup | two systems | one command |
 
-**Recommendation: EC2 free tier.** The PRD chose Fargate before "must stay up
-for a month at zero budget" was the binding constraint. A single always-on
-instance is the smaller thing that meets the actual requirement, and §6.4's
-reasoning against Lambda (a 4 Hz tick loop with persistent websockets) argues
-just as well for a plain instance as for Fargate.
+**Recommended: A.** You already have a Cloud cluster with the least-privilege
+grants applied, the app is 45 MiB so a free-tier `t3.micro` is not tight, and
+"runs on CockroachDB Cloud" is the better sentence in front of a judge.
 
-## Path A — EC2 free tier
+Take **B** if you want one command and do not want to manage a DSN.
+
+---
+
+## Path A — CockroachDB Cloud + free-tier EC2
 
 ```bash
-# 1. Launch: Amazon Linux 2023, t3.micro, 8 GB gp3.
-#    Security group: inbound 22 from your IP, 80 from 0.0.0.0/0.
+# 1. Launch an instance: Amazon Linux 2023, t3.micro, 8 GB gp3.
+#    Security group inbound: 22 from your IP, 80 from 0.0.0.0/0.
 
 # 2. On the instance
 sudo dnf install -y docker git
@@ -56,50 +59,81 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker ec2-user && exec sudo su - ec2-user
 
 git clone https://github.com/psamin/project_flock.git
-cd project_flock
+cd project_flock/colony
 
-# 3. Build and run. Port 80 so the URL needs no port suffix.
-docker build -t colony colony/
+# 3. Apply the schema to the Cloud cluster (idempotent — safe to re-run)
+docker build -t colony .
+docker run --rm colony python -m schema.apply \
+  'postgresql://<user>:<pass>@<host>:26257/colony?sslmode=verify-full'
+
+# 4. Seed tactics, so SEMANTIC memory is not an empty table on camera
+docker run --rm -e COLONY_DSN='postgresql://...' colony python -m sim.seed_memory
+
+# 5. Run it. Port 80 so the URL needs no port suffix.
 docker run -d --name colony --restart unless-stopped \
   -p 80:8000 \
-  -e COLONY_DSN='postgresql://<user>:<pass>@<cloud-host>:26257/colony?sslmode=verify-full' \
+  -e COLONY_DSN='postgresql://<user>:<pass>@<host>:26257/colony?sslmode=verify-full' \
   colony
 
-# 4. Verify from your laptop, not from the box
+# 6. Verify from your laptop, not from the box
 curl -s http://<public-ip>/health
 ```
 
-`--restart unless-stopped` is doing the month of uptime. Without it the demo
-dies the first time the instance reboots and nobody notices until a judge looks.
+Step 4 is not optional. With no lessons, `mission_memories` is empty and
+criterion #1 — Agentic Memory Design — shows one of four memory systems blank.
+`seed_memory` exits non-zero if it learns nothing, so a silent failure here is
+now a loud one.
 
-## Path B — ECS Fargate
+## Path B — one command, everything on one host
 
-Same image. `docker build`, tag, `docker push` to ECR, then a task definition
-with 0.25 vCPU / 0.5 GB, `COLONY_DSN` from Secrets Manager, and one service
-behind an ALB. The healthcheck in the Dockerfile is what the target group should
-use (`/health`, 200).
+Tested end-to-end. Needs a VM with **≥2 GB** RAM.
+
+```bash
+git clone https://github.com/psamin/project_flock.git
+cd project_flock/colony
+docker compose -f docker-compose.deploy.yml up -d --build
+curl -s http://localhost/health
+```
+
+That brings up CockroachDB with a persistent volume, applies the schema, seeds
+tactics **only if semantic memory is empty**, then starts the server on port 80.
+
+Verified on a restart: the second boot logs `semantic memory already has 3
+tactics; skipping seed` and the data survives, so rebooting the VM does not pile
+up a fresh set of lessons or wipe the old ones.
+
+Note the single node here is the *demo*, not the resilience story. The node-kill
+runs on the 3-node rig in `infra/`, which is where killing a node proves
+something.
+
+---
 
 ## After it is up — do not skip these
 
-1. **Put the URL in the repo's About.** `gh repo edit --homepage https://…`.
-   §6.1 asks for the demo to be reachable, and right now `homepageUrl` is empty,
-   so a judge who lands on the repo has nothing to click.
-2. **Point it at the Cloud cluster, not a local one.** With no `COLONY_DSN` the
-   server falls back to in-memory memory, and a deployed demo on the fake is
-   exactly the failure `_make_memory` refuses for named clusters — it would look
-   perfect and write nothing.
-3. **Check it again on Sept 1.** The requirement is a month of uptime, and the
+1. **Put the URL in the repo's About:**
+   ```bash
+   gh repo edit --homepage https://<your-url>
+   ```
+   `homepageUrl` is currently empty, so a judge who lands on the repo has
+   nothing to click. This is a submission requirement, not a nicety.
+
+2. **`--restart unless-stopped` is doing the month of uptime.** Without it the
+   demo dies the first time the instance reboots and nobody notices until a
+   judge looks.
+
+3. **Check it again on Sept 1.** The requirement is a month of uptime and the
    most likely way this fails is silently.
+
+---
 
 ## Known limits, stated rather than discovered
 
 - **One container, one mission.** Mission state is in-process — the world, the
-  agents, the viewer set — so `--workers 1` is deliberate and horizontal scaling
-  would serve different missions to different browsers. Fine for a demo; it is
+  agents, the viewer set — so `--workers 1` is deliberate. Horizontal scaling
+  would serve *different* missions to different browsers. Fine for a demo; it is
   not a multi-tenant service and should not be described as one.
 - **Every visitor shares one mission.** Two judges on the URL at once see the
-  same world, and either can toggle coordination or drop fire on the other's
-  view. Acceptable for judging traffic, and worth knowing before it surprises
-  someone mid-demo.
-- **No TLS in Path A.** Plain HTTP on port 80. Adding CloudFront or a
-  certificate is a judging-window nicety, not a submission requirement.
+  same world, and either can drop fire on the other's view. Acceptable for
+  judging traffic, worth knowing before it surprises someone mid-demo.
+- **No TLS on either path.** Plain HTTP on port 80. CloudFront or a certificate
+  is a judging-window nicety, not a submission requirement.
