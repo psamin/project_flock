@@ -1,4 +1,4 @@
-.PHONY: up down schema schema-cloud test smoke map dev sim seed-memory reset demo demo-cold \
+.PHONY: up down schema schema-cloud test smoke map dev sim seed-memory reset demo demo-cold preflight \
 	cluster-3 cluster-3-health cluster-3-kill cluster-3-down
 
 # One command to a working dev cluster with the schema applied.
@@ -59,6 +59,16 @@ reset:
 #
 # Deterministic because the seed is fixed: the two missions are byte-identical
 # worlds with byte-identical fleets, and the only difference is the experience.
+# Is the demo recordable right now? Checks the four memory systems are all
+# populated, the cluster is real rather than the in-memory fake, the cassette
+# loaded, and every console question actually answers. Run it before recording
+# - `make test` empties semantic memory (test_recall.py clears the table and
+# shares this cluster), so a seeded demo plus a test run is a blank one.
+preflight:
+	uv run python -m preflight --url :$(PORT)
+
+PORT ?= 8000
+
 demo:
 	uv run python -m schema.reset --yes
 	uv run python -m sim.seed_memory
