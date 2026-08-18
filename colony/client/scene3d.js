@@ -225,6 +225,12 @@ function hash2(x, y) {
 /** Detach a subtree and hand its GPU resources back. */
 function disposeTree(root) {
   root.traverse((node) => {
+    // CSS2DRenderer appends labels directly under #labels. Removing an ancestor
+    // Group from the Three.js scene does not emit `removed` on its CSS2DObject
+    // descendants, so their DOM nodes otherwise survive the reset at the last
+    // screen coordinate they occupied. Every reconnect or mode change then
+    // adds another live set beside those frozen coordinates.
+    if (node.isCSS2DObject && node.element) node.element.remove();
     if (node.geometry) node.geometry.dispose();
     const material = node.material;
     if (!material) return;
@@ -700,8 +706,9 @@ let sectorsVisible = false;
 
 function buildSectorGrid() {
   if (sectorGroup) {
-    scene.remove(sectorGroup);
-    sectorGroup.traverse((o) => o.geometry?.dispose());
+    // Uses the same cleanup path as robot labels so toggling/reconnecting after
+    // showing the sector grid cannot leave its CSS labels behind either.
+    disposeTree(sectorGroup);
     sectorGroup = null;
   }
   if (!world?.sectors?.length) return;

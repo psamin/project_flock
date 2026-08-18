@@ -106,6 +106,11 @@
     #memory-rail .zero b { color: #3d4753; }
 
     #main { display: flex; flex: 1; min-height: 0; }
+    #operator-divider {
+      flex: 0 0 1px; height: 1px; min-height: 1px; width: 100%;
+      position: relative; z-index: 2; background: #4a5562; opacity: 1;
+      transition: none; animation: none;
+    }
     #stage { flex: 1; position: relative; min-width: 0; }
     #stage canvas { display: block; width: 100%; height: 100%; }
 
@@ -277,7 +282,7 @@
        map a sidebar is covering, which is the whole reason this is not in the
        rail with everything else. */
     #dock {
-      display: flex; gap: 0; flex: none; border-top: 1px solid var(--line);
+      display: flex; gap: 0; flex: none;
       height: 116px;
     }
     /* Wide enough for three kind buttons and the radius on one row. At 380px
@@ -286,7 +291,7 @@
        the one line that says the gesture is two steps. */
     #intervene {
       width: 470px; flex: none; border-right: 1px solid var(--line);
-      padding: 8px 12px; overflow-y: auto;
+      padding: 2px 12px 8px; overflow-y: auto;
     }
     /* Pinned, so the status line stays readable even if the kinds do wrap on a
        narrow window. It is where a refusal is reported. */
@@ -305,7 +310,7 @@
                              color: var(--dim); font-size: 10px; }
     #intervene-radius { width: 70px; }
 
-    #ticker { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 8px 12px;
+    #ticker { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 2px 12px 8px;
               color: #8b96a4; font-size: 11px; white-space: pre; }
     #ticker div { padding: 1px 0; }
     #ticker .found { color: #f2c14e; }
@@ -437,6 +442,8 @@
       </section>
     </aside>
   </div>
+
+  <div id="operator-divider" aria-hidden="true"></div>
 
   <!-- The dock. Full width under the viewport so the island stays visible while
        a disruption is armed. -->
