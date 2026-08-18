@@ -43,7 +43,7 @@ None of these are toy queries:
 observations. That is demo scale. Scale evidence now lives in
 [`docs/scale.md`](scale.md) — see Part 3.
 
-### 2. Technical Implementation — **two of the three named tools**
+### 2. Technical Implementation — **three of the four named tools**
 
 > *Integration with CockroachDB tools (distributed vector index, MCP Server,
 > ccloud CLI) — quality engineering, used correctly and safely.*
@@ -73,17 +73,23 @@ claiming is exercised under real contention with `ThreadPoolExecutor` races
 `INSERT` **without** `SELECT` on provenance tables so a robot records why it
 acted and cannot read the log back (`infra/credentials.py`).
 
-**MCP Server — posture real, transport partial.** `commander` holds `SELECT`
-and nothing else, asserted on the Cloud cluster by `credentials.py verify`, so
-read-only is a property of the **grant** rather than a setting. `infra/mcp.py
-config` emits the client snippet and `check` asserts the posture. **But the
-in-app console executes its six audited queries directly as that role, not
-through the managed endpoint.** We say so rather than implying otherwise.
+**MCP Server — load-bearing at runtime.** The commander agent
+(`console/agent.py`) reads live fleet memory through the managed endpoint on
+every free-form question, via `console/mcp_client.py`. Calling it for real
+corrected three things we had asserted: MCP connects as `managed-mcp` and does
+**not** inherit the `commander` grant, `readOnly: true` still advertises write
+tools, and `?cluster=` in the URL is not read. So the two console tiers are
+read-only for different reasons — a grant on the psycopg path, an allowlist plus
+`assert_read_only` on the MCP path — and `infra/mcp.py` now records that instead
+of over-claiming it.
 
-**ccloud CLI — not used. Zero files.** Named in this criterion and absent from
-the repo. This is the clearest single gap in the submission; see Part 4.
+**Agent Skills — used, and routed on.** `console/skills.py` loads
+`cockroachlabs/cockroachdb-skills` two-tier: descriptions in the system prompt,
+bodies fetched by tool call only when the model decides one matches. Pinned by
+`scripts/fetch_skills.sh`.
 
-**Agent Skills — not used.** Planned in the PRD, never run.
+**ccloud CLI — not used. Zero files.** The one named tool absent from the repo;
+see Part 4.
 
 ### 3. Real-World Impact — **meaningful, under-argued**
 
@@ -190,7 +196,8 @@ Ranked by value per hour, honestly.
 
 1. **Deploy + record.** Two of eight checklist rows are unmet and they are the
    two judges cannot work around. Everything else is polish by comparison.
-2. **ccloud CLI.** Criterion 2 names three tools; we ship two. Provisioning the
+2. **ccloud CLI.** Criterion 2 names the tools; this is the one we do not ship.
+   Provisioning the
    Cloud cluster and per-robot SQL users through `ccloud` in `infra/` is a
    contained script and turns a stated absence into a third tool. Only worth
    doing *for real* — a committed script nobody ran is worse than the honest gap.

@@ -7,7 +7,7 @@ a file you can open. Where a named tool was **not** used, this says so.
 - Repo: <https://github.com/psamin/project_flock> (public, Apache 2.0)
 - Cluster: CockroachDB v26.2.5 — a Cloud cluster with the schema and
   least-privilege grants applied, plus a 3-node Docker rig for the chaos runs
-- Suite: 805 tests, `make test`
+- Suite: 896 tests, `make test`
 
 ---
 
@@ -16,9 +16,9 @@ a file you can open. Where a named tool was **not** used, this says so.
 | Tool | Used | Where |
 |---|---|---|
 | **Distributed Vector Indexing** | ✅ load-bearing | [`colony/schema/v1_1.sql`](../colony/schema/v1_1.sql), [`colony/fleetmem/client.py`](../colony/fleetmem/client.py), [`colony/sim/recall.py`](../colony/sim/recall.py) |
-| **Managed MCP Server** | ✅ posture real, transport partial | [`infra/mcp.py`](../infra/mcp.py), [`colony/console/`](../colony/console/) |
+| **Managed MCP Server** | ✅ load-bearing at runtime | [`colony/console/mcp_client.py`](../colony/console/mcp_client.py), [`colony/console/agent.py`](../colony/console/agent.py), [`infra/mcp.py`](../infra/mcp.py) |
+| **Agent Skills** | ✅ routed on at runtime | [`colony/console/skills.py`](../colony/console/skills.py), [`colony/scripts/fetch_skills.sh`](../colony/scripts/fetch_skills.sh) |
 | **ccloud CLI** | ❌ not used | — |
-| **Agent Skills** | ❌ not used | — |
 
 ### Distributed vector indexing
 
@@ -94,33 +94,58 @@ still returns perfectly plausible rows.
 
 ### Managed MCP Server
 
-[`infra/mcp.py`](../infra/mcp.py) emits the client config for the hosted endpoint
-and asserts the posture it depends on:
+Two paths reach the managed endpoint, and only one of them is load-bearing.
+
+**The editor path.** [`infra/mcp.py`](../infra/mcp.py) prints the config snippet
+§6.2 describes — the one a teammate pastes into Claude Code, Cursor or VS Code:
 
 ```bash
-uv run python ../infra/mcp.py config --cluster-id <id>   # snippet for Claude Code / Cursor / VS Code
-uv run python ../infra/mcp.py check                      # assert read-only before wiring it
+uv run python ../infra/mcp.py config --cluster-id <id>
 ```
 
-```json
-{"mcpServers": {"colony-fleet-memory": {
-  "type": "http",
-  "url": "https://cockroachlabs.cloud/mcp?cluster=<id>",
-  "readOnly": true,
-  "env": {"CRDB_SQL_USER": "commander"}}}}
-```
+**The runtime path — what the agent actually does.** The commander console's
+free-form tier ([`colony/console/agent.py`](../colony/console/agent.py)) is a
+Bedrock brain with MCP hands. Ask it a question in the UI and Claude Haiku 4.5
+runs a bounded tool loop (`MAX_TURNS = 8`) against
+[`colony/console/mcp_client.py`](../colony/console/mcp_client.py), reading live
+fleet memory through the managed server with a six-tool read allowlist:
+`select_query`, `explain_query`, `get_table_schema`, `list_tables`,
+`show_running_queries` and `show_statement`. So the tool is doing work *during
+the demo*, not at development time.
 
-**Read-only is a property of the grant, not a setting.** `commander` holds
-`SELECT` and nothing else across all eight tables
-([`infra/credentials.py`](../infra/credentials.py)), asserted on the Cloud
-cluster by `credentials.py verify`. `readOnly: true` is stated rather than left
-to the default so nobody can flip it by accident, and
-[`tests/test_mcp_config.py`](../colony/tests/test_mcp_config.py) asserts the
-snippet points at the managed endpoint, names the least-privilege role, and never
-turns writes on.
+Auth is OAuth 2.1. The endpoint advertises `authorization_code` and
+`refresh_token` only — there is no `client_credentials` grant, so a server-side
+process cannot mint a token from a secret. The shape that works is one human
+login whose refresh token is then used headlessly, stored `0600` at
+`~/.colony/mcp-token.json`, deliberately outside the repo so no `.gitignore` rule
+stands between it and a commit. Scope requested is `mcp:read` alone.
 
-**What the agent does with it:** the commander console asks seven canned
-questions that between them interrogate all four memory systems —
+**Three corrections we only found by calling it for real.** All three contradict
+something this repo previously asserted, and they are recorded rather than
+quietly fixed:
+
+| what we believed | what the server does |
+|---|---|
+| MCP connects as `commander` and inherits its SELECT-only grant | it connects as **`managed-mcp`**, its own service identity — `SELECT current_user` says so, and the `CRDB_SQL_USER` key in the config snippet is **inert** |
+| `readOnly: true` in the config is the access-control story | the server still *offers* `insert_rows`, `create_table` and `create_database` with it set |
+| `?cluster=<id>` in the URL selects the cluster | it is not read; the id must be passed as a tool **argument** or calls fail with "cluster_id not provided" |
+
+So the console's two tiers are read-only for genuinely different reasons, and
+describing them as one story would be wrong:
+
+| tier | connects as | what stops a write |
+|---|---|---|
+| seven canned questions | `commander` | **the grant** — SELECT and nothing else, asserted on the Cloud cluster by `credentials.py verify` |
+| ask anything | `managed-mcp` | the six-tool **allowlist** the agent is handed, `assert_read_only` on every statement before it leaves the process, and the server's own refusals |
+
+The allowlist matters precisely because the third layer is somebody else's: the
+write tools the endpoint exposes are never in the tool list Bedrock sees, so no
+amount of prompting reaches them. `assert_read_only` is imported from
+[`console/reader.py`](../colony/console/reader.py) rather than reimplemented, so
+the two paths cannot drift about what counts as a read.
+
+**The canned tier is still the demo's spine.** Seven audited questions that
+between them interrogate all four memory systems:
 
 | question | memory | what it reads |
 |---|---|---|
@@ -133,28 +158,48 @@ questions that between them interrogate all four memory systems —
 | `what_did_we_learn` | semantic | `mission_memories` — unscoped, on purpose |
 
 `why_did_robot` is the one that matters: it answers with the rows that were in
-the prompt, not with a plausible story about them.
+the prompt, not with a plausible story about them. A fixed statement a judge can
+read and re-run is a stronger artefact than a model improvising SQL on camera,
+which is why the free-form tier sits *above* these rather than replacing them.
 
-**Stated plainly:** the in-app console executes those same audited queries
-*directly* as that same least-privilege `commander` role, not through the managed
-endpoint. Fixed audited SQL was chosen over free-form NL→SQL deliberately — a
-model improvising SQL live is the one component that can fail in a way nobody
-recovers from on camera, and a judge can read the statement, run it, and check
-the answer. The console is seven queries, not an AI, and we do not describe it as
-one. [`colony/console/reader.py`](../colony/console/reader.py) refuses writes at
-a second layer, because the grant lives on the cluster and is absent on a laptop
-running `make dev`.
+### Agent Skills
+
+[`cockroachlabs/cockroachdb-skills`](https://github.com/cockroachlabs/cockroachdb-skills)
+is loaded the way the agentskills.io shape intends — two-tier, not pasted into a
+prompt ([`colony/console/skills.py`](../colony/console/skills.py)):
+
+- **`catalog()`** — every skill's `name` + `description` from its `SKILL.md`
+  frontmatter, ~100 tokens each. This goes in the system prompt, and it is all
+  the agent gets for free.
+- **`load(name)`** — the full body, exposed to Bedrock as a **tool call**, and
+  fetched only when the agent decides a description matches what it is doing.
+
+That is the difference between using the repo and citing it: a judge watching
+the transcript sees the agent read the catalogue and *choose* `cockroachdb-sql`
+before writing a query against an unfamiliar schema, or
+`triaging-live-sql-activity` when asked what the cluster is doing — and the
+choice is the model's, mid-question.
+
+Bodies are head-trimmed at 6000 chars, because skills are written procedure-first
+and reference-tables-after, and a commander answering "which robots are stuck"
+does not need 25 KB of benchmark prose to do it.
+
+`make skills` fetches them via
+[`scripts/fetch_skills.sh`](../colony/scripts/fetch_skills.sh), **pinned to a
+commit** rather than tracking main — the agent routes on these descriptions, so
+an upstream edit would change which skill it picks mid-demo. They land in
+`colony/skills/`, gitignored: 34 skills of third-party markdown do not belong in
+this repo's diff, and a pinned script is a more honest record of the dependency
+than a vendored copy. Everything degrades to an empty catalogue when the
+directory is absent, so a checkout that never ran the fetch still serves the
+console — it just answers without skills and says so.
 
 ### ccloud CLI — not used
 
 Zero files. The Cloud cluster was created in the Cloud console, and per-robot SQL
 users and grants are applied over SQL by `infra/credentials.py apply` rather than
-through `ccloud`. Our internal plan named it as an optional fourth tool; it was
-never delivered and we are not claiming it.
-
-### Agent Skills — not used
-
-Planned in the PRD, never run. Not claimed.
+through `ccloud`. It is the one named tool we did not ship, and we are not
+claiming it.
 
 ### CockroachDB features used beyond the named tools
 
@@ -180,7 +225,7 @@ Planned in the PRD, never run. Not claimed.
 | Service | Used | How |
 |---|---|---|
 | **Amazon Bedrock** — Titan Text Embeddings V2 (`amazon.titan-embed-text-v2:0`) | ✅ | Every observation and every learned lesson, at **512 dims** — both vector paths above are Titan vectors |
-| **Amazon Bedrock** — Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) | ✅ | Plan-boundary decisions and end-of-mission lesson derivation, via a cross-region inference profile |
+| **Amazon Bedrock** — Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) | ✅ | Plan-boundary decisions, end-of-mission lesson derivation, and the commander agent's tool loop — via a cross-region inference profile |
 | **Amazon EC2** | documented | Free-tier `t3.micro` is the hosting path in [`docs/deploy.md`](deploy.md) — the app container idles at 45 MiB, so the database is what needs the RAM |
 | AWS Lambda | ❌ | Not used — the fleet is one long-lived tick loop, not request/response |
 | Amazon S3 | ❌ | Not used — the map and the cassette are committed files |
@@ -217,6 +262,18 @@ asserted. In a full mission, 15 of 36 decisions are Bedrock's.
   alternative is hash-derived vectors filling a `VECTOR(512)` column that nobody
   can distinguish from Titan's afterwards.
 
+**The commander agent's spend is bounded separately.** It runs on the same model
+and is capped by `MAX_TURNS = 8` tool rounds and `MAX_FAILURES = 4`, and it sits
+*outside* the per-robot planning cap — somebody typing in a console must not be
+able to spend the tick loop's budget.
+
+**Stated plainly:** the free-form tier is **off** on the public deployment. It
+needs a live Bedrock loop, which a cassette cannot stand in for, and an MCP
+refresh token — which would put a long-lived credential on a box sitting on the
+public internet for a month. `/api/console/agent` reports which piece is missing
+rather than the tier silently not being there. The canned tier answers for
+everyone; the free-form tier is for the video and a judge's local run.
+
 Region defaults to `us-east-1` (`AWS_REGION`); credentials come from the standard
 boto3 chain.
 
@@ -225,30 +282,29 @@ boto3 chain.
 ## 3. Architecture
 
 ```
-                                 ┌─────────────────────────────────────┐
-   Browser                       │            AWS                      │
-   ┌──────────────────┐          │  ┌───────────────────────────────┐  │
-   │ /       2D canvas│          │  │ Amazon Bedrock                │  │
-   │ /sim3d  WebGL    │          │  │  · Claude Haiku 4.5           │  │
-   └────────▲─────────┘          │  │      plan boundaries, lessons │  │
-            │ websocket          │  │  · Titan Text Embeddings V2   │  │
-            │ 4 Hz frames        │  │      512-dim, every belief    │  │
-   ┌────────┴─────────┐          │  └───────────▲───────────────────┘  │
-   │ Sim server       │          │              │ boto3, rate-capped   │
-   │ FastAPI, 4 Hz    │          │              │ live│record│replay   │
-   │ authoritative    │          └──────────────┼──────────────────────┘
-   │ world + physics  │                         │
-   └────────▲─────────┘                         │
-            │ percepts / validated actions      │
-   ┌────────┴──────────────────────────────────┴──────┐
-   │ Robot agents — scout · lifter · medic            │
-   │   sense → sync → think → act → report            │
-   │   no robot-to-robot channel, by construction     │
-   └────────────────────────▲─────────────────────────┘
-                            │ fleetmem SDK (psycopg 3, SERIALIZABLE)
-                            │ report_observation · claim_task · complete_task
-                            │ get_beliefs · heartbeat · log_plan · log_event
-   ┌────────────────────────▼─────────────────────────────────────────┐
+   Browser                                    ┌──────────────────────────────┐
+   ┌────────────────────────┐                 │            AWS               │
+   │ /     WebGL twin       │                 │  ┌────────────────────────┐  │
+   │ /2d   Canvas 2D        │                 │  │ Amazon Bedrock         │  │
+   │       + commander      │                 │  │  · Claude Haiku 4.5    │  │
+   └───────▲────────────┬───┘                 │  │      robot planning,   │  │
+           │ websocket  │ ask anything        │  │      lessons, commander│  │
+           │ 4 Hz       │                     │  │  · Titan Embeddings V2 │  │
+   ┌───────┴────────────▼───┐                 │  │      512-dim, every    │  │
+   │ Sim server             │                 │  │      belief + lesson   │  │
+   │ FastAPI, 4 Hz          │                 │  └────────▲───────────────┘  │
+   │ authoritative world    │                 │           │ boto3            │
+   └───────▲────────────────┘                 └───────────┼──────────────────┘
+           │ percepts / validated actions                 │
+   ┌───────┴──────────────────────────────────────────────┤
+   │ Robot agents — scout · lifter · medic                 │ rate-capped,
+   │   sense → sync → think → act → report                 │ plan boundaries
+   │   no robot-to-robot channel, by construction          │ only
+   └───────┬───────────────────────────────────────────────┘
+           │ fleetmem SDK (psycopg 3, SERIALIZABLE)
+           │ report_observation · claim_task · complete_task
+           │ get_beliefs · heartbeat · log_plan · log_event
+   ┌───────▼──────────────────────────────────────────────────────────┐
    │ CockroachDB v26.2.5                                              │
    │                                                                  │
    │  WORKING     robots · tasks (leases) · victims · hazards         │
@@ -258,20 +314,23 @@ boto3 chain.
    │                                                                  │
    │  changefeed ──► operator interventions reach the fleet           │
    │  AS OF SYSTEM TIME ──► the console reads the past                │
-   └───▲──────────────────────────────────▲───────────────────────────┘
-       │ SELECT-only as `commander`       │
-       │                                  │ kill a node mid-mission
-   ┌───┴──────────────────────┐      ┌────┴──────────────────┐
-   │ Commander console        │      │ Chaos rig, 3 nodes    │
-   │ 7 audited questions ·    │      │ infra/cluster3.sh     │
-   │ Managed MCP Server       │      └───────────────────────┘
-   │ config via infra/mcp.py  │
-   └──────────────────────────┘
+   └───▲───────────────────▲──────────────────────▲───────────────────┘
+       │ psycopg as        │ Managed MCP Server   │ kill a node
+       │ `commander`       │ as `managed-mcp`     │ mid-mission
+       │ (SELECT grant)    │ (tool allowlist)     │
+   ┌───┴───────────┐  ┌────┴─────────────────┐  ┌─┴─────────────────┐
+   │ 7 canned      │  │ Commander agent      │  │ Chaos rig, 3 nodes│
+   │ questions     │  │ Bedrock brain,       │  │ infra/cluster3.sh │
+   │ console/      │  │ MCP hands, equipped  │  └───────────────────┘
+   │ questions.py  │  │ from Agent Skills ───┼──► cockroachdb-skills
+   └───────────────┘  └──────────────────────┘    (pinned, catalog +
+                                                   load-on-match)
 ```
 
 Three arrows carry the whole design: robots talk **only** to CockroachDB, Bedrock
-is consulted **only** at plan boundaries, and the console reads with a grant that
-cannot write.
+is consulted **only** at plan boundaries, and both console tiers can read the
+cluster and neither can write to it — the left one because of a grant, the right
+one because of an allowlist.
 
 ---
 
@@ -296,6 +355,30 @@ plan is a full scan, and here is why" example would carry it.
 **A bare `CREATE VECTOR INDEX (embedding)` silently builds `vector_l2_ops`**, and
 a `<=>` query against it falls back to a scan with no error. The operator class
 being required-in-practice but optional-in-syntax is a trap worth a warning.
+
+**The Managed MCP Server's identity is not the one the config snippet implies.**
+The snippet carries a `CRDB_SQL_USER` key, which reads like the SQL identity the
+server will use; it is inert, and the server connects as `managed-mcp`. We built
+an access-control story on "MCP inherits the `commander` grant" and only found it
+was wrong by running `SELECT current_user` through the endpoint. Either honouring
+that key or documenting the service identity prominently would close a gap that
+is easy to over-claim in exactly the direction a security reviewer cares about.
+
+**`readOnly: true` still advertises `insert_rows`, `create_table` and
+`create_database`.** We expected the flag to shrink the tool list. Since it does
+not, every agent built on this endpoint has to carry its own allowlist, and the
+ones that do not will look read-only right up until a model decides otherwise.
+
+**`?cluster=<id>` in the published URL is not read.** Calls fail with
+"cluster_id not provided" until the id is passed as a tool argument. The snippet
+in the Cloud console teaches the query-parameter form, so the first call anyone
+makes from a copied config fails.
+
+**No `client_credentials` grant means no clean server-side auth.** The endpoint
+offers `authorization_code` and `refresh_token` only, so a headless process has
+to be bootstrapped by a human browser login and then keep a refresh token on
+disk. That is workable, and we ship it — but a service-account grant would let a
+deployed agent authenticate without a long-lived credential sitting in a file.
 
 **Serializable retry was a genuine non-event, and that is worth saying.** One
 `retry_on_serialization_failure` decorator around 40001, and we never thought
