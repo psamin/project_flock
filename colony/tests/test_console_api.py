@@ -55,16 +55,17 @@ def db_client(monkeypatch):
 # --- the catalog ------------------------------------------------------------
 
 
-def test_the_catalog_lists_the_six_questions(client):
+def test_the_catalog_lists_the_seven_questions(client):
     c, _ = client
     body = c.get("/api/console/questions").json()
 
-    assert len(body["questions"]) == 6
+    assert len(body["questions"]) == 7
     assert {q["id"] for q in body["questions"]} >= {
         "why_did_robot",
         "unreached_victims",
         "who_holds_what",
         "what_did_we_learn",
+        "beliefs_30s_ago",
     }
 
 
