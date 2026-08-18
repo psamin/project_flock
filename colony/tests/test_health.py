@@ -23,8 +23,8 @@ def _fresh_server():
     `sim.server` builds its mission at import time, which means the adapter is
     chosen then too — without the reload every test in the file would see
     whichever configuration happened to import it first. Not wrapped in `with
-    TestClient(...)` for the reason `test_console_api._fresh_server` documents:
-    the lifespan would start the 4 Hz tick loop on the client's thread.
+    TestClient(...)` so these route-only checks do not enter the app lifespan.
+    The mission now stays prepared at tick 0 until `/api/mission/start` is called.
     """
     import importlib
 

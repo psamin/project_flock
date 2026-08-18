@@ -446,10 +446,9 @@ def test_both_budgets_age_out_after_a_minute():
 def _fresh_server(monkeypatch):
     """A reloaded server module on the fake, so each test gets its own mission.
 
-    Deliberately not entered as a context manager, for the reason spelled out in
-    `test_console_api.py`: the lifespan starts the 4 Hz tick loop on the client's
-    thread, and a test that also calls `tick_once()` is two threads driving one
-    mission.
+    Deliberately not entered as a context manager: these are route-only checks
+    and do not need the app lifespan. The tick loop now requires an explicit
+    `/api/mission/start` call.
     """
     import importlib
 

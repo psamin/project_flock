@@ -158,6 +158,11 @@ class Mission:
         self.seed = seed
         self.mem, self.memory_kind = _make_memory()
         self.viewers: set[Viewer] = set()
+        # Constructing the server prepares a mission at tick 0, but the clock
+        # does not move until an operator explicitly starts it. `started` stays
+        # true after completion so a finished run cannot be accidentally
+        # resumed by clicking the start control twice.
+        self.started = False
         self.running = False
         # Bedrock at plan boundaries (§4.3). Replay mode without a cassette
         # yields nothing and every robot runs on rules, which is why the server
@@ -239,6 +244,32 @@ class Mission:
 
     # --- mission lifecycle ------------------------------------------------
 
+    async def start(self) -> bool:
+        """Start the prepared mission exactly once.
+
+        Returns True for the transition and False when the mission was already
+        started. The endpoint is idempotent so a double-click cannot launch two
+        tick loops over the same world.
+        """
+        if self.started or self.running:
+            return False
+        self.started = True
+        self.running = True
+        self._loop = asyncio.create_task(self.run())
+        # Tell every open renderer immediately. Waiting for the first 4 Hz diff
+        # would leave secondary tabs showing an enabled start button briefly.
+        await self._broadcast(
+            {
+                "kind": "diff",
+                "tick": self.world.tick,
+                "started": True,
+                "running": True,
+                "events": [],
+                "metrics": self.metrics(),
+            }
+        )
+        return True
+
     def _build(self, *, coordinated: bool) -> None:
         """Stand up a fresh world, mission and fleet in this coordination mode."""
         # A restart replaces the mission, so the old listener's changefeed thread
@@ -290,13 +321,16 @@ class Mission:
         tear. Doing it under the broadcast lock is what keeps a viewer from
         receiving a diff for the old world after the snapshot for the new one.
         """
+        was_started = self.started or self.running
         async with self._broadcast_lock:
             # Recorded with whether the mission actually ended: toggling away
             # from a run twenty ticks old stores numbers that are true and
             # meaningless, and §4.7's coordination gain is the one number the
             # video ends on.
-            self.record_run()
+            if was_started:
+                self.record_run()
             self._build(coordinated=coordinated)
+            self.started = was_started
             snapshot = self._snapshot()
             for viewer in list(self.viewers):
                 if not viewer.offer(snapshot):
@@ -307,7 +341,8 @@ class Mission:
         # usual reason to hit the toggle is that you have just watched one
         # finish. Without this the new world is built, broadcast, and then sits
         # at tick 0 forever — which looks exactly like a hung server.
-        if not self.running:
+        if was_started and not self.running:
+            self.running = True
             self._loop = asyncio.create_task(self.run())
 
     @property
@@ -754,9 +789,12 @@ class Mission:
         return bool(self.agents) and len(self.disabled) >= len(self.agents)
 
     async def run(self) -> None:
+        self.started = True
         self.running = True
         while self.running and not self.world.finished and not self.fleet_lost:
             frame = self.tick_once()
+            frame["started"] = True
+            frame["running"] = True
             await self._broadcast(frame)
             await asyncio.sleep(TICK_SECONDS)
         self.running = False
@@ -799,6 +837,18 @@ class Mission:
             # scoreboard should be showing, and waiting for a toggle meant the
             # numbers appeared only after they stopped being on screen.
             self.record_run()
+        # The final lifecycle frame disables mission-only controls for every
+        # connected renderer, including tabs other than the one that started it.
+        await self._broadcast(
+            {
+                "kind": "diff",
+                "tick": self.world.tick,
+                "started": self.started,
+                "running": False,
+                "events": [],
+                "metrics": self.metrics(),
+            }
+        )
 
     def record_run(self) -> None:
         """Keep this mode's numbers for the ON/OFF comparison (FR-9, §4.7)."""
@@ -888,6 +938,8 @@ class Mission:
         """
         payload = self.world.snapshot().to_json()
         payload["metrics"] = self.metrics()
+        payload["started"] = self.started
+        payload["running"] = self.running
         # Who is already lost, not who just became lost: a browser joining a
         # mission in progress never saw the transition go by.
         payload["lost"] = self.lost_watch.lost_ids()
@@ -903,22 +955,23 @@ mission = Mission()
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Start the tick loop with the app and stop it cleanly on shutdown."""
-    task = asyncio.create_task(mission.run())
+    """Prepare the mission at tick 0 and stop an active loop on shutdown."""
     # "N robots", not "N scouts": the fleet is 2 scouts, a lifter and a medic,
     # and the heterogeneity is the premise. Also says what was recalled, so the
     # cold run and the remembering run are distinguishable from the log alone.
     print(
-        f"[sim] mission {mission.mission_id} ticking at {TICK_HZ} Hz "
-        f"({mission.memory_kind} memory, {len(mission.agents)} robots)"
+        f"[sim] mission {mission.mission_id} ready at tick 0 "
+        f"({mission.memory_kind} memory, {len(mission.agents)} robots); "
+        "waiting for start"
     )
     try:
         yield
     finally:
         mission.running = False
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        if mission._loop is not None:
+            mission._loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await mission._loop
 
 
 app = FastAPI(title="Colony sim", lifespan=lifespan)
@@ -929,6 +982,8 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "tick": mission.world.tick,
+        "started": mission.started,
+        "running": mission.running,
         "memory": mission.memory_kind,
         "mode": mission.mode,
         "agents": sorted(mission.agents),
@@ -976,7 +1031,22 @@ async def restart(body: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "mode": mission.mode,
         "tick": mission.world.tick,
+        "started": mission.started,
+        "running": mission.running,
         "previous": mission.last_runs,
+    }
+
+
+@app.post("/api/mission/start")
+async def start_mission() -> dict[str, Any]:
+    """Release the prepared tick-0 mission into its 4 Hz loop."""
+    started_now = await mission.start()
+    return {
+        "started": mission.started,
+        "running": mission.running,
+        "started_now": started_now,
+        "tick": mission.world.tick,
+        "mode": mission.mode,
     }
 
 
